@@ -1,0 +1,107 @@
+.cl-notice {
+	&__icon {
+		padding: 5px;
+		.el-badge__content {
+			transform: translateY(-50%) translateX(100%) scale(0.8) !important;
+		}
+	}
+}
+
+.message-table-container {
+	.message-title-cell {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+	}
+
+	.unread-dot {
+		width: 8px;
+		height: 8px;
+		background-color: #f56c6c;
+		border-radius: 50%;
+		display: inline-block;
+	}
+	.unread-row {
+		// background-color: #f0f9ff;
+		// border-left: 3px solid #409eff;
+		--el-table-tr-bg-color: var(--el-color-warning-light-9);
+	}
+
+	// 表格行样式
+	:deep(.el-table) {
+		// 减小表格行高度
+		.el-table__row {
+			height: 48px !important;
+		}
+
+		.el-table__cell {
+			padding: 8px 0 !important;
+		}
+
+		// 表头行高度
+		.el-table__header-row {
+			height: 40px !important;
+		}
+
+		.read-row {
+			background-color: #fafafa;
+			opacity: 0.7;
+		}
+
+		.unread-row {
+			background-color: #f0f9ff;
+			border-left: 3px solid #409eff;
+		}
+
+		.el-table__row:hover {
+			background-color: #f5f7fa !important;
+		}
+	}
+
+	// 分页容器样式
+	.pagination-container {
+		margin-top: 20px;
+		display: flex;
+		justify-content: center;
+	}
+}
+
+// 消息类型标签样式
+.el-tag {
+	&.el-tag--primary {
+		background-color: #ecf5ff;
+		border-color: #b3d8ff;
+		color: #409eff;
+	}
+
+	&.el-tag--success {
+		background-color: #f0f9ff;
+		border-color: #b3e19d;
+		color: #67c23a;
+	}
+
+	&.el-tag--warning {
+		background-color: #fdf6ec;
+		border-color: #f5dab1;
+		color: #e6a23c;
+	}
+
+	&.el-tag--danger {
+		background-color: #fef0f0;
+		border-color: #fbc4c4;
+		color: #f56c6c;
+	}
+
+	&.el-tag--info {
+		background-color: #f4f4f5;
+		border-color: #d3d4d6;
+		color: #909399;
+	}
+}
+
+// 高级搜索弹窗样式
+.el-drawer {
+	.el-drawer__header {
+		margin-bottom: 0 !important;
+	}
+}

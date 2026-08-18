@@ -1,0 +1,144 @@
+version: '3'
+
+includes:
+  common: ../Taskfile.yml
+
+tasks:
+  build:
+    summary: Creates a production build of the application
+    deps:
+      - task: common:go:mod:tidy
+      # - task: common:build:frontend
+      - task: common:generate:icons
+    cmds:
+      - go build {{.BUILD_FLAGS}} -o {{.OUTPUT}}
+    vars:
+      # BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+      # BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,sqlite_omit_load_extension -buildvcs=false -ldflags="-w -s"{{else}}-tags sqlite_omit_load_extension -buildvcs=false -gcflags=all="-l"{{end}}'
+      DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
+      OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
+    env:
+      GOOS: darwin
+      CGO_ENABLED: 1
+      GOARCH: '{{.ARCH | default ARCH}}'
+      CGO_CFLAGS: "-mmacosx-version-min=10.15"
+      CGO_LDFLAGS: "-mmacosx-version-min=10.15"
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      PRODUCTION: '{{.PRODUCTION | default "false"}}'
+
+  build:amd64:
+    summary: Builds darwin amd64 binary only
+    deps:
+      - task: build
+        vars:
+          ARCH: amd64
+          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-amd64"
+          PRODUCTION: "true"
+
+  build:universal:
+    summary: Builds darwin universal binary (arm64 + amd64)
+    deps:
+      - task: build
+        vars:
+          ARCH: amd64
+          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-amd64"
+      - task: build
+        vars:
+          ARCH: arm64
+          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
+    cmds:
+      - lipo -create -output "{{.BIN_DIR}}/{{.APP_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}-amd64" "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
+      - rm "{{.BIN_DIR}}/{{.APP_NAME}}-amd64" "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
+
+  package:
+    summary: Packages a production build of the application into a `.app` bundle
+    deps:
+      - task: build
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - task: create:app:bundle
+
+  package:amd64:
+    summary: Packages darwin amd64 binary into a `.app` bundle
+    deps:
+      - task: build:amd64
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - task: create:app:bundle:amd64
+
+  package:universal:
+    summary: Packages darwin universal binary (arm64 + amd64)
+    deps:
+      - task: build:universal
+    cmds:
+      - task: create:app:bundle
+
+
+  create:app:bundle:
+    summary: Creates an `.app` bundle
+    cmds:
+      - mkdir -p {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/{MacOS,Resources}
+      - cp build/darwin/icons.icns {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources
+      - cp {{.BIN_DIR}}/{{.APP_NAME}} {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS
+      - cp build/darwin/Info.plist {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents
+
+  create:app:bundle:amd64:
+    summary: Creates an `.app` bundle for amd64 binary
+    cmds:
+      - mkdir -p {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/{MacOS,Resources}
+      - cp build/darwin/icons.icns {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/Resources
+      - cp {{.BIN_DIR}}/{{.APP_NAME}}-amd64 {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/MacOS
+      - cp build/darwin/Info.plist {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents
+      - sed -i '' 's/<string>dzh3159<\/string>/<string>dzh3159-amd64<\/string>/' {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/Info.plist
+
+  run:
+    cmds:
+      - '{{.BIN_DIR}}/{{.APP_NAME}}'
+
+  dmg:
+    summary: Creates a DMG disk image for distribution
+    deps:
+      - task: package
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - task: create:dmg:default
+
+  dmg:amd64:
+    summary: Creates a DMG disk image for amd64 distribution
+    deps:
+      - task: package:amd64
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - task: create:dmg:amd64
+
+  dmg:universal:
+    summary: Creates a DMG disk image for universal binary distribution
+    deps:
+      - task: package:universal
+    cmds:
+      - task: create:dmg:universal
+
+  create:dmg:default:
+    summary: Creates a DMG disk image (default)
+    cmds:
+      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} default
+
+  create:dmg:
+    summary: Creates a DMG disk image
+    cmds:
+      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} universal
+
+  create:dmg:amd64:
+    summary: Creates a DMG disk image for amd64
+    cmds:
+      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} amd64
+
+  create:dmg:universal:
+    summary: Creates a DMG disk image for universal
+    cmds:
+      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} universal

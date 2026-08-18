@@ -1,0 +1,14 @@
+[
+  {
+    "id": 1,
+    "createTime": "2022-07-06 14:18:53.841000",
+    "updateTime": "2022-07-06 14:19:10.954000",
+    "typeId": 1,
+    "name": "衣服",
+    "value": "clothing",
+    "orderNum": 1,
+    "remark": null,
+    "parentId": null,
+    "addonsName" : "base"
+  }
+]

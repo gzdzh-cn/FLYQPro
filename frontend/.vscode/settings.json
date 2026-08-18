@@ -1,0 +1,5 @@
+{
+	"editor.cursorSmoothCaretAnimation": "on",
+	"editor.formatOnSave": true,
+	"bitoAI.codeCompletion.enableAutoCompletion": false,
+}

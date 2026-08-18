@@ -1,0 +1,10 @@
+{
+  "name": "dict",
+  "title": "字典管理",
+  "menuId": "1152921504606847024",
+  "builtin": true,
+  "tables": [
+    "addons_dict_info",
+    "addons_dict_type"
+  ]
+}

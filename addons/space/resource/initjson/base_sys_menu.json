@@ -1,0 +1,18 @@
+[
+  {
+    "id": "1152921504606847031",
+    "parentId": null,
+    "name": "空间管理",
+    "router": null,
+    "perms": null,
+    "type": 0,
+    "icon": "icon-folder",
+    "orderNum": 98,
+    "viewPath": null,
+    "keepAlive": 1,
+    "isShow": 1,
+    "isInstall": 1,
+    "menuType": "addon",
+    "addonsName": "space"
+  }
+]
