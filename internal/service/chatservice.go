@@ -265,6 +265,7 @@ func (s *ChatService) RunNetworkDiagnostic() chat.DiagnosticResult {
 		{Name: "可用网卡", Status: statusOf(len(status.Interfaces) > 0), Detail: strings.Join(status.Interfaces, ", "), Advice: "请连接 Wi-Fi 或有线网络。"},
 		{Name: "局域网 IP", Status: statusOf(len(status.LocalIPs) > 0), Detail: strings.Join(status.LocalIPs, ", "), Advice: "请检查系统网络配置。"},
 		{Name: "UDP 发现端口", Status: statusOf(status.DiscoveryPort > 0), Detail: fmt.Sprintf("UDP %d", status.DiscoveryPort), Advice: "如果没有设备响应，可能被防火墙或 AP 隔离阻止。"},
+		{Name: "UDP 发现发送", Status: statusOf(status.LastError == ""), Detail: discoverySendDetail(status.LastError), Advice: "请检查系统防火墙是否允许 UDP 39190 的入站和出站通信。"},
 		{Name: "TCP/TLS 聊天端口", Status: statusOf(status.ChatPort > 0), Detail: fmt.Sprintf("TCP %d", status.ChatPort), Advice: "请允许应用通过系统防火墙。"},
 		{Name: "已发现设备", Status: statusOf(status.PeerCount > 0), Detail: fmt.Sprintf("%d 台，在线 %d 台", status.PeerCount, status.OnlineCount), Advice: "请确认双方处于同一局域网且已开启允许被发现。"},
 	}
@@ -279,6 +280,13 @@ func (s *ChatService) RunNetworkDiagnostic() chat.DiagnosticResult {
 		}
 	}
 	return chat.DiagnosticResult{Status: resultStatus, Items: items, CreatedAt: status.LastScanAt}
+}
+
+func discoverySendDetail(lastError string) string {
+	if lastError != "" {
+		return "发送失败: " + lastError
+	}
+	return "广播和同子网单播探测已发送"
 }
 
 func statusOf(ok bool) string {

@@ -33,6 +33,8 @@ type Engine struct {
 	done     chan struct{}
 	peers    map[string]Peer
 	incoming map[string]*incomingFile
+	lastScan time.Time
+	lastErr  string
 	started  bool
 }
 
@@ -100,7 +102,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.acceptLoop()
 	go e.discoveryLoop()
 	go e.scanLoop()
-	go e.broadcastDiscovery()
+	go e.scanNetwork(true)
 	e.emit("chat:network-status", e.NetworkStatus())
 	return nil
 }
@@ -319,10 +321,15 @@ func (e *Engine) discoveryLoop() {
 func (e *Engine) scanLoop() {
 	ticker := time.NewTicker(6 * time.Second)
 	defer ticker.Stop()
+	lastUnicastProbe := time.Now()
 	for {
 		select {
 		case <-ticker.C:
-			e.broadcastDiscovery()
+			unicastProbe := time.Since(lastUnicastProbe) >= 30*time.Second
+			e.scanNetwork(unicastProbe)
+			if unicastProbe {
+				lastUnicastProbe = time.Now()
+			}
 		case <-e.stop:
 			return
 		}
@@ -333,7 +340,7 @@ func (e *Engine) scanLoop() {
 // periodic scan ticker. It is used by the Discover page's manual refresh.
 func (e *Engine) Scan() {
 	if e.isStarted() {
-		e.broadcastDiscovery()
+		e.scanNetwork(true)
 	}
 }
 
@@ -343,15 +350,30 @@ func (e *Engine) isStarted() bool {
 	return e.started
 }
 
-func (e *Engine) broadcastDiscovery() {
+func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	message := e.helloMessage("discover")
-	addresses := broadcastAddresses()
-	if len(addresses) == 0 {
-		addresses = []string{"255.255.255.255"}
+	targets := broadcastAddresses()
+	if len(targets) == 0 {
+		targets = []net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
 	}
-	for _, address := range addresses {
-		_ = e.sendDiscovery(&net.UDPAddr{IP: net.ParseIP(address), Port: DiscoveryPort}, message)
+	if includeUnicastProbe {
+		targets = append(targets, localSubnetTargets()...)
 	}
+
+	var firstErr error
+	for index := range targets {
+		if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	e.mu.Lock()
+	e.lastScan = time.Now()
+	if firstErr != nil {
+		e.lastErr = firstErr.Error()
+	} else {
+		e.lastErr = ""
+	}
+	e.mu.Unlock()
 	e.emit("chat:network-status", e.NetworkStatus())
 }
 
@@ -723,8 +745,14 @@ func (e *Engine) NetworkStatus() NetworkStatus {
 	}
 	e.mu.RLock()
 	chatPort := e.identity.Port
+	lastScan := e.lastScan
+	lastErr := e.lastErr
 	e.mu.RUnlock()
-	return NetworkStatus{Status: status, Interfaces: names, LocalIPs: ips, DiscoveryPort: DiscoveryPort, ChatPort: chatPort, PeerCount: len(peers), OnlineCount: online, LastScanAt: nowString()}
+	lastScanAt := ""
+	if !lastScan.IsZero() {
+		lastScanAt = lastScan.UTC().Format(time.RFC3339Nano)
+	}
+	return NetworkStatus{Status: status, Interfaces: names, LocalIPs: ips, DiscoveryPort: DiscoveryPort, ChatPort: chatPort, PeerCount: len(peers), OnlineCount: online, LastScanAt: lastScanAt, LastError: lastErr}
 }
 
 func (e *Engine) emit(name string, data any) {
@@ -740,9 +768,10 @@ func readWire(reader io.Reader, message *wireMessage) error {
 	return json.NewDecoder(reader).Decode(message)
 }
 
-func broadcastAddresses() []string {
+func broadcastAddresses() []net.UDPAddr {
 	interfaces, _ := net.Interfaces()
-	result := make([]string, 0)
+	result := make([]net.UDPAddr, 0)
+	seen := make(map[string]struct{})
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -759,7 +788,63 @@ func broadcastAddresses() []string {
 				continue
 			}
 			broadcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
-			result = append(result, broadcast.String())
+			key := broadcast.String()
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, net.UDPAddr{IP: broadcast, Port: DiscoveryPort})
+			}
+		}
+	}
+	return result
+}
+
+// localSubnetTargets adds a bounded unicast fallback for networks that block
+// UDP broadcasts, such as phone hotspots and restrictive Wi-Fi access points.
+func localSubnetTargets() []net.UDPAddr {
+	interfaces, _ := net.Interfaces()
+	result := make([]net.UDPAddr, 0)
+	seen := make(map[string]struct{})
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, _ := iface.Addrs()
+		for _, address := range addresses {
+			ipNet, ok := address.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			for _, target := range subnetHostTargets(ipNet) {
+				key := target.String()
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				result = append(result, net.UDPAddr{IP: target, Port: DiscoveryPort})
+			}
+		}
+	}
+	return result
+}
+
+func subnetHostTargets(ipNet *net.IPNet) []net.IP {
+	ip := ipNet.IP.To4()
+	mask := ipNet.Mask
+	ones, bits := mask.Size()
+	if ip == nil || bits != 32 || ones < 24 || ones > 30 {
+		return nil
+	}
+	hosts := 1 << (bits - ones)
+	if hosts > 256 {
+		return nil
+	}
+
+	network := ip.Mask(mask).To4()
+	result := make([]net.IP, 0, hosts-2)
+	for host := 1; host < hosts-1; host++ {
+		target := net.IPv4(network[0]|byte(host>>24), network[1]|byte(host>>16), network[2]|byte(host>>8), network[3]|byte(host))
+		if !target.Equal(ip) {
+			result = append(result, target)
 		}
 	}
 	return result
