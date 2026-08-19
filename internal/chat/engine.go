@@ -406,7 +406,9 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 		}
 	}
 	if includeUnicastProbe {
-		e.probeTCPSubnets(message, subnetTargets)
+		if probeErr := e.probeTCPSubnets(message, subnetTargets); probeErr != nil && firstErr == nil {
+			firstErr = probeErr
+		}
 	}
 	e.mu.Lock()
 	e.lastScan = time.Now()
@@ -419,10 +421,12 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	e.emit("chat:network-status", e.NetworkStatus())
 }
 
-func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) {
+func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) error {
 	const parallelism = 64
 	sem := make(chan struct{}, parallelism)
 	var wait sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
 	for index := range targets {
 		target := targets[index]
 		wait.Add(1)
@@ -447,12 +451,19 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) {
 			if response.IP == "" {
 				response.IP = target.IP.String()
 			}
-			if err := e.upsertWirePeer(response); err == nil {
+			if err := e.upsertWirePeer(response); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			} else {
 				e.emit("chat:peer-updated", e.Peers())
 			}
 		}()
 	}
 	wait.Wait()
+	return firstErr
 }
 
 func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {
