@@ -8,6 +8,42 @@
 
 ---
 
+## 界面预览
+
+### 亮色主题
+
+首屏预览：
+
+<a href="docs/images/亮色-1.jpg" target="_blank"><img src="docs/images/亮色-1.jpg" alt="首页-亮色" style="display:block;width:100%;max-width:1400px;height:auto"></a>
+
+其余页面：
+
+| 账单列表 | 表单演示 | 图标专栏 | 图表分析 |
+| --- | --- | --- | --- |
+| <a href="docs/images/亮色-2.jpg" target="_blank"><img src="docs/images/亮色-2.jpg" alt="账单列表-亮色" style="width:100%"></a> | <a href="docs/images/亮色-3.jpg" target="_blank"><img src="docs/images/亮色-3.jpg" alt="表单演示-亮色" style="width:100%"></a> | <a href="docs/images/亮色-4.jpg" target="_blank"><img src="docs/images/亮色-4.jpg" alt="图标专栏-亮色" style="width:100%"></a> | <a href="docs/images/亮色-5.jpg" target="_blank"><img src="docs/images/亮色-5.jpg" alt="图表分析-亮色" style="width:100%"></a> |
+
+| 通用组件 | 参数设置 | 设置页 |
+| --- | --- | --- |
+| <a href="docs/images/亮色-6.jpg" target="_blank"><img src="docs/images/亮色-6.jpg" alt="通用组件-亮色" style="width:100%"></a> | <a href="docs/images/亮色-7.jpg" target="_blank"><img src="docs/images/亮色-7.jpg" alt="参数设置-亮色" style="width:100%"></a> | <a href="docs/images/亮色-8.jpg" target="_blank"><img src="docs/images/亮色-8.jpg" alt="设置页-亮色" style="width:100%"></a> |
+
+### 暗色主题
+
+首屏预览：
+
+<a href="docs/images/暗色-1.jpg" target="_blank"><img src="docs/images/暗色-1.jpg" alt="首页-暗色" style="display:block;width:100%;max-width:1400px;height:auto"></a>
+
+其余页面：
+
+| 账单列表 | 表单演示 | 图标专栏 | 图表分析 |
+| --- | --- | --- | --- |
+| <a href="docs/images/暗色-2.jpg" target="_blank"><img src="docs/images/暗色-2.jpg" alt="账单列表-暗色" style="width:100%"></a> | <a href="docs/images/暗色-3.jpg" target="_blank"><img src="docs/images/暗色-3.jpg" alt="表单演示-暗色" style="width:100%"></a> | <a href="docs/images/暗色-4.jpg" target="_blank"><img src="docs/images/暗色-4.jpg" alt="图标专栏-暗色" style="width:100%"></a> | <a href="docs/images/暗色-5.jpg" target="_blank"><img src="docs/images/暗色-5.jpg" alt="图表分析-暗色" style="width:100%"></a> |
+
+| 通用组件 | 参数设置 | 设置页 |
+| --- | --- | --- |
+| <a href="docs/images/暗色-6.jpg" target="_blank"><img src="docs/images/暗色-6.jpg" alt="通用组件-暗色" style="width:100%"></a> | <a href="docs/images/暗色-7.jpg" target="_blank"><img src="docs/images/暗色-7.jpg" alt="参数设置-暗色" style="width:100%"></a> | <a href="docs/images/暗色-8.jpg" target="_blank"><img src="docs/images/暗色-8.jpg" alt="设置页-暗色" style="width:100%"></a> |
+
+> 点击首屏大图或其他缩略图可打开高清原图。
+
 # 快速开始
 
 ## 1. 环境准备
@@ -196,30 +232,6 @@ create-dmg bin/helpFly.dmg bin/helpFly.app --volname "helpFly" --overwrite
   - **通用组件**：Tabs / Steps / Timeline / Tag / Progress / Tree / Modal 等组件集合。
   - **参数设置**：系统名称、主题、语言、同步、通知、安全等配置表单；主题模式可真实切换全局外观。
 - **设置**（顶栏进入）：大量桌面调试能力。
-
-### 界面预览（亮色主题）
-
-> 以下截图按页面顺序展示：首页 → 账单列表 → 表单演示 → 图标专栏 → 图表分析 → 通用组件 → 参数设置 → 设置页。
-
-| 首页 | 账单列表 | 表单演示 | 图标专栏 |
-| --- | --- | --- | --- |
-| <a href="docs/images/亮色-1.jpg" target="_blank"><img src="docs/images/亮色-1.jpg" alt="首页-亮色" style="width:100%"></a> | <a href="docs/images/亮色-2.jpg" target="_blank"><img src="docs/images/亮色-2.jpg" alt="账单列表-亮色" style="width:100%"></a> | <a href="docs/images/亮色-3.jpg" target="_blank"><img src="docs/images/亮色-3.jpg" alt="表单演示-亮色" style="width:100%"></a> | <a href="docs/images/亮色-4.jpg" target="_blank"><img src="docs/images/亮色-4.jpg" alt="图标专栏-亮色" style="width:100%"></a> |
-
-| 图表分析 | 通用组件 | 参数设置 | 设置页 |
-| --- | --- | --- | --- |
-| <a href="docs/images/亮色-5.jpg" target="_blank"><img src="docs/images/亮色-5.jpg" alt="图表分析-亮色" style="width:100%"></a> | <a href="docs/images/亮色-6.jpg" target="_blank"><img src="docs/images/亮色-6.jpg" alt="通用组件-亮色" style="width:100%"></a> | <a href="docs/images/亮色-7.jpg" target="_blank"><img src="docs/images/亮色-7.jpg" alt="参数设置-亮色" style="width:100%"></a> | <a href="docs/images/亮色-8.jpg" target="_blank"><img src="docs/images/亮色-8.jpg" alt="设置页-亮色" style="width:100%"></a> |
-
-### 界面预览（暗色主题）
-
-| 首页 | 账单列表 | 表单演示 | 图标专栏 |
-| --- | --- | --- | --- |
-| <a href="docs/images/暗色-1.jpg" target="_blank"><img src="docs/images/暗色-1.jpg" alt="首页-暗色" style="width:100%"></a> | <a href="docs/images/暗色-2.jpg" target="_blank"><img src="docs/images/暗色-2.jpg" alt="账单列表-暗色" style="width:100%"></a> | <a href="docs/images/暗色-3.jpg" target="_blank"><img src="docs/images/暗色-3.jpg" alt="表单演示-暗色" style="width:100%"></a> | <a href="docs/images/暗色-4.jpg" target="_blank"><img src="docs/images/暗色-4.jpg" alt="图标专栏-暗色" style="width:100%"></a> |
-
-| 图表分析 | 通用组件 | 参数设置 | 设置页 |
-| --- | --- | --- | --- |
-| <a href="docs/images/暗色-5.jpg" target="_blank"><img src="docs/images/暗色-5.jpg" alt="图表分析-暗色" style="width:100%"></a> | <a href="docs/images/暗色-6.jpg" target="_blank"><img src="docs/images/暗色-6.jpg" alt="通用组件-暗色" style="width:100%"></a> | <a href="docs/images/暗色-7.jpg" target="_blank"><img src="docs/images/暗色-7.jpg" alt="参数设置-暗色" style="width:100%"></a> | <a href="docs/images/暗色-8.jpg" target="_blank"><img src="docs/images/暗色-8.jpg" alt="设置页-暗色" style="width:100%"></a> |
-
-> 提示：截图均以 `<a>` 包裹 `<img>` 实现点击放大——点击任意图片会在新标签页打开高清原图（`.jpg`）。若站点支持灯箱（如 VitePress），点击即可在原页内放大。
 
 ## 5. 后端服务
 
