@@ -1,5 +1,11 @@
 <template>
-  <div class="chat-app" :class="{ 'theme-dark': isDark }">
+  <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac }">
+    <div v-if="isMac" class="window-drag-region" aria-hidden="true"></div>
+    <div v-if="isMac" class="mac-window-controls" aria-label="macOS 窗口控制">
+      <button type="button" class="mac-control close" title="关闭" @click.stop="closeWindow"></button>
+      <button type="button" class="mac-control minimise" title="最小化" @click.stop="minimiseWindow"></button>
+      <button type="button" class="mac-control maximise" title="最大化" @click.stop="toggleMaximise"></button>
+    </div>
     <aside class="rail">
       <button class="profile-button" :class="{ active: section === 'settings' }" @click="openSettings('general')">
         <div class="avatar large" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
@@ -65,10 +71,12 @@
 
     <section v-else class="settings-shell">
       <header class="settings-head"><div><h2>设置</h2><p>管理个人资料、网络和应用行为</p></div><div class="settings-tabs"><button :class="{ active: settingsTab === 'general' }" @click="settingsTab = 'general'">通用</button><button :class="{ active: settingsTab === 'network' }" @click="settingsTab = 'network'">网络</button><button :class="{ active: settingsTab === 'device' }" @click="settingsTab = 'device'">设备信息</button><button :class="{ active: settingsTab === 'about' }" @click="settingsTab = 'about'">关于</button></div></header>
-      <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @click="chooseAvatar">选择头像</a-button><a-button @click="resetAvatar">恢复默认头像</a-button><a-button type="primary" @mousedown.prevent="saveProfile">保存资料</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 POPChat</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动点击接收</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><a-button @click="chooseDirectory">选择目录</a-button></div></section></main>
+      <div class="settings-panel">
+      <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @click="chooseAvatar">选择头像</a-button><a-button @mousedown.prevent="resetAvatar">恢复默认头像</a-button><a-button type="primary" @mousedown.prevent="saveProfile">保存资料</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 POPChat</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动点击接收</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><a-button @click="chooseDirectory">选择目录</a-button></div></section></main>
       <main class="settings-content" v-else-if="settingsTab === 'network'"><section class="setting-card network-card"><div class="network-summary"><div class="network-dot" :class="store.network.status" /><div><strong>{{ store.network.status === 'normal' ? '网络正常' : '网络需要检查' }}</strong><span>{{ store.network.localIps.join('、') || '尚未获取局域网地址' }}</span></div><a-button type="primary" @click="runDiagnostic">网络诊断</a-button></div><div class="diagnostic-list" v-if="diagnostic"><div v-for="item in diagnostic.items" :key="item.name" class="diagnostic-row"><span :class="['diagnostic-icon', item.status]">{{ item.status === 'ok' ? '✓' : '!' }}</span><div><strong>{{ item.name }}</strong><span>{{ item.detail }} · {{ item.status === 'ok' ? '正常' : item.advice }}</span></div></div></div></section><section class="setting-card"><h3>监听信息</h3><div class="setting-line"><div><strong>UDP 发现端口</strong><span>用于局域网设备发现</span></div><code>{{ store.network.discoveryPort }}</code></div><div class="setting-line"><div><strong>TCP/TLS 聊天端口</strong><span>用于好友连接和消息传输</span></div><code>{{ store.network.chatPort || '启动中' }}</code></div><div class="setting-line"><div><strong>设备状态</strong><span>{{ store.network.peerCount }} 台已发现，{{ store.network.onlineCount }} 台在线</span></div><a-button @click="refreshPeers">重新扫描</a-button></div></section></main>
-      <main class="settings-content" v-else-if="settingsTab === 'device'"><section class="setting-card device-card"><div class="avatar huge" :style="avatarStyle(editProfile.nickname)">{{ initials(editProfile.nickname) }}</div><div class="device-fields"><label>平台<strong>{{ deviceInfo?.platform }}</strong></label><label>操作系统<strong>{{ deviceInfo?.osVersion }}</strong></label><label>设备 ID<strong class="mono">{{ deviceInfo?.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ deviceInfo?.certificateFingerprint }}</strong></label></div></section></main>
-      <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2>POPChat</h2><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>0.1.0</strong></span><span>协议版本<strong>LANChat/1.0</strong></span><span>数据存储<strong>本地 SQLite</strong></span></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
+      <main class="settings-content" v-else-if="settingsTab === 'device'"><section class="setting-card device-card"><div class="device-fields"><label>平台<strong>{{ deviceInfo?.platform }}</strong></label><label>操作系统<strong>{{ deviceInfo?.osVersion }}</strong></label><label>设备 ID<strong class="mono">{{ deviceInfo?.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ deviceInfo?.certificateFingerprint }}</strong></label></div></section></main>
+      <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2>POPChat</h2><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>0.1.0</strong></span><span>协议版本<strong>POPChat/1.0</strong></span><span>数据存储<strong>本地 SQLite</strong></span></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
+      </div>
     </section>
     <a-modal v-model:visible="termsVisible" title="使用条款与隐私说明" hide-cancel><p>POPChat 仅在局域网内进行点对点通信。聊天记录、设备信息和附件保存在本机，不上传云端。请确认你有权在当前网络中发现和联系其他设备。</p></a-modal>
   </div>
@@ -77,6 +85,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
+import { System, Window } from '@wailsio/runtime'
 import { ChatService } from '/#/helpfly/internal/service'
 import { useChatStore } from '@/store/modules/chat'
 import type { FriendRequest, Peer } from '@/store/modules/chat/types'
@@ -94,6 +103,7 @@ const termsVisible = ref(false)
 const diagnostic = ref<any>()
 const deviceInfo = ref<any>()
 const isDark = ref(false)
+const isMac = ref(false)
 const editProfile = reactive({ ...store.profile })
 const groups = reactive({ requests: true, discovered: true })
 
@@ -108,12 +118,12 @@ function applyTheme(theme: string) { const dark = theme === 'dark' || (theme ===
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus() } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
 function selectPeer(peer: Peer) { store.selectPeer(peer.deviceId); showPeerInfo.value = false; ChatService.EnsureConversation(peer.deviceId).then((id) => ChatService.ListMessages(id).then((messages) => { store.messages[id] = messages })) }
 function openSettings(tab: string) { section.value = 'settings'; settingsTab.value = tab }
-async function saveProfile() { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
+async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
 function syncNickname() { editProfile.nickname = editProfile.nickname.trim() }
-async function toggleStartup() { try { store.profile = await ChatService.SetLaunchAtStartup(editProfile.launchAtStartup); Object.assign(editProfile, store.profile); Message.success(editProfile.launchAtStartup ? '已开启开机启动' : '已关闭开机启动') } catch (error: any) { editProfile.launchAtStartup = !editProfile.launchAtStartup; Message.error(error?.message || '设置失败') } }
+async function toggleStartup() { try { store.profile = await ChatService.SetLaunchAtStartup(editProfile.launchAtStartup); Object.assign(editProfile, store.profile) } catch (error: any) { editProfile.launchAtStartup = !editProfile.launchAtStartup; Message.error(error?.message || '设置失败') } }
 async function chooseDirectory() { const path = await ChatService.PickDirectory(); if (path) { editProfile.fileSavePath = path; await saveProfile() } }
 async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
-async function resetAvatar() { try { store.profile = await ChatService.ResetAvatar(); Object.assign(editProfile, store.profile); Message.success('已恢复默认头像') } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
+async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme) } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
 async function refreshPeers() { store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') }
 async function addPeer() { if (!selectedDiscovery.value) return; try { await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
 async function acceptRequest() { if (!selectedRequest.value) return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
@@ -124,9 +134,12 @@ async function acceptAttachment(message: any) { try { await ChatService.AcceptAt
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 async function runDiagnostic() { diagnostic.value = await ChatService.RunNetworkDiagnostic() }
+function minimiseWindow() { Window.Minimise() }
+async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
+function closeWindow() { Window.Close() }
 watch(() => store.profile, (value) => Object.assign(editProfile, value), { deep: true })
 watch(() => editProfile.theme, (value) => applyTheme(value))
-onMounted(load)
+onMounted(() => { isMac.value = System.IsMac(); load() })
 </script>
 
 <style scoped lang="less">
@@ -141,7 +154,6 @@ onMounted(load)
  .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
 
 .chat-app.theme-dark { background: #101827; color: #e5e7eb; }
-.chat-app.theme-dark .list-pane,
 .chat-app.theme-dark .conversation-head,
 .chat-app.theme-dark .composer,
 .chat-app.theme-dark .info-pane,
@@ -186,4 +198,319 @@ onMounted(load)
 .chat-app.theme-dark .diagnostic-row { border-color: #2c394e; }
 .chat-app.theme-dark .group-title b { background: #203c69; color: #8db5ff; }
 .chat-app.theme-dark .detail-card { box-shadow: 0 16px 50px rgba(0, 0, 0, .24); }
+
+/* Final surface system: the app is intentionally divided into distinct layers. */
+.chat-app:not(.theme-dark) {
+  --app-bg: #edf0f3;
+  --surface-1: #f7f8fa;
+  --surface-2: #e6eaef;
+  --surface-3: #dde3e9;
+  --surface-4: #d3dae2;
+  --line: #cfd6de;
+  --text: #20252b;
+  --muted: #5d6874;
+  --hover: #e1e7ef;
+  --list-bg: #f1f3f6;
+  --accent: #5c7398;
+  --shadow: 0 12px 30px rgba(37, 48, 62, .08);
+}
+.chat-app.theme-dark {
+  --app-bg: #0f1115;
+  --surface-1: #15181d;
+  --surface-2: #1b2027;
+  --surface-3: #242a32;
+  --surface-4: #2d343d;
+  --line: #39424d;
+  --text: #f0f2f5;
+  --muted: #a4adb8;
+  --hover: #2a3442;
+  --list-bg: #202428;
+  --accent: #7897d0;
+  --shadow: 0 14px 36px rgba(0, 0, 0, .28);
+}
+.chat-app,
+.chat-app .workspace,
+.chat-app .settings-shell { background: var(--app-bg); color: var(--text); }
+.chat-app .list-pane,
+.chat-app .conversation-head,
+.chat-app .composer,
+.chat-app .info-pane,
+.chat-app .settings-head,
+.chat-app .settings-nav,
+.chat-app .setting-card,
+.chat-app .detail-card { background: var(--surface-1); color: var(--text); border-color: var(--line); }
+.chat-app .message-scroll,
+.chat-app .detail-pane,
+.chat-app .settings-panel { background: var(--app-bg); }
+.chat-app .list-pane { border-right-color: var(--line); }
+.chat-app .conversation-head,
+.chat-app .composer { border-color: var(--line); }
+.chat-app .peer-row:hover,
+.chat-app .request-row:hover,
+.chat-app .peer-row.selected,
+.chat-app .request-row.selected { background: var(--hover); }
+.chat-app .message-bubble { background: var(--surface-1); color: var(--text); box-shadow: var(--shadow); }
+.chat-app .composer textarea { background: transparent; color: var(--text); }
+.chat-app .composer textarea::placeholder { color: var(--muted); }
+.chat-app .pane-title span,
+.chat-app .peer-copy span,
+.chat-app .request-row span,
+.chat-app .head-peer span,
+.chat-app .settings-head p,
+.chat-app .profile-edit p,
+.chat-app .setting-line span,
+.chat-app .subtle,
+.chat-app .detail-card p,
+.chat-app .composer-foot { color: var(--muted); }
+.chat-app .info-fields strong,
+.chat-app .basic-info strong,
+.chat-app .device-fields strong,
+.chat-app .about-rows strong { color: var(--text); }
+.chat-app .setting-line,
+.chat-app .about-rows span,
+.chat-app .diagnostic-list,
+.chat-app .diagnostic-row { border-color: var(--line); }
+
+.settings-shell { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.settings-head { flex: 0 0 auto; padding: 28px 34px 22px; border-bottom: 1px solid var(--line); }
+.settings-head h2 { margin: 0 0 6px; color: var(--text); font-size: 25px; }
+.settings-head p { margin: 0; color: var(--muted); }
+.settings-layout { flex: 1; min-height: 0; min-width: 0; display: grid; grid-template-columns: 226px minmax(0, 1fr); }
+.settings-nav { min-width: 0; padding: 18px 12px; border-right: 1px solid var(--line); }
+.settings-nav button { width: 100%; display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: 22px 18px; column-gap: 8px; align-items: center; border: 0; border-radius: 12px; padding: 12px 12px; margin-bottom: 7px; background: transparent; color: var(--muted); text-align: left; cursor: pointer; transition: background .18s ease, color .18s ease; }
+.settings-nav button > span { grid-row: 1 / span 2; align-self: center; text-align: center; font-size: 20px; color: currentColor; }
+.settings-nav button strong { color: inherit; font-size: 14px; font-weight: 600; }
+.settings-nav button small { color: inherit; font-size: 11px; line-height: 16px; opacity: .8; }
+.settings-nav button:hover { background: var(--hover); color: var(--text); }
+.settings-nav button.active { background: #315fbd; color: #fff; box-shadow: 0 6px 16px rgba(49, 95, 189, .24); }
+.settings-nav button.active small { color: #dce8ff; }
+.settings-panel { min-width: 0; min-height: 0; overflow: auto; }
+.settings-content { width: 100%; max-width: none; box-sizing: border-box; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 18px; padding: 28px 34px 56px; }
+.settings-content > .setting-card { min-width: 0; margin: 0; }
+.settings-content > .profile-card,
+.settings-content > .network-card,
+.settings-content > .device-card { grid-column: 1 / -1; }
+.settings-content > .network-card + .setting-card { grid-column: 1 / -1; }
+.setting-card { border: 1px solid var(--line); border-radius: 14px; box-shadow: none; }
+.settings-content .setting-card h3 { color: var(--text); }
+.profile-card { min-height: 154px; }
+.device-card { display: block; min-height: 190px; }
+.device-card .device-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 42px; padding: 10px 8px; }
+.device-card .device-fields label { min-width: 0; }
+.about-card { width: min(760px, 100%); justify-self: center; }
+
+.chat-app.theme-dark .settings-nav,
+.chat-app.theme-dark .settings-panel,
+.chat-app.theme-dark .settings-head { background: var(--surface-1); }
+.chat-app.theme-dark .settings-panel { background: var(--app-bg); }
+.chat-app.theme-dark .setting-card { background: var(--surface-2); }
+.chat-app.theme-dark .setting-card:hover { border-color: #4a5664; }
+.chat-app.theme-dark .settings-nav button.active { background: #426fc9; }
+.chat-app.theme-dark .settings-nav button:hover:not(.active) { background: var(--hover); }
+.chat-app.theme-dark :deep(.arco-input-wrapper),
+.chat-app.theme-dark :deep(.arco-select-view),
+.chat-app.theme-dark :deep(.arco-textarea-wrapper) { background: var(--surface-3); border-color: var(--line); color: var(--text); }
+.chat-app.theme-dark :deep(.arco-input),
+.chat-app.theme-dark :deep(.arco-textarea),
+.chat-app.theme-dark :deep(.arco-select-view-value) { color: var(--text); }
+.chat-app.theme-dark :deep(.arco-input::placeholder),
+.chat-app.theme-dark :deep(.arco-textarea::placeholder) { color: var(--muted); }
+:global(body.popchat-dark .arco-trigger-popup),
+:global(body.popchat-dark .arco-select-popup),
+:global(body.popchat-dark .arco-modal-container) { background: #1b2027; color: #f0f2f5; border-color: #39424d; }
+
+@media (max-width: 1050px) {
+  .settings-layout { grid-template-columns: 196px minmax(0, 1fr); }
+  .settings-content { padding: 24px 24px 48px; gap: 14px; }
+}
+@media (max-width: 860px) {
+  .settings-layout { grid-template-columns: 176px minmax(0, 1fr); }
+  .settings-content { grid-template-columns: minmax(0, 1fr); }
+  .settings-content > .setting-card { grid-column: 1; }
+  .device-card .device-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Compact, unified navigation and the original top-level settings tabs. */
+.rail { width: 64px; flex-basis: 64px; padding: 18px 7px 14px; background: var(--surface-2); color: var(--muted); border-right: 1px solid var(--line); }
+.profile-button, .rail-nav button, .rail-settings { color: var(--muted); }
+.rail-nav button, .rail-settings { width: 50px; height: 54px; }
+.rail-nav button.active, .rail-settings.active { color: #fff; background: var(--accent); box-shadow: 0 5px 14px rgba(73, 109, 182, .18); }
+.rail-nav button:hover:not(.active), .rail-settings:hover:not(.active), .profile-button:hover { background: var(--hover); color: var(--text); }
+.settings-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.settings-tabs { display: flex; align-items: flex-end; gap: 26px; }
+.settings-tabs button { color: var(--muted); }
+.settings-tabs button:hover { color: var(--text); }
+.settings-tabs button.active { color: var(--accent); border-color: var(--accent); }
+.settings-panel { flex: 1; min-height: 0; min-width: 0; overflow: auto; }
+.settings-content { grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(100%, 1320px); margin: 0 auto; }
+.chat-app.theme-dark .settings-head { background: var(--surface-2); }
+.chat-app.theme-dark .settings-tabs button.active { color: #8eafff; border-color: #8eafff; }
+.chat-app.theme-dark .rail { background: var(--surface-2); }
+.chat-app.theme-dark .rail-nav button.active, .chat-app.theme-dark .rail-settings.active { background: var(--accent); }
+
+@media (min-width: 1250px) {
+  .settings-content { padding-left: 48px; padding-right: 48px; }
+}
+
+/* Return settings to the original single-column rhythm, but center it in the available window. */
+.chat-app .list-pane,
+.chat-app .discovery-pane { background: var(--list-bg); }
+.settings-content { grid-template-columns: minmax(0, 1fr); width: min(100%, 980px); padding: 28px 40px 56px; gap: 16px; }
+.settings-content > .setting-card,
+.settings-content > .profile-card,
+.settings-content > .network-card,
+.settings-content > .device-card,
+.settings-content > .network-card + .setting-card { grid-column: auto; }
+.settings-content > .setting-card { width: 100%; }
+.device-card .device-fields { grid-template-columns: minmax(0, 1fr); max-width: 720px; margin: 0 auto; }
+.about-card { width: min(100%, 760px); margin-left: auto; margin-right: auto; }
+
+@media (max-width: 760px) {
+  .settings-head { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .settings-tabs { width: 100%; justify-content: space-between; gap: 12px; overflow-x: auto; }
+  .settings-content { padding-left: 24px; padding-right: 24px; }
+}
+
+/* The about page is a centered card, not a full-window colored panel. */
+.chat-app .settings-panel,
+.chat-app .settings-content,
+.chat-app .settings-content > .setting-card { background: var(--surface-1); }
+.chat-app.theme-dark .setting-card,
+.chat-app.theme-dark .settings-content > .about-card { background: var(--surface-1); }
+.settings-content { width: min(1180px, calc(100% - clamp(32px, 7vw, 120px))); max-width: none; padding: 28px 0 56px; }
+.settings-content > .about-card { width: min(760px, 100%); justify-self: center; }
+.about-card { min-height: 0; padding: 44px 52px; }
+
+/* Keep every settings page inside the visible window at narrow sizes. */
+.settings-shell,
+.settings-panel,
+.settings-content,
+.settings-content > .setting-card { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.settings-content > .setting-card { box-sizing: border-box; }
+.profile-card { min-width: 0; }
+.profile-edit { min-width: 0; }
+.profile-edit :deep(.arco-input-wrapper) { max-width: 100%; }
+.setting-line { min-width: 0; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+.setting-line > div { min-width: 0; flex: 1 1 240px; }
+.setting-line > code,
+.setting-line > :deep(.arco-btn),
+.setting-line > :deep(.arco-select-view) { flex: 0 0 auto; max-width: 100%; }
+.network-summary { min-width: 0; flex-wrap: wrap; }
+.network-summary > div:nth-child(2) { min-width: 0; flex: 1 1 240px; }
+.network-summary > :deep(.arco-btn) { flex: 0 0 auto; }
+.path,
+.mono,
+.info-fields strong,
+.basic-info strong,
+.device-fields strong { min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.device-card .device-fields { min-width: 0; width: 100%; }
+.about-card { box-sizing: border-box; }
+
+@media (max-width: 1050px) {
+  .settings-content { width: calc(100% - 32px); }
+  .setting-card { padding-left: 22px; padding-right: 22px; }
+  .profile-card { gap: 18px; }
+}
+
+/* Selected navigation follows the current neutral surface instead of using a blue fill. */
+.rail-nav button.active,
+.rail-settings.active { box-sizing: border-box; color: var(--text); background: var(--surface-4); border-left: 3px solid var(--accent); box-shadow: none; }
+.rail-nav button.active:hover,
+.rail-settings.active:hover { background: var(--surface-4); color: var(--text); }
+.chat-app.theme-dark .rail-nav button.active,
+.chat-app.theme-dark .rail-settings.active { background: var(--surface-4); color: var(--text); }
+.settings-tabs button.active { color: var(--accent); border-color: var(--accent); }
+
+/* Friends and discovery right panes use the same content surface as settings. */
+.chat-app .conversation,
+.chat-app .message-scroll,
+.chat-app .blank-state,
+.chat-app .detail-pane { background: var(--surface-1); }
+.chat-app .conversation-head,
+.chat-app .composer,
+.chat-app .info-pane { background: var(--surface-1); }
+.chat-app.theme-dark .list-pane,
+.chat-app.theme-dark .discovery-pane { background: var(--list-bg); }
+.chat-app.theme-dark .message-scroll,
+.chat-app.theme-dark .detail-pane { background: var(--surface-1); }
+.chat-app.theme-dark .list-pane .peer-row:hover,
+.chat-app.theme-dark .list-pane .peer-row.selected,
+.chat-app.theme-dark .discovery-pane .request-row:hover,
+.chat-app.theme-dark .discovery-pane .request-row.selected { background: #2b3035; }
+.chat-app:not(.theme-dark) .list-pane .peer-row:hover,
+.chat-app:not(.theme-dark) .list-pane .peer-row.selected,
+.chat-app:not(.theme-dark) .discovery-pane .request-row:hover,
+.chat-app:not(.theme-dark) .discovery-pane .request-row.selected { background: #e8e5e1; }
+
+/* macOS-only frameless chrome. Windows keeps its native framed titlebar and the
+   right-side layout does not receive any extra titlebar padding. */
+:global(html),
+:global(body),
+:global(#app) { background: transparent; }
+.chat-app { position: relative; border-radius: 16px; overflow: hidden; }
+.window-drag-region {
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  --wails-draggable: drag;
+  --wails-non-client-region: caption;
+  background: transparent;
+}
+.mac-window-controls {
+  position: fixed;
+  z-index: 30;
+  top: 10px;
+  left: 8px;
+  width: 48px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mac-control {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, .18), 0 1px 2px rgba(0, 0, 0, .12);
+  position: relative;
+}
+.mac-control.close { background: #ff5f57; }
+.mac-control.minimise { background: #febc2e; }
+.mac-control.maximise { background: #28c840; }
+.mac-control::before {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(58, 38, 20, .78);
+  font-family: Arial, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 1;
+}
+.mac-control.close::before { content: '×'; color: rgba(75, 18, 15, .82); }
+.mac-control.minimise::before { content: '−'; color: rgba(83, 54, 7, .86); }
+.mac-control.maximise::before { content: '＋'; color: rgba(12, 72, 25, .82); font-size: 8px; }
+.mac-control:hover { filter: brightness(.9); }
+.mac-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-app.is-mac .rail {
+  position: relative;
+  z-index: 1;
+  padding-top: 48px;
+}
+.workspace > .list-pane,
+.workspace > .conversation,
+.workspace > .detail-pane,
+.workspace > .blank-state,
+.workspace > .info-pane { min-height: 0; }
+
 </style>

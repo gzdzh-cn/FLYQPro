@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"runtime"
 
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -39,18 +40,28 @@ func main() {
 	})
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-			Title:            "POPChat",
-		Width:            1280,
-		Height:           800,
-		MinWidth:         1100,
-		MinHeight:        720,
-		BackgroundColour: application.NewRGB(255, 255, 255),
-		Windows:          application.WindowsWindow{Theme: 0},
-		Mac: application.MacWindow{
-			Backdrop: application.MacBackdropNormal,
-			TitleBar: application.MacTitleBarDefault,
+		Title:            "POPChat",
+		Frameless:        runtime.GOOS == "darwin",
+		Width:            1100,
+		Height:           700,
+		MinWidth:         980,
+		MinHeight:        640,
+		BackgroundType:   application.BackgroundTypeTransparent,
+		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
+		Windows: application.WindowsWindow{
+			Theme:                  0,
+			NonClientRegionSupport: true,
 		},
-		URL: "/",
+		Mac: application.MacWindow{
+			Backdrop:     application.MacBackdropTransparent,
+			CornerType:   application.MacWindowCornerTypeRounded,
+			CornerRadius: 16,
+			TitleBar:     application.MacTitleBarHiddenInsetUnified,
+		},
+		MinimiseButtonState: application.ButtonEnabled,
+		MaximiseButtonState: application.ButtonEnabled,
+		CloseButtonState:    application.ButtonEnabled,
+		URL:                 "/",
 	})
 
 	if err := chatService.Start(); err != nil {

@@ -3,6 +3,8 @@ package chat
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -128,7 +130,25 @@ func GetProfile(ctx context.Context) (Profile, error) {
 		return Profile{}, fmt.Errorf("个人资料不存在")
 	}
 	row := rows[0]
-	return Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}, nil
+	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	if legacyPath, err := legacyAttachmentDir(); err == nil && filepath.Clean(profile.FileSavePath) == filepath.Clean(legacyPath) {
+		profile.FileSavePath = DefaultAttachmentDir()
+		if err := SaveProfile(ctx, profile); err != nil {
+			return Profile{}, err
+		}
+	}
+	return profile, nil
+}
+
+func legacyAttachmentDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("用户目录不可用")
+	}
+	return filepath.Join(home, "Downloads", "LANChat"), nil
 }
 
 func SaveProfile(ctx context.Context, profile Profile) error {

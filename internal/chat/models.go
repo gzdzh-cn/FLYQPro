@@ -3,11 +3,11 @@ package chat
 import "time"
 
 const (
-	ProtocolName    = "LANChat"
+	ProtocolName    = "POPChat"
 	ProtocolMajor   = 1
 	ProtocolMinor   = 0
 	DiscoveryPort   = 39190
-	DiscoveryMagic  = "LANCHAT_DISCOVERY_V1"
+	DiscoveryMagic  = "POPCHAT_DISCOVERY_V1"
 	PeerRelation    = "friend"
 	DiscoveredState = "discovered"
 )

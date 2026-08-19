@@ -105,9 +105,12 @@ func (s *ChatService) ResetAvatar() (chat.Profile, error) {
 		return profile, err
 	}
 	if profile.AvatarPath != "" {
-		_ = os.Remove(profile.AvatarPath)
+		if removeErr := os.Remove(profile.AvatarPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return profile, fmt.Errorf("删除头像失败: %w", removeErr)
+		}
 	}
 	profile.AvatarPath = ""
+	profile.AvatarData = ""
 	return s.UpdateProfile(profile)
 }
 

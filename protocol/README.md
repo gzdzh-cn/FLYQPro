@@ -1,22 +1,22 @@
-# LANChat protocol v1
+# POPChat protocol v1
 
-LANChat uses a language-neutral protocol so another desktop or mobile client can interoperate without depending on Wails bindings.
+POPChat uses a language-neutral protocol so another desktop or mobile client can interoperate without depending on Wails bindings.
 
 ## Discovery
 
 - Transport: IPv4 UDP broadcast.
 - Port: `39190`.
 - Encoding: UTF-8 JSON.
-- Magic: `LANCHAT_DISCOVERY_V1`.
+- Magic: `POPCHAT_DISCOVERY_V1`.
 - Discovery messages never carry chat or file content.
 
 Example announcement:
 
 ```json
 {
-  "magic": "LANCHAT_DISCOVERY_V1",
+  "magic": "POPCHAT_DISCOVERY_V1",
   "type": "announce",
-  "protocol": "LANChat",
+  "protocol": "POPChat",
   "major": 1,
   "minor": 0,
   "deviceId": "sha256-of-public-key",
