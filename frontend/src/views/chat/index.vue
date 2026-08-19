@@ -249,6 +249,12 @@ onMounted(() => { isMac.value = System.IsMac(); load() })
 .chat-app .request-row:hover,
 .chat-app .peer-row.selected,
 .chat-app .request-row.selected { background: var(--hover); }
+.chat-app .request-row { color: var(--text); }
+.chat-app .request-row strong { color: var(--text); font-weight: 600; }
+.chat-app .request-row span { color: var(--muted); }
+.chat-app .peer-row { color: var(--text); }
+.chat-app .peer-row strong { color: var(--text); font-weight: 600; }
+.chat-app .peer-row span { color: var(--muted); }
 .chat-app .message-bubble { background: var(--surface-1); color: var(--text); box-shadow: var(--shadow); }
 .chat-app .composer textarea { background: transparent; color: var(--text); }
 .chat-app .composer textarea::placeholder { color: var(--muted); }

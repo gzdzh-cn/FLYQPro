@@ -65,6 +65,15 @@ func TestHandleDiscoveryTCPRepliesWhenDiscoverable(t *testing.T) {
 	<-done
 }
 
+func TestUpdatePeerRelationRefreshesCachedPeer(t *testing.T) {
+	engine := NewEngine()
+	engine.peers["peer-1"] = Peer{DeviceID: "peer-1", Relation: DiscoveredState}
+	engine.updatePeerRelation("peer-1", PeerRelation)
+	if engine.peers["peer-1"].Relation != PeerRelation {
+		t.Fatalf("cached relation = %q, want %q", engine.peers["peer-1"].Relation, PeerRelation)
+	}
+}
+
 func containsIP(values []net.IP, want string) bool {
 	for _, value := range values {
 		if value.String() == want {

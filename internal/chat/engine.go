@@ -224,7 +224,9 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 	case "friend_request_response":
 		status := message.Status
 		if status == "accepted" {
-			_ = SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation)
+			if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err == nil {
+				e.updatePeerRelation(hello.DeviceID, PeerRelation)
+			}
 		}
 		_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
 		e.emit("chat:friend-request-updated", map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID})
@@ -400,10 +402,14 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	}
 
 	var firstErr error
-	for index := range targets {
+	for index := range targets[:len(targets)-len(subnetTargets)] {
 		if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	for index := len(targets) - len(subnetTargets); index < len(targets); index++ {
+		// Individual hosts can be offline; a failed unicast probe is expected.
+		_ = e.sendDiscovery(&targets[index], message)
 	}
 	if includeUnicastProbe {
 		if probeErr := e.probeTCPSubnets(message, subnetTargets); probeErr != nil && firstErr == nil {
@@ -553,6 +559,7 @@ func (e *Engine) AcceptFriendRequest(ctx context.Context, requestID string) erro
 		if err := SetPeerRelation(ctx, request.DeviceID, PeerRelation); err != nil {
 			return err
 		}
+		e.updatePeerRelation(request.DeviceID, PeerRelation)
 		_ = UpdateFriendRequest(ctx, requestID, "accepted")
 		if peer, peerErr := e.peer(request.DeviceID); peerErr == nil {
 			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: requestID, Status: "accepted"})
@@ -785,6 +792,15 @@ func (e *Engine) peer(deviceID string) (Peer, error) {
 func (e *Engine) isFriend(deviceID string) bool {
 	peer, err := e.peer(deviceID)
 	return err == nil && peer.Relation == PeerRelation
+}
+
+func (e *Engine) updatePeerRelation(deviceID, relation string) {
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.Relation = relation
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
 }
 func (e *Engine) Profile() Profile { e.mu.RLock(); defer e.mu.RUnlock(); return e.profile }
 func (e *Engine) DeviceInfo() DeviceInfo {
