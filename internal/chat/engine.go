@@ -24,18 +24,19 @@ import (
 )
 
 type Engine struct {
-	mu       sync.RWMutex
-	profile  Profile
-	identity Identity
-	listener net.Listener
-	udp      *net.UDPConn
-	stop     chan struct{}
-	done     chan struct{}
-	peers    map[string]Peer
-	incoming map[string]*incomingFile
-	lastScan time.Time
-	lastErr  string
-	started  bool
+	mu           sync.RWMutex
+	profile      Profile
+	identity     Identity
+	listener     net.Listener
+	discoveryTCP net.Listener
+	udp          *net.UDPConn
+	stop         chan struct{}
+	done         chan struct{}
+	peers        map[string]Peer
+	incoming     map[string]*incomingFile
+	lastScan     time.Time
+	lastErr      string
+	started      bool
 }
 
 type incomingFile struct {
@@ -94,12 +95,19 @@ func (e *Engine) Start(ctx context.Context) error {
 		_ = listener.Close()
 		return fmt.Errorf("启动局域网发现失败: %w", udpErr)
 	}
+	discoveryTCP, tcpErr := net.Listen("tcp4", fmt.Sprintf(":%d", DiscoveryPort))
+	if tcpErr != nil {
+		_ = udp.Close()
+		_ = listener.Close()
+		return fmt.Errorf("启动 TCP 发现失败: %w", tcpErr)
+	}
 
 	e.mu.Lock()
-	e.profile, e.identity, e.listener, e.udp = profile, identity, listener, udp
+	e.profile, e.identity, e.listener, e.discoveryTCP, e.udp = profile, identity, listener, discoveryTCP, udp
 	e.stop, e.done, e.started = make(chan struct{}), make(chan struct{}), true
 	e.mu.Unlock()
 	go e.acceptLoop()
+	go e.discoveryTCPLoop()
 	go e.discoveryLoop()
 	go e.scanLoop()
 	go e.scanNetwork(true)
@@ -115,6 +123,7 @@ func (e *Engine) Stop() {
 	}
 	close(e.stop)
 	_ = e.listener.Close()
+	_ = e.discoveryTCP.Close()
 	_ = e.udp.Close()
 	done := e.done
 	e.started = false
@@ -122,6 +131,34 @@ func (e *Engine) Stop() {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
+	}
+}
+
+func (e *Engine) discoveryTCPLoop() {
+	for {
+		conn, err := e.discoveryTCP.Accept()
+		if err != nil {
+			select {
+			case <-e.stop:
+				return
+			default:
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+		}
+		go e.handleDiscoveryTCP(conn)
+	}
+}
+
+func (e *Engine) handleDiscoveryTCP(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(800 * time.Millisecond))
+	var message wireMessage
+	if err := json.NewDecoder(conn).Decode(&message); err != nil || message.Magic != DiscoveryMagic || message.Type != "discover" || message.DeviceID == e.identity.DeviceID {
+		return
+	}
+	if e.Profile().Discoverable {
+		_ = writeWire(conn, e.helloMessage("announce"))
 	}
 }
 
@@ -356,8 +393,10 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	if len(targets) == 0 {
 		targets = []net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
 	}
+	var subnetTargets []net.UDPAddr
 	if includeUnicastProbe {
-		targets = append(targets, localSubnetTargets()...)
+		subnetTargets = localSubnetTargets()
+		targets = append(targets, subnetTargets...)
 	}
 
 	var firstErr error
@@ -365,6 +404,9 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 		if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if includeUnicastProbe {
+		e.probeTCPSubnets(message, subnetTargets)
 	}
 	e.mu.Lock()
 	e.lastScan = time.Now()
@@ -375,6 +417,42 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	}
 	e.mu.Unlock()
 	e.emit("chat:network-status", e.NetworkStatus())
+}
+
+func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) {
+	const parallelism = 64
+	sem := make(chan struct{}, parallelism)
+	var wait sync.WaitGroup
+	for index := range targets {
+		target := targets[index]
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			address := net.JoinHostPort(target.IP.String(), fmt.Sprint(DiscoveryPort))
+			conn, err := net.DialTimeout("tcp4", address, 150*time.Millisecond)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+			if err := writeWire(conn, message); err != nil {
+				return
+			}
+			var response wireMessage
+			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Magic != DiscoveryMagic || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
+				return
+			}
+			if response.IP == "" {
+				response.IP = target.IP.String()
+			}
+			if err := e.upsertWirePeer(response); err == nil {
+				e.emit("chat:peer-updated", e.Peers())
+			}
+		}()
+	}
+	wait.Wait()
 }
 
 func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {

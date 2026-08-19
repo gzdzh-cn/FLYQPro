@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 )
@@ -36,6 +37,32 @@ func TestSubnetHostTargetsSkipsLargeNetworks(t *testing.T) {
 	if targets := subnetHostTargets(subnet); len(targets) != 0 {
 		t.Fatalf("large subnet produced %d targets", len(targets))
 	}
+}
+
+func TestHandleDiscoveryTCPRepliesWhenDiscoverable(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	engine := &Engine{
+		profile:  Profile{Discoverable: true, Nickname: "测试设备"},
+		identity: Identity{DeviceInfo: DeviceInfo{DeviceID: "local-device"}},
+	}
+	done := make(chan struct{})
+	go func() {
+		engine.handleDiscoveryTCP(server)
+		close(done)
+	}()
+
+	if err := writeWire(client, wireMessage{Magic: DiscoveryMagic, Type: "discover", DeviceID: "remote-device"}); err != nil {
+		t.Fatal(err)
+	}
+	var response wireMessage
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Magic != DiscoveryMagic || response.Type != "announce" || response.Nickname != "测试设备" {
+		t.Fatalf("unexpected discovery response: %+v", response)
+	}
+	<-done
 }
 
 func containsIP(values []net.IP, want string) bool {

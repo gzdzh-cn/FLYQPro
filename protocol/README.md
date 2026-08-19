@@ -6,6 +6,7 @@ POPChat uses a language-neutral protocol so another desktop or mobile client can
 
 - Transport: IPv4 UDP broadcast.
 - Port: `39190`.
+- Fallback: TCP `39190` probes the local IPv4 subnets when UDP broadcast is unavailable.
 - Encoding: UTF-8 JSON.
 - Magic: `POPCHAT_DISCOVERY_V1`.
 - Discovery messages never carry chat or file content.
