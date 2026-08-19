@@ -103,6 +103,10 @@ export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticRes
     });
 }
 
+export function ScanPeers(): $CancellablePromise<void> {
+    return $Call.ByID(675702358);
+}
+
 export function SendFile(deviceID: string, path: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(3992859524, deviceID, path).then(($result: any) => {
         return $$createType9($result);

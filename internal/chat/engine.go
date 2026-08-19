@@ -100,6 +100,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.acceptLoop()
 	go e.discoveryLoop()
 	go e.scanLoop()
+	go e.broadcastDiscovery()
 	e.emit("chat:network-status", e.NetworkStatus())
 	return nil
 }
@@ -326,6 +327,20 @@ func (e *Engine) scanLoop() {
 			return
 		}
 	}
+}
+
+// Scan sends a discovery request immediately instead of waiting for the
+// periodic scan ticker. It is used by the Discover page's manual refresh.
+func (e *Engine) Scan() {
+	if e.isStarted() {
+		e.broadcastDiscovery()
+	}
+}
+
+func (e *Engine) isStarted() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.started
 }
 
 func (e *Engine) broadcastDiscovery() {
