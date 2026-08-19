@@ -12,3 +12,6 @@ frontend/.npm-cache
 **/resource/app.db-shm
 **/resource/app.db-wal
 .codebuddy
+
+# macOS Finder metadata
+**/.DS_Store
