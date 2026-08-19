@@ -1,0 +1,15 @@
+{
+  "name": "helpfly-docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "//": "在 docs/vitepress/ 目录下运行：npm install 后再 npm run docs:dev",
+  "devDependencies": {
+    "vitepress": "^1.5.0"
+  }
+}

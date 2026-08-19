@@ -1,47 +1,10 @@
-
-# CLI tool, only in development environment.
-# https://goframe.org/pages/viewpage.action?pageId=3673173
-
-database:
-  logger:
-    path: "./data/logs/sql"
-    level: "all"
-    stdout: true
-  default:
-    type: "sqlite" # 数据库类型
-    name: "./data/database/dzhgo_go.sqlite" # 开发环境下默认是./database/dzhgo_go.sqlite，生产环境,macos系统是 /Users/****/Library/Application Support/dzhgo/database/dzhgo_go.sqlite
-    extra: busy_timeout=5000 # 扩展参数 如 busy_timeout=5000&journal_mode=ALL
-    createdAt: "createTime" # 创建时间字段名称
-    updatedAt: "updateTime" # 更新时间字段名称
-    deletedAt: "deletedAt"  # 填deleteTime，关闭软删除，填deletedAt开启软删除
-    debug: true # 开启调试模式,启用后将在控制台打印相关sql语句
- 
-
+# GoFrame development and code generation configuration.
+# The runtime database path is resolved by service/db and is not tied to this file.
 gfcli:
-  docker:
-    build: "-a amd64 -s linux -p temp -ew"
-#    file: "Dockerfile"
-    push: "registry.cn-heyuan.aliyuncs.com/gzdzh"
-    tagPrefixes: "registry.cn-heyuan.aliyuncs.com/gzdzh"  # 阿里云
-    TagName: "customer_pro:v1.0.856"
-  # 工具编译配置
-  build:
-#    name: "main" # 用gf docker的时候,一定要写main,或者不要name参数
-    arch: "amd64"
-    system: "linux"
-    mod: "none"
-    cgo: 0
-    path: "./bin"
-#    packSrc: "manifest" # 需要打包的目录 打包后在internal/packed生成二进制文件
-#    version: "v1.1.5" #用gf docker的时候，不能写版本号
-
-#使用gen.dao，多个link情况下，命令行的参数会失效
-#  gen:
-#    dao:
-#      - link: "mysql:root:dzh123456@tcp(127.0.0.1:3306)/dzhgo_go?loc=Local&parseTime=true"
-#        path: "addons/customer_pro"
-#        tables: "addons_customer_pro_config"  # 指定当前数据库中需要执行代码生成的数据表。如果为空，表示数据库的所有表都会生成。
-
-#      - link: "mysql:root:dzh123456@tcp(127.0.0.1:3306)/3136_php?loc=Local&parseTime=true"
-#        group: "oi"
-#        tables: "oi_clues,oi_clues_order"
+  gen:
+    dao:
+      - link: "sqlite::@file(./resource/app.db)"
+        path: "internal"
+        tables: "tasks,task_channels,task_summaries,consumptions,exports,pause_points,system_parameters,system_parameter_options,kv_store"
+        jsonCase: "CamelLower"
+        stdTime: true

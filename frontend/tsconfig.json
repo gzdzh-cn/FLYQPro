@@ -1,46 +1,25 @@
 {
-	"compilerOptions": {
-		"target": "esnext",
-		"module": "esnext",
-		"moduleResolution": "node",
-		"strict": true,
-		"jsx": "preserve",
-		"sourceMap": true,
-		"resolveJsonModule": true,
-		"experimentalDecorators": true,
-		"esModuleInterop": true,
-		"lib": [
-			"esnext",
-			"dom"
-		],
-		"types": [
-			"vite/client",
-			"element-plus/global"
-		],
-		"paths": {
-			"/$/*": [
-				"./src/modules/*"
-			],
-			"/@/*": [
-				"./src/*"
-			],
-			"/#/*": [
-				"./types/*"
-			],
-			"/~/*": [
-				"./packages/*"
-			]
-		}
-	},
-	"include": [
-		"src/**/*.ts",
-		"src/**/*.d.ts",
-		"src/**/*.tsx",
-		"src/**/*.vue",
-		"env.d.ts"
-	],
-	"exclude": [
-		"node_modules",
-		"dist"
-	]
-}
+    "compilerOptions": {
+      "target": "ES2020", // 指定 ECMAScript 目标版本: 'ES3' (default), 'ES5', 'ES6'/'ES2015', 'ES2016', 'ES2017', or 'ESNEXT'
+      "module": "ES2020",
+      "moduleResolution": "node", // 选择模块解析策略： 'node' (Node.js) or 'classic' (TypeScript pre-1.6)
+      "strict": true,// 开启所有严格的类型检查
+      "jsx": "preserve",// 指定 jsx 代码的生成: 'preserve', 'react-native', or 'react'
+      "sourceMap": true,// 是否生成相应的Map映射的文件，默认：false
+      "resolveJsonModule": true,// 是否解析 JSON 模块
+      "esModuleInterop": true,// 是否通过为所有导入模块创建命名空间对象，允许CommonJS和ES模块之间的互操作性
+      "ignoreDeprecations": "5.0",//请指定编译器选项与suppressImplicitAnyIndexErrors配合
+      "allowSyntheticDefaultImports": true,//是否允许从没有默认导出的模块中默认导入，默认：false。
+      "baseUrl": ".",
+      "paths": {
+        "@/*": ["src/*"],
+        "/@/*": ["src/*"],
+        "/#/*": ["bindings/*"]
+      },
+      "lib": ["es2020", "dom"],// 指定要包含在编译中的库文件
+      "skipLibCheck": true // 是否跳过声明文件的类型检查，这可以在编译期间以牺牲类型系统准确性为代价来节省时间，默认：false
+    },
+    "include": ["src/**/*","src/**/*.ts", "src/**/*.d.ts", "types/**/*.d.ts","types/**/*.ts","src/**/*.tsx", "src/**/*.vue","typing.d.ts"],
+    "exclude": ["node_modules"]
+  }
+  

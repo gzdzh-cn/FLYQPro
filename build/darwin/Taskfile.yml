@@ -8,14 +8,14 @@ tasks:
     summary: Creates a production build of the application
     deps:
       - task: common:go:mod:tidy
-      # - task: common:build:frontend
+      - task: common:build:frontend
+        vars:
+          PRODUCTION: '{{.PRODUCTION | default "false"}}'
       - task: common:generate:icons
     cmds:
       - go build {{.BUILD_FLAGS}} -o {{.OUTPUT}}
     vars:
-      # BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
-      # BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
-      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,sqlite_omit_load_extension -buildvcs=false -ldflags="-w -s"{{else}}-tags sqlite_omit_load_extension -buildvcs=false -gcflags=all="-l"{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
     env:
@@ -26,15 +26,6 @@ tasks:
       CGO_LDFLAGS: "-mmacosx-version-min=10.15"
       MACOSX_DEPLOYMENT_TARGET: "10.15"
       PRODUCTION: '{{.PRODUCTION | default "false"}}'
-
-  build:amd64:
-    summary: Builds darwin amd64 binary only
-    deps:
-      - task: build
-        vars:
-          ARCH: amd64
-          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-amd64"
-          PRODUCTION: "true"
 
   build:universal:
     summary: Builds darwin universal binary (arm64 + amd64)
@@ -60,21 +51,26 @@ tasks:
     cmds:
       - task: create:app:bundle
 
-  package:amd64:
-    summary: Packages darwin amd64 binary into a `.app` bundle
-    deps:
-      - task: build:amd64
-        vars:
-          PRODUCTION: "true"
-    cmds:
-      - task: create:app:bundle:amd64
-
   package:universal:
     summary: Packages darwin universal binary (arm64 + amd64)
     deps:
       - task: build:universal
     cmds:
       - task: create:app:bundle
+
+  # 一条命令完成：打包 .app → 制作可拖拽安装的 DMG（含 Applications 符号链接）
+  # 依赖 package 任务产出的 .app，无需任何第三方依赖（仅用 macOS 自带 hdiutil）
+  package:macdmg:
+    summary: Packages a production build into a `.app` and wraps it in a draggable-install DMG
+    deps:
+      - task: package
+    cmds:
+      - rm -rf "{{.BIN_DIR}}/dmg-staging"
+      - mkdir -p "{{.BIN_DIR}}/dmg-staging"
+      - cp -R "{{.BIN_DIR}}/{{.APP_NAME}}.app" "{{.BIN_DIR}}/dmg-staging/"
+      - ln -s /Applications "{{.BIN_DIR}}/dmg-staging/Applications"
+      - hdiutil create -volname "{{.APP_NAME}}" -srcfolder "{{.BIN_DIR}}/dmg-staging" -ov -format UDZO "{{.BIN_DIR}}/{{.APP_NAME}}.dmg"
+      - rm -rf "{{.BIN_DIR}}/dmg-staging"
 
 
   create:app:bundle:
@@ -85,60 +81,6 @@ tasks:
       - cp {{.BIN_DIR}}/{{.APP_NAME}} {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS
       - cp build/darwin/Info.plist {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents
 
-  create:app:bundle:amd64:
-    summary: Creates an `.app` bundle for amd64 binary
-    cmds:
-      - mkdir -p {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/{MacOS,Resources}
-      - cp build/darwin/icons.icns {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/Resources
-      - cp {{.BIN_DIR}}/{{.APP_NAME}}-amd64 {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/MacOS
-      - cp build/darwin/Info.plist {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents
-      - sed -i '' 's/<string>dzh3159<\/string>/<string>dzh3159-amd64<\/string>/' {{.BIN_DIR}}/{{.APP_NAME}}-amd64.app/Contents/Info.plist
-
   run:
     cmds:
       - '{{.BIN_DIR}}/{{.APP_NAME}}'
-
-  dmg:
-    summary: Creates a DMG disk image for distribution
-    deps:
-      - task: package
-        vars:
-          PRODUCTION: "true"
-    cmds:
-      - task: create:dmg:default
-
-  dmg:amd64:
-    summary: Creates a DMG disk image for amd64 distribution
-    deps:
-      - task: package:amd64
-        vars:
-          PRODUCTION: "true"
-    cmds:
-      - task: create:dmg:amd64
-
-  dmg:universal:
-    summary: Creates a DMG disk image for universal binary distribution
-    deps:
-      - task: package:universal
-    cmds:
-      - task: create:dmg:universal
-
-  create:dmg:default:
-    summary: Creates a DMG disk image (default)
-    cmds:
-      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} default
-
-  create:dmg:
-    summary: Creates a DMG disk image
-    cmds:
-      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} universal
-
-  create:dmg:amd64:
-    summary: Creates a DMG disk image for amd64
-    cmds:
-      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} amd64
-
-  create:dmg:universal:
-    summary: Creates a DMG disk image for universal
-    cmds:
-      - ./build/darwin/create_dmg.sh {{.APP_NAME}} {{.VERSION | default "1.0.0"}} universal

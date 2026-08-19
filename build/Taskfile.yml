@@ -16,10 +16,10 @@ tasks:
     generates:
       - node_modules/*
     preconditions:
-      - sh: yarn --version
-        msg: "Looks like yarn isn't installed. yarn is part of the Node installer: https://nodejs.org/en/download/"
+      - sh: npm version
+        msg: "Looks like npm isn't installed. Npm is part of the Node installer: https://nodejs.org/en/download/"
     cmds:
-      - yarn install
+      - npm install
 
   build:frontend:
     summary: Build the frontend project
@@ -32,7 +32,7 @@ tasks:
       - task: install:frontend:deps
       - task: generate:bindings
     cmds:
-      - yarn run {{.BUILD_COMMAND}}
+      - npm run {{.BUILD_COMMAND}} -q
     env:
       PRODUCTION: '{{.PRODUCTION | default "false"}}'
     vars:
@@ -50,7 +50,7 @@ tasks:
     generates:
       - "frontend/bindings/**/*"
     cmds:
-      - wails3 generate bindings -f '{{.BUILD_FLAGS}}' -clean=true 
+      - wails3 generate bindings -ts -f '{{.BUILD_FLAGS}}' -clean=true 
 
   generate:icons:
     summary: Generates Windows `.ico` and Mac `.icns` files from an image
@@ -69,25 +69,10 @@ tasks:
     deps:
       - task: install:frontend:deps
     cmds:
-      - yarn run dev -- --port {{.VITE_PORT}} --strictPort
+      - npm run dev -- --host 127.0.0.1 --port {{.VITE_PORT}} --strictPort
 
   update:build-assets:
     summary: Updates the build assets
     dir: build
     cmds:
       - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
-
-  dmg:
-    summary: Creates a DMG disk image for macOS distribution
-    deps:
-      - task: darwin:dmg
-
-  dmg:amd64:
-    summary: Creates a DMG disk image for macOS amd64 distribution
-    deps:
-      - task: darwin:dmg:amd64
-
-  dmg:universal:
-    summary: Creates a DMG disk image for macOS universal binary distribution
-    deps:
-      - task: darwin:dmg:universal

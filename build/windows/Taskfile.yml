@@ -32,11 +32,17 @@ tasks:
     cmds:
       - task: create:nsis:installer
 
+  # 一键命令别名：打包并生成 Windows NSIS 安装包（含 WebView2 引导器）
+  package:installer:
+    summary: One-command build + NSIS installer for Windows
+    cmds:
+      - task: create:nsis:installer
+
   generate:syso:
     summary: Generates Windows `.syso` file
     dir: build
     cmds:
-      - wails3 generate syso -arch {{.ARCH}} -icon windows/icon.ico -manifest windows/wails.exe.manifest -info windows/info.json -out ../wails_windows_{{.ARCH}}.syso
+      - wails3 generate syso -arch {{.ARCH}} -icon windows/icons.ico -manifest windows/wails.exe.manifest -info windows/info.json -out ../wails_windows_{{.ARCH}}.syso
     vars:
       ARCH: '{{.ARCH | default ARCH}}'
 

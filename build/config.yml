@@ -5,13 +5,13 @@ version: '3'
 
 # This information is used to generate the build assets.
 info:
-  companyName: "3159" # The name of the company
-  productName: "dzh3159" # The name of the application
-  productIdentifier: "com.wails3.3159" # The unique product identifier
-  description: "A Wails3 test application" # The application description
-  copyright: "(c) 2024, 3159" # Copyright text
-  comments: "Built using Wails3" # Comments
-  version: "v1.0.0" # The application version
+  companyName: "DZH"
+  productName: "POPChat"
+  productIdentifier: "com.dzh.lanchat"
+  description: "局域网点对点聊天工具"
+  copyright: "(c) 2026, DZH"
+  comments: "POPChat desktop application"
+  version: "v0.1.0"
 
 # Dev mode configuration
 dev_mode:
@@ -29,7 +29,7 @@ dev_mode:
       - .gitignore
       - .gitkeep
     watched_extension:
-      # - "*.go"
+      - "*.go"
     git_ignore: true
   executes:
     - cmd: wails3 task common:install:frontend:deps

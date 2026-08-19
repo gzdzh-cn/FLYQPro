@@ -1,25 +1,19 @@
 <template>
-	<el-config-provider>
-		<router-view />
-	</el-config-provider>
+  <router-view />
 </template>
 
-<script lang="ts" setup>
-import { ElConfigProvider } from "element-plus";
+<script setup lang="ts">
+import { Events } from '@wailsio/runtime';
+import { onBeforeUnmount } from 'vue';
+import { useChatStore } from '@/store/modules/chat';
 
-import { onMounted } from "vue";
+const chatStore = useChatStore();
+const eventNames = ['chat:profile-updated', 'chat:network-status', 'chat:peer-updated', 'chat:friend-request', 'chat:friend-request-updated', 'chat:message', 'chat:attachment', 'chat:transfer-progress'];
+const handlers = eventNames.map((name) => Events.On(name, (event: any) => chatStore.handleEvent(name, event?.data ?? event)));
 
-onMounted(() => {});
+onBeforeUnmount(() => handlers.forEach((cancel: any) => typeof cancel === 'function' && cancel()));
 </script>
 
-<style lang="scss">
-.dzh_popover {
-	min-width: 80px !important;
-}
-.divider {
-	width: 100%;
-	height: 1px;
-	margin: 15px 0;
-	border-top: 1px dashed #e9e9e9;
-}
+<style lang="less">
+#app { width: 100%; height: 100%; color: var(--color-text-1); }
 </style>

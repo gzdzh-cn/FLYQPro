@@ -7,7 +7,7 @@ includes:
   linux: ./build/linux/Taskfile.yml
 
 vars:
-  APP_NAME: "dzh3159"
+  APP_NAME: "POPChat"
   BIN_DIR: "bin"
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
 
@@ -31,19 +31,3 @@ tasks:
     summary: Runs the application in development mode
     cmds:
       - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
-
-  dmg:
-    summary: Creates a DMG disk image for macOS distribution
-    cmds:
-      - task: darwin:dmg
-
-  dmg:amd64:
-    summary: Creates a DMG disk image for macOS amd64 distribution
-    cmds:
-      - task: darwin:dmg:amd64
-
-  dmg:universal:
-    summary: Creates a DMG disk image for macOS universal binary distribution
-    cmds:
-      - task: darwin:dmg:universal
-

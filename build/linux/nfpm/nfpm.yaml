@@ -3,7 +3,7 @@
 #
 # The lines below are called `modelines`. See `:help modeline`
 
-name: "dzh3159"
+name: "goflyerp.exe"
 arch: ${GOARCH}
 platform: "linux"
 version: "0.1.0"
@@ -17,12 +17,12 @@ license: "MIT"
 release: "1"
 
 contents:
-  - src: "./bin/dzh3159"
-    dst: "/usr/local/bin/dzh3159"
+  - src: "./bin/goflyerp.exe"
+    dst: "/usr/local/bin/goflyerp.exe"
   - src: "./build/appicon.png"
-    dst: "/usr/share/icons/hicolor/128x128/apps/dzh3159.png"
-  - src: "./build/linux/dzh3159.desktop"
-    dst: "/usr/share/applications/dzh3159.desktop"
+    dst: "/usr/share/icons/hicolor/128x128/apps/goflyerp.exe.png"
+  - src: "./build/linux/goflyerp.exe.desktop"
+    dst: "/usr/share/applications/goflyerp.exe.desktop"
 
 depends:
   - gtk3

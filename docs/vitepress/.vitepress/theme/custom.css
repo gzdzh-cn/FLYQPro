@@ -1,0 +1,31 @@
+.vp-doc .vp-zoomable-image {
+  cursor: zoom-in;
+}
+
+.image-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 76%);
+  cursor: zoom-out;
+}
+
+.image-zoom-overlay[hidden] {
+  display: none;
+}
+
+.image-zoom-preview {
+  max-width: min(96vw, 1600px);
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 20px 60px rgb(0 0 0 / 40%);
+  cursor: zoom-out;
+}
+
+body.image-zoom-open {
+  overflow: hidden;
+}
