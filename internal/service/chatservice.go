@@ -195,6 +195,9 @@ func (s *ChatService) RejectFriendRequest(requestID string) error {
 func (s *ChatService) SendMessage(deviceID, content string) (chat.Message, error) {
 	return s.engine.SendMessage(gctx.New(), deviceID, content)
 }
+func (s *ChatService) MarkConversationRead(deviceID string) error {
+	return s.engine.MarkConversationRead(gctx.New(), deviceID)
+}
 func (s *ChatService) SendFile(deviceID, path string) (chat.Message, error) {
 	return s.engine.SendFile(gctx.New(), deviceID, path)
 }

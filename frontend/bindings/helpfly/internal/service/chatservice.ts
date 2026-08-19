@@ -69,6 +69,10 @@ export function ListPeers(): $CancellablePromise<chat$0.Peer[]> {
     });
 }
 
+export function MarkConversationRead(deviceID: string): $CancellablePromise<void> {
+    return $Call.ByID(1619252398, deviceID);
+}
+
 export function NetworkStatus(): $CancellablePromise<chat$0.NetworkStatus> {
     return $Call.ByID(2032026300).then(($result: any) => {
         return $$createType11($result);

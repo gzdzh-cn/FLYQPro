@@ -245,6 +245,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = writeWire(conn, wireMessage{Type: "ack", MessageID: message.MessageID, Status: "delivered"})
 			e.emit("chat:message", messageRecord)
 		}
+	case "read_receipt":
+		for _, messageID := range message.MessageIDs {
+			if err := UpdateMessageStatus(context.Background(), messageID, "read"); err == nil {
+				e.emit("chat:message-status", map[string]any{"messageId": messageID, "status": "read"})
+			}
+		}
 	case "file_offer":
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
@@ -619,6 +625,38 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 	_ = exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, message.Status, message.MessageID)
 	e.emit("chat:message", message)
 	return message, nil
+}
+
+func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) error {
+	if !e.isFriend(deviceID) {
+		return fmt.Errorf("不是好友")
+	}
+	conversationID, err := EnsureConversation(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	messages, err := ListMessages(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+	readIDs := make([]string, 0)
+	for _, message := range messages {
+		if message.SenderDeviceID != deviceID || message.Status == "read" {
+			continue
+		}
+		if err := UpdateMessageStatus(ctx, message.MessageID, "read"); err != nil {
+			return err
+		}
+		readIDs = append(readIDs, message.MessageID)
+	}
+	if len(readIDs) == 0 {
+		return nil
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return err
+	}
+	return e.sendToPeer(peer, wireMessage{Type: "read_receipt", MessageIDs: readIDs})
 }
 
 func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, error) {

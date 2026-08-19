@@ -24,6 +24,10 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:peer-updated') this.peers = value || []
       if (name === 'chat:friend-request') this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId)]
       if (name === 'chat:friend-request-updated') this.requests = this.requests.filter((item) => item.requestId !== value.requestId)
+      if (name === 'chat:message-status') {
+        Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))
+        return
+      }
       if (name === 'chat:attachment' && !value?.conversationId) {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.attachmentId === value.attachmentId) item.attachmentStatus = value.status }))
         return

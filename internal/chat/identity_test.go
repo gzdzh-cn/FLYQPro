@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"helpfly/internal/service/db"
@@ -44,6 +45,9 @@ func TestIdentityAndProfilePersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if profile.Nickname == "" || profile.Nickname == "新用户" {
+		t.Fatalf("默认昵称未生成: %q", profile.Nickname)
+	}
 	profile.Nickname = "测试用户"
 	if err := SaveProfile(context.Background(), profile); err != nil {
 		t.Fatal(err)
@@ -69,5 +73,27 @@ func TestWireMessageIsPortableJSON(t *testing.T) {
 	}
 	if decoded["type"] != "message" || decoded["content"] != "你好" {
 		t.Fatalf("协议 JSON 不可解析: %s", data)
+	}
+}
+
+func TestRandomChineseNicknameUsesThemeWords(t *testing.T) {
+	prefixes := []string{"薄荷", "星际", "云端", "彩虹", "泡泡", "月光", "棉花糖", "银河", "森林", "魔法"}
+	themes := []string{"水母", "熊猫", "仙人掌", "小狐狸", "独角兽", "向日葵", "蒲公英", "月亮", "小精灵", "鲸鱼", "樱桃", "小火车"}
+	for index := 0; index < 32; index++ {
+		nickname := randomChineseNickname()
+		if len([]rune(nickname)) > 8 || nickname == "" || nickname == "新用户" {
+			t.Fatalf("昵称格式异常: %q", nickname)
+		}
+		prefixMatch := false
+		for _, prefix := range prefixes {
+			prefixMatch = prefixMatch || strings.HasPrefix(nickname, prefix)
+		}
+		themeMatch := false
+		for _, theme := range themes {
+			themeMatch = themeMatch || strings.HasSuffix(nickname, theme)
+		}
+		if !prefixMatch || !themeMatch {
+			t.Fatalf("昵称未使用主题词组合: %q", nickname)
+		}
 	}
 }

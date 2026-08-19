@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +116,21 @@ func EnsureDefaults(ctx context.Context, defaultPath string) error {
 	now := nowString()
 	return exec(ctx, `INSERT INTO profiles(id, nickname, file_save_path, theme, created_at, updated_at)
 		VALUES(1, ?, ?, 'system', ?, ?)
-		ON CONFLICT(id) DO NOTHING`, "新用户", defaultPath, now, now)
+		ON CONFLICT(id) DO NOTHING`, randomChineseNickname(), defaultPath, now, now)
+}
+
+func randomChineseNickname() string {
+	prefixes := []string{"薄荷", "星际", "云端", "彩虹", "泡泡", "月光", "棉花糖", "银河", "森林", "魔法"}
+	themes := []string{"水母", "熊猫", "仙人掌", "小狐狸", "独角兽", "向日葵", "蒲公英", "月亮", "小精灵", "鲸鱼", "樱桃", "小火车"}
+	return prefixes[randomIndex(len(prefixes))] + themes[randomIndex(len(themes))]
+}
+
+func randomIndex(size int) int {
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(size)))
+	if err != nil {
+		return int(time.Now().UnixNano() % int64(size))
+	}
+	return int(value.Int64())
 }
 
 func GetProfile(ctx context.Context) (Profile, error) {
@@ -131,6 +147,12 @@ func GetProfile(ctx context.Context) (Profile, error) {
 	}
 	row := rows[0]
 	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	if strings.TrimSpace(profile.Nickname) == "" || strings.TrimSpace(profile.Nickname) == "新用户" {
+		profile.Nickname = randomChineseNickname()
+		if err := SaveProfile(ctx, profile); err != nil {
+			return Profile{}, err
+		}
+	}
 	if legacyPath, err := legacyAttachmentDir(); err == nil && filepath.Clean(profile.FileSavePath) == filepath.Clean(legacyPath) {
 		profile.FileSavePath = DefaultAttachmentDir()
 		if err := SaveProfile(ctx, profile); err != nil {
@@ -304,6 +326,10 @@ func SaveMessage(ctx context.Context, message Message) error {
 		return err
 	}
 	return exec(ctx, `UPDATE conversations SET last_message=?, last_message_at=?, updated_at=? WHERE conversation_id=?`, message.Content, message.CreatedAt, nowString(), message.ConversationID)
+}
+
+func UpdateMessageStatus(ctx context.Context, messageID, status string) error {
+	return exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, status, messageID)
 }
 
 func SaveAttachment(ctx context.Context, attachment Attachment) error {

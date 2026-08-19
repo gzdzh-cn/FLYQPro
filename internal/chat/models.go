@@ -146,6 +146,7 @@ type wireMessage struct {
 	FileSize     int64    `json:"fileSize,omitempty"`
 	SHA256       string   `json:"sha256,omitempty"`
 	AttachmentID string   `json:"attachmentId,omitempty"`
+	MessageIDs   []string `json:"messageIds,omitempty"`
 	ChunkIndex   int      `json:"chunkIndex,omitempty"`
 	Payload      string   `json:"payload,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
