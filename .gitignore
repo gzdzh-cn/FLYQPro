@@ -16,3 +16,4 @@ frontend/.npm-cache
 # macOS Finder metadata
 **/.DS_Store
 docs
+*.exe

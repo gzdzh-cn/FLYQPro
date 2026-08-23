@@ -520,6 +520,8 @@ func (e *Engine) discoveryLoop() {
 			if err := e.upsertWirePeer(message); err == nil {
 				e.emit("chat:peer-updated", e.Peers())
 			}
+		case "withdraw":
+			e.forgetDiscoveredPeer(message.DeviceID)
 		}
 	}
 }
@@ -1154,9 +1156,37 @@ func (e *Engine) DeviceInfo() DeviceInfo {
 
 func (e *Engine) UpdateProfile(profile Profile) {
 	e.mu.Lock()
+	wasDiscoverable := e.profile.Discoverable
 	e.profile = profile
 	e.mu.Unlock()
+	if wasDiscoverable && !profile.Discoverable {
+		go e.broadcastWithdrawal()
+	}
 	e.emit("chat:profile-updated", profile)
+}
+
+func (e *Engine) broadcastWithdrawal() {
+	message := e.helloMessage("withdraw")
+	targets := broadcastAddresses()
+	targets = append(targets, localSubnetTargets()...)
+	for index := range targets {
+		_ = e.sendDiscovery(&targets[index], message)
+	}
+}
+
+func (e *Engine) forgetDiscoveredPeer(deviceID string) {
+	if strings.TrimSpace(deviceID) == "" {
+		return
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation == PeerRelation {
+		return
+	}
+	_ = exec(context.Background(), `DELETE FROM peers WHERE device_id=? AND relation=?`, deviceID, DiscoveredState)
+	e.mu.Lock()
+	delete(e.peers, deviceID)
+	e.mu.Unlock()
+	e.emit("chat:peer-updated", e.Peers())
 }
 
 func (e *Engine) Peers() []Peer {

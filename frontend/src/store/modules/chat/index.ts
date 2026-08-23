@@ -16,7 +16,7 @@ export const useChatStore = defineStore('chat', {
   }),
   getters: {
     friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
-    discovered: (state) => state.peers.filter((peer) => peer.relation !== 'friend'),
+    discovered: (state) => state.peers.filter((peer) => peer.relation !== 'friend' && peer.online),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },
   actions: {
