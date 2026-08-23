@@ -288,7 +288,7 @@ watch(() => store.lastMessageEvent, (message) => {
 })
 watch(section, (value, previous) => {
   if (value === 'friends' && previous !== 'friends' && activePeer.value) {
-    requestAnimationFrame(() => { scrollToBottom(); markActiveRead() })
+    requestAnimationFrame(() => { scrollToBottom() })
   }
 })
 watch(() => editProfile.theme, (value) => applyTheme(value))
@@ -791,8 +791,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .head-peer > .head-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); white-space: nowrap; }
 .head-status i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--muted); }
 .head-status i.online { background: #00b42a; }
-.message-scroll { padding: 18px clamp(18px, 6vw, 72px); }
-.message-line { margin: 8px 0; gap: 8px; }
+.message-scroll { padding: 18px 0; }
+.message-line { margin: 8px 0; gap: 0; }
 .message-bubble { max-width: min(72%, 680px); padding: 9px 12px; border-radius: 14px 14px 14px 5px; line-height: 1.45; }
 .message-line.mine .message-bubble { border-radius: 14px 14px 5px 14px; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; }
@@ -817,7 +817,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 @media (max-width: 760px) {
   .vertical-resizer { display: none; }
   .list-pane { width: 220px !important; flex-basis: 220px !important; }
-  .message-scroll { padding-left: 18px; padding-right: 18px; }
+  .message-scroll { padding-left: 0; padding-right: 0; }
 }
 
 </style>
