@@ -65,12 +65,13 @@
     <section v-else-if="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><div><strong>发现</strong><span>{{ store.discovered.length }}</span></div><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || '请求添加你为好友' }}</span></div></button></div>
+        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />收到的申请</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in incomingRequests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || '请求添加你为好友' }}</span></div></button><span v-if="!incomingRequests.length && groups.requests" class="empty-request-history">暂无收到的申请</span></div>
+        <div class="discover-group"><button class="group-title" @click="groups.sent = !groups.sent"><span><icon-down v-if="groups.sent" /><icon-right v-else />我发出的申请</span><b v-if="outgoingRequests.some((request) => request.status === 'sent' || request.status === 'queued')">{{ outgoingRequests.filter((request) => request.status === 'sent' || request.status === 'queued').length }}</b></button><button v-for="request in outgoingRequests" v-show="groups.sent" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || '我发起的好友申请' }}</span></div></button><span v-if="!outgoingRequests.length && groups.sent" class="empty-request-history">暂无发出的申请</span></div>
         <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
       <main class="detail-pane" v-if="selectedRequest" @click="clearDiscoverySelection">
-        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><p>{{ selectedRequest.message || '想和你成为好友' }}</p><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status) }}</a-tag><span class="subtle">申请时间 {{ formatTime(selectedRequest.createdAt) }}</span><div v-if="selectedRequest.status === 'pending'" class="detail-actions"><a-button type="primary" @click="acceptRequest">同意</a-button><a-button status="danger" @click="rejectRequest">拒绝</a-button></div></div>
+        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><p>{{ selectedRequest.message || '想和你成为好友' }}</p><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status) }}</a-tag><div class="request-times"><span>申请时间<strong>{{ formatTime(selectedRequest.createdAt) }}</strong></span><span v-if="selectedRequest.acceptedAt">同意时间<strong>{{ formatTime(selectedRequest.acceptedAt) }}</strong></span></div><div v-if="selectedRequest.status === 'pending'" class="detail-actions"><a-button type="primary" @click="acceptRequest">同意</a-button><a-button status="danger" @click="rejectRequest">拒绝</a-button></div></div>
       </main>
       <main class="detail-pane" v-else-if="selectedDiscovery" @click="clearDiscoverySelection">
         <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag color="green">{{ selectedDiscovery.online ? '在线' : '离线' }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">成为好友后，才会显示 IP、端口和完整设备指纹。</p></div>
@@ -130,7 +131,9 @@ const appVersion = ref('')
 const isDark = ref(false)
 const isMac = ref(false)
 const editProfile = reactive({ ...store.profile })
-const groups = reactive({ requests: true, discovered: true })
+const groups = reactive({ requests: true, sent: true, discovered: true })
+const incomingRequests = computed(() => store.requests.filter((request) => request.direction !== 'sent'))
+const outgoingRequests = computed(() => store.requests.filter((request) => request.direction === 'sent'))
 function storedSize(key: string, fallback: number, min: number, max: number) {
   const value = Number(localStorage.getItem(key))
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
@@ -226,7 +229,7 @@ function selectDiscovery(peer: Peer) {
   selectedDiscovery.value = peer
   selectedRequest.value = undefined
 }
-async function addPeer() { if (!selectedDiscovery.value) return; try { await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
+async function addPeer() { if (!selectedDiscovery.value) return; try { const request = await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); store.requests = [request, ...store.requests.filter((item) => item.requestId !== request.requestId)]; Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
 async function acceptRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
 async function rejectRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
 async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); store.handleEvent('chat:message', message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); store.handleEvent('chat:message', message) } draft.value = ''; pendingImages.value = []; requestAnimationFrame(scrollToBottom) } catch (error: any) { Message.error(error?.message || '发送失败') } }
@@ -672,6 +675,26 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
   position: relative;
   z-index: 22;
   pointer-events: auto;
+}
+.request-times {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 12px;
+  color: var(--muted-text);
+  font-size: 12px;
+  text-align: left;
+}
+.request-times span {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.request-times strong {
+  color: var(--text-color);
+  font-weight: 500;
+  text-align: right;
 }
 .mac-window-controls {
   position: fixed;

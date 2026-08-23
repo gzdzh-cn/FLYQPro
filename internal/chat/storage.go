@@ -51,13 +51,15 @@ type peerRow struct {
 }
 
 type requestRow struct {
-	RequestID string `orm:"request_id"`
-	DeviceID  string `orm:"device_id"`
-	Nickname  string `orm:"nickname"`
-	Message   string `orm:"message"`
-	Status    string `orm:"status"`
-	CreatedAt string `orm:"created_at"`
-	UpdatedAt string `orm:"updated_at"`
+	RequestID  string `orm:"request_id"`
+	DeviceID   string `orm:"device_id"`
+	Nickname   string `orm:"nickname"`
+	Message    string `orm:"message"`
+	Status     string `orm:"status"`
+	Direction  string `orm:"direction"`
+	CreatedAt  string `orm:"created_at"`
+	AcceptedAt string `orm:"accepted_at"`
+	UpdatedAt  string `orm:"updated_at"`
 }
 
 type conversationRow struct {
@@ -246,18 +248,22 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 }
 
 func SaveFriendRequest(ctx context.Context, request FriendRequest) error {
-	return exec(ctx, `INSERT INTO friend_requests(request_id, device_id, nickname, message, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(request_id) DO UPDATE SET nickname=excluded.nickname, message=excluded.message, status=excluded.status, updated_at=excluded.updated_at`,
-		request.RequestID, request.DeviceID, request.Nickname, request.Message, request.Status, request.CreatedAt, nowString())
+	return exec(ctx, `INSERT INTO friend_requests(request_id, device_id, nickname, message, status, direction, created_at, accepted_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(request_id) DO UPDATE SET nickname=excluded.nickname, message=excluded.message, status=excluded.status, direction=CASE WHEN excluded.direction != '' THEN excluded.direction ELSE friend_requests.direction END, accepted_at=CASE WHEN excluded.accepted_at != '' THEN excluded.accepted_at ELSE friend_requests.accepted_at END, updated_at=excluded.updated_at`,
+		request.RequestID, request.DeviceID, request.Nickname, request.Message, request.Status, request.Direction, request.CreatedAt, request.AcceptedAt, nowString())
 }
 
 func UpdateFriendRequest(ctx context.Context, requestID, status string) error {
-	return exec(ctx, `UPDATE friend_requests SET status=?, updated_at=? WHERE request_id=?`, status, nowString(), requestID)
+	now := nowString()
+	if status == "accepted" {
+		return exec(ctx, `UPDATE friend_requests SET status=?, accepted_at=CASE WHEN accepted_at='' THEN ? ELSE accepted_at END, updated_at=? WHERE request_id=?`, status, now, now, requestID)
+	}
+	return exec(ctx, `UPDATE friend_requests SET status=?, updated_at=? WHERE request_id=?`, status, now, requestID)
 }
 
 func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, error) {
-	sql := `SELECT request_id, device_id, nickname, message, status, created_at, updated_at FROM friend_requests`
+	sql := `SELECT request_id, device_id, nickname, message, status, direction, created_at, accepted_at, updated_at FROM friend_requests`
 	args := []any{}
 	if status != "" {
 		sql += ` WHERE status=?`
@@ -274,7 +280,7 @@ func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, er
 	}
 	resultRows := make([]FriendRequest, 0, len(rows))
 	for _, row := range rows {
-		resultRows = append(resultRows, FriendRequest{RequestID: row.RequestID, DeviceID: row.DeviceID, Nickname: row.Nickname, Message: row.Message, Status: row.Status, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
+		resultRows = append(resultRows, FriendRequest{RequestID: row.RequestID, DeviceID: row.DeviceID, Nickname: row.Nickname, Message: row.Message, Status: row.Status, Direction: row.Direction, CreatedAt: row.CreatedAt, AcceptedAt: row.AcceptedAt, UpdatedAt: row.UpdatedAt})
 	}
 	return resultRows, nil
 }

@@ -128,7 +128,9 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"friend_requests", "nickname", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_requests", "message", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_requests", "status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"friend_requests", "direction", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_requests", "created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"friend_requests", "accepted_at", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_requests", "updated_at", "TEXT NOT NULL DEFAULT ''"},
 		{"conversations", "last_message", "TEXT NOT NULL DEFAULT ''"},
 		{"conversations", "last_message_at", "TEXT NOT NULL DEFAULT ''"},
@@ -172,6 +174,11 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 				return err
 			}
 		}
+	}
+	// Older builds stored the approval moment in updated_at only. Preserve
+	// that historical timestamp when introducing the dedicated field.
+	if _, err := database.Exec(ctx, `UPDATE friend_requests SET accepted_at=updated_at WHERE status='accepted' AND accepted_at=''`); err != nil {
+		return err
 	}
 	return nil
 }

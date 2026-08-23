@@ -57,13 +57,15 @@ type Peer struct {
 }
 
 type FriendRequest struct {
-	RequestID string `json:"requestId"`
-	DeviceID  string `json:"deviceId"`
-	Nickname  string `json:"nickname"`
-	Message   string `json:"message"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	RequestID  string `json:"requestId"`
+	DeviceID   string `json:"deviceId"`
+	Nickname   string `json:"nickname"`
+	Message    string `json:"message"`
+	Status     string `json:"status"`
+	Direction  string `json:"direction"`
+	CreatedAt  string `json:"createdAt"`
+	AcceptedAt string `json:"acceptedAt,omitempty"`
+	UpdatedAt  string `json:"updatedAt"`
 }
 
 type Conversation struct {

@@ -263,7 +263,9 @@ export class FriendRequest {
     "nickname": string;
     "message": string;
     "status": string;
+    "direction": string;
     "createdAt": string;
+    "acceptedAt"?: string;
     "updatedAt": string;
 
     /** Creates a new FriendRequest instance. */
@@ -282,6 +284,9 @@ export class FriendRequest {
         }
         if (!("status" in $$source)) {
             this["status"] = "";
+        }
+        if (!("direction" in $$source)) {
+            this["direction"] = "";
         }
         if (!("createdAt" in $$source)) {
             this["createdAt"] = "";

@@ -18,7 +18,7 @@ export const useChatStore = defineStore('chat', {
   getters: {
     friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
     discovered: (state) => state.peers.filter((peer) => peer.relation !== 'friend' && peer.online),
-    pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending'),
+    pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },
   actions: {
@@ -29,7 +29,10 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:friend-request') this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId)]
       if (name === 'chat:friend-request-updated') {
         const request = this.requests.find((item) => item.requestId === value?.requestId)
-        if (request && value?.status) request.status = value.status
+        if (request && value?.status) {
+          request.status = value.status
+          if (value.acceptedAt !== undefined) request.acceptedAt = value.acceptedAt
+        }
       }
       if (name === 'chat:message-status') {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))

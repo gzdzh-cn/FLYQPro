@@ -267,7 +267,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		// A known peer may send a request even when discovery is disabled. The
 		// discoverable flag controls presence broadcasts, not direct requests
 		// received over an already authenticated connection.
-		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", CreatedAt: nowString()}
+		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
 		if err := SaveFriendRequest(context.Background(), request); err == nil {
 			e.emit("chat:friend-request", request)
 		}
@@ -279,7 +279,16 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			}
 		}
 		_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
-		e.emit("chat:friend-request-updated", map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID})
+		update := map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID}
+		if requests, listErr := ListFriendRequests(context.Background(), ""); listErr == nil {
+			for _, request := range requests {
+				if request.RequestID == message.RequestID {
+					update["acceptedAt"] = request.AcceptedAt
+					break
+				}
+			}
+		}
+		e.emit("chat:friend-request-updated", update)
 		e.emit("chat:peer-updated", e.Peers())
 	case "friend_restore":
 		e.mu.RLock()
@@ -769,7 +778,7 @@ func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string
 	if err != nil {
 		return FriendRequest{}, err
 	}
-	request := FriendRequest{RequestID: newID(), DeviceID: deviceID, Message: strings.TrimSpace(message), Status: "queued", CreatedAt: nowString()}
+	request := FriendRequest{RequestID: newID(), DeviceID: deviceID, Nickname: peer.Nickname, Message: strings.TrimSpace(message), Status: "queued", Direction: "sent", CreatedAt: nowString()}
 	if err := SaveFriendRequest(ctx, request); err != nil {
 		return FriendRequest{}, err
 	}
