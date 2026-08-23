@@ -6,6 +6,7 @@ build/linux/appimage/build
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
 
 frontend/.npm-cache
+frontend/bindings
 
 # Local SQLite development data and sidecar files
 **/resource/app.db
