@@ -16,11 +16,17 @@
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
     </aside>
+    <Transition name="peer-info">
+      <aside v-if="showPeerInfo && activePeer" class="info-pane info-overlay" @click.stop>
+        <div class="info-head"><strong>好友资料</strong></div>
+        <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3>{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
+        <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
+      </aside>
+    </Transition>
 
     <section v-if="section === 'friends'" class="workspace">
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
-        <div class="pane-title"><div><strong>好友</strong><span>{{ store.friends.length }}</span></div><button class="icon-button" @click="section = 'discover'" title="发现好友"><icon-plus /></button></div>
-        <a-input v-model="friendSearch" class="search" placeholder="搜索好友" allow-clear />
+        <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="section = 'discover'" title="发现好友"><icon-plus /></button></div>
         <div class="list-scroll">
           <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId }" @click="selectPeer(peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
@@ -35,11 +41,11 @@
           <div class="head-peer"><strong>{{ activePeer.remark || activePeer.nickname }}</strong><span class="head-status" :class="{ onlineText: activePeer.online }"><i :class="{ online: activePeer.online }" />{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div>
           <a-button type="text" aria-label="好友资料" @click="showPeerInfo = !showPeerInfo" title="好友资料"><icon-more /></a-button>
         </header>
-        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @click="markActiveRead">
+        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
-            <div class="message-bubble"><template v-if="message.kind === 'file'"><button v-if="message.attachmentMime?.startsWith('image/')" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status) }}</span></template></small></div>
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="message.attachmentMime?.startsWith('image/')" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status) }}</span></template></small></div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
@@ -48,15 +54,10 @@
           <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button></div>
           <div v-if="emojiOpen" class="emoji-panel"><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
-          <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
+          <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
           <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom">{{ newMessageCount }} 条新消息</button>
         </footer>
-        <aside v-if="showPeerInfo" class="info-pane info-overlay" @click.stop>
-          <div class="info-head"><strong>好友资料</strong><button class="icon-button" @click="showPeerInfo = false"><icon-close /></button></div>
-          <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3>{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
-          <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
-        </aside>
         <a-modal v-model:visible="imageViewerOpen" :footer="false" :title="imageViewerName" width="min(900px, 90vw)"><div class="image-viewer"><button aria-label="上一张" title="上一张" @click="moveImage(-1)"><icon-left /></button><img v-if="imageViewerSource" :src="imageViewerSource" /><button aria-label="下一张" title="下一张" @click="moveImage(1)"><icon-right /></button></div><div v-if="imageMessages.length > 1" class="image-thumbnails"><button v-for="(image, index) in imageMessages" :key="image.messageId" :class="{ active: index === imageViewerIndex }" :title="image.attachmentName || '图片'" @click="imageViewerIndex = index"><img :src="messagePreviews[image.messageId]" /></button></div></a-modal>
       </main>
       <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>POPChat</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="section = 'discover'">发现局域网好友</a-button></main>
@@ -64,7 +65,7 @@
 
     <section v-else-if="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
-        <div class="pane-title"><div><strong>发现</strong><span>{{ store.discovered.length }}</span></div><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
+        <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
         <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
         <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
       </aside>
@@ -153,6 +154,7 @@ const scanning = ref(false)
 let resizeState: { kind: 'friends' | 'discover' | 'composer'; startX: number; startY: number; startValue: number } | undefined
 let notificationAudio: AudioContext | undefined
 let audioUnlocked = false
+let suppressScrollReadUntil = 0
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -209,7 +211,7 @@ async function resetAttachmentPath() { if (defaultAttachmentPath.value) await mi
 async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
 async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme) } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
 async function refreshPeers() { if (scanning.value) return; scanning.value = true; try { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') } catch (error: any) { Message.error(error?.message || '扫描失败') } finally { scanning.value = false } }
-function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined }
+function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined; showPeerInfo.value = false }
 function selectRequest(request: FriendRequest) {
   if (selectedRequest.value?.deviceId === request.deviceId) {
     clearDiscoverySelection()
@@ -265,9 +267,12 @@ async function pickFile() { pickedFile.value = await ChatService.PickFile(); if 
 async function acceptAttachment(message: any) { try { await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = 'saved'; await loadMessagePreview(message); Message.success('文件已保存') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+function closePeerInfo() { showPeerInfo.value = false }
+function handleMessageAreaClick() { closePeerInfo(); markActiveRead() }
+function handleComposerFocus() { closePeerInfo(); markActiveRead() }
 function markActiveRead() { if (!conversationVisible.value || !activePeer.value) return; store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) }
-function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (userNearBottom.value) { newMessageCount.value = 0; markActiveRead() } }
-function scrollToBottom() { const el = messageScroll.value; if (el) { el.scrollTop = el.scrollHeight; userNearBottom.value = true; newMessageCount.value = 0 } }
+function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
+function scrollToBottom(preserveUnread = false) { const el = messageScroll.value; if (el) { if (preserveUnread) suppressScrollReadUntil = performance.now() + 250; el.scrollTop = el.scrollHeight; userNearBottom.value = true; newMessageCount.value = 0 } }
 function startResize(kind: 'friends' | 'discover' | 'composer', event: PointerEvent) { resizeState = { kind, startX: event.clientX, startY: event.clientY, startValue: kind === 'friends' ? friendsWidth.value : kind === 'discover' ? discoveryWidth.value : composerHeight.value }; window.addEventListener('pointermove', onResize); window.addEventListener('pointerup', stopResize) }
 function onResize(event: PointerEvent) { if (!resizeState) return; if (resizeState.kind === 'friends') friendsWidth.value = Math.min(440, Math.max(220, resizeState.startValue + event.clientX - resizeState.startX)); else if (resizeState.kind === 'discover') discoveryWidth.value = Math.min(460, Math.max(240, resizeState.startValue + event.clientX - resizeState.startX)); else composerHeight.value = Math.min(320, Math.max(120, resizeState.startValue - event.clientY + resizeState.startY)) }
 function stopResize() { if (!resizeState) return; localStorage.setItem('popchat.friendsWidth', String(friendsWidth.value)); localStorage.setItem('popchat.discoveryWidth', String(discoveryWidth.value)); localStorage.setItem('popchat.composerHeight', String(composerHeight.value)); resizeState = undefined; window.removeEventListener('pointermove', onResize); window.removeEventListener('pointerup', stopResize) }
@@ -282,14 +287,12 @@ watch(() => activeMessages.value, (messages) => messages.forEach(loadMessagePrev
 watch(() => store.lastMessageEvent, (message) => {
   if (!message || message.senderDeviceId === deviceInfo.value?.deviceId) return
   const isActiveConversation = conversationVisible.value && message.conversationId === `conv-${activePeer.value?.deviceId}`
-  if (isActiveConversation && userNearBottom.value) requestAnimationFrame(() => { scrollToBottom(); markActiveRead() })
+  if (isActiveConversation && userNearBottom.value) requestAnimationFrame(() => scrollToBottom(true))
   else if (isActiveConversation) newMessageCount.value += 1
   playNotificationTone()
 })
-watch(section, (value, previous) => {
-  if (value === 'friends' && previous !== 'friends' && activePeer.value) {
-    requestAnimationFrame(() => { scrollToBottom() })
-  }
+watch(section, (value) => {
+  if (value !== 'friends') closePeerInfo()
 })
 watch(() => editProfile.theme, (value) => applyTheme(value))
 watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
@@ -375,6 +378,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
   --list-bg: #f1f3f6;
   --accent: #5c7398;
   --shadow: 0 12px 30px rgba(37, 48, 62, .08);
+  --message-incoming: #e5ebf2;
+  --message-outgoing: #3767e8;
+  --message-outgoing-text: #ffffff;
 }
 .chat-app.theme-dark {
   --app-bg: #0f1115;
@@ -389,6 +395,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
   --list-bg: #202428;
   --accent: #7897d0;
   --shadow: 0 14px 36px rgba(0, 0, 0, .28);
+  --message-incoming: #252d38;
+  --message-outgoing: #3f639d;
+  --message-outgoing-text: #f7faff;
 }
 .chat-app,
 .chat-app .workspace,
@@ -417,7 +426,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .chat-app .peer-row { color: var(--text); }
 .chat-app .peer-row strong { color: var(--text); font-weight: 600; }
 .chat-app .peer-row span { color: var(--muted); }
-.chat-app .message-bubble { background: var(--surface-1); color: var(--text); box-shadow: var(--shadow); }
+.chat-app .message-bubble { background: var(--message-incoming); color: var(--text); box-shadow: var(--shadow); }
+.chat-app .message-line.mine .message-bubble { background: var(--message-outgoing); color: var(--message-outgoing-text); }
 .chat-app .composer textarea { background: transparent; color: var(--text); }
 .chat-app .composer textarea::placeholder { color: var(--muted); }
 .chat-app .pane-title span,
@@ -658,6 +668,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
   left: 0;
   right: 0;
   height: 38px;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  -webkit-app-region: drag;
   --wails-draggable: drag;
   --wails-non-client-region: caption;
   background: transparent;
@@ -669,6 +683,27 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
   z-index: 21;
 }
 .chat-app.is-mac .discovery-pane > .pane-title .scan-button {
+  position: relative;
+  z-index: 22;
+  pointer-events: auto;
+}
+.chat-app.is-mac .friend-pane-title {
+  position: relative;
+  z-index: 21;
+  pointer-events: none;
+}
+.chat-app.is-mac .friend-pane-title .friend-search,
+.chat-app.is-mac .friend-pane-title .icon-button {
+  position: relative;
+  z-index: 22;
+  pointer-events: auto;
+}
+.chat-app.is-mac .conversation-head {
+  position: relative;
+  z-index: 21;
+  pointer-events: none;
+}
+.chat-app.is-mac .conversation-head button {
   position: relative;
   z-index: 22;
   pointer-events: auto;
@@ -752,7 +787,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .conversation-head { height: 58px; flex-basis: 58px; padding: 0 18px; }
 .head-peer strong { font-size: 14px; }
 .head-peer span { font-size: 11px; }
-.message-line { align-items: flex-end; gap: 8px; }
+.message-line { align-items: center; gap: 8px; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .message-status { display: inline-flex; width: 52px; height: 17px; margin-left: 6px; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255, 255, 255, .2); font-size: 10px; vertical-align: middle; }
 .vertical-resizer { width: 5px; flex: 0 0 5px; margin-left: -3px; margin-right: -2px; cursor: col-resize; position: relative; z-index: 6; }
@@ -769,7 +804,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .image-message { display: block; max-width: 270px; padding: 0; border: 0; background: transparent; cursor: zoom-in; overflow: hidden; border-radius: 8px; color: inherit; }
 .image-message img { display: block; width: 100%; max-height: 220px; object-fit: cover; }
 .new-message-button { position: absolute; right: 22px; top: -41px; z-index: 8; border: 0; border-radius: 5px; padding: 7px 10px; background: var(--accent); color: #fff; font-size: 12px; cursor: pointer; box-shadow: var(--shadow); }
-.info-overlay { position: absolute; z-index: 12; top: 58px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+.info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
 .info-fields input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); }
 .image-viewer { display: flex; min-height: 50vh; align-items: center; justify-content: center; gap: 12px; }
 .image-viewer img { max-width: calc(100% - 96px); max-height: 70vh; object-fit: contain; }
@@ -778,23 +813,33 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .image-thumbnails button { width: 56px; height: 56px; flex: 0 0 56px; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 5px; background: transparent; cursor: pointer; }
 .image-thumbnails button.active { border-color: var(--accent); }
 .image-thumbnails img { width: 100%; height: 100%; object-fit: cover; }
-.pane-title { padding: 18px 16px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.pane-title { height: 52px; flex: 0 0 52px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.discovery-pane > .pane-title { justify-content: flex-end; }
+.friend-pane-title > div { flex: 0 0 auto; }
+.friend-search { flex: 1 1 auto; min-width: 0; margin: 0 10px 0 12px; }
+.friend-search :deep(.arco-input-wrapper) { height: 30px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-1); box-shadow: 0 1px 3px rgba(37, 48, 62, .06); }
+.friend-search :deep(.arco-input-wrapper:focus-within) { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.friend-search :deep(.arco-input-prefix) { color: var(--muted); }
 .search { margin-top: 12px; margin-bottom: 12px; }
 .group-title { align-items: center; }
 .group-title > span { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; line-height: 20px; }
 .group-title > span svg { width: 14px; height: 14px; flex: 0 0 14px; }
 
 /* Chat density and interaction polish. */
-.conversation-head { height: 58px; flex-basis: 58px; padding: 0 18px; }
+.conversation-head { height: 52px; flex-basis: 52px; padding: 0 18px; }
 .head-peer { min-width: 0; gap: 9px; }
 .head-peer strong { max-width: min(45vw, 360px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .head-peer > .head-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); white-space: nowrap; }
 .head-status i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--muted); }
 .head-status i.online { background: #00b42a; }
-.message-scroll { padding: 18px 0; }
-.message-line { margin: 8px 0; gap: 0; }
+.message-scroll { padding: 18px 14px; }
+.message-line { margin: 8px 0; gap: 10px; }
 .message-bubble { max-width: min(72%, 680px); padding: 9px 12px; border-radius: 14px 14px 14px 5px; line-height: 1.45; }
 .message-line.mine .message-bubble { border-radius: 14px 14px 5px 14px; }
+.message-bubble.text-bubble { position: relative; }
+.message-bubble.text-bubble::after { content: ''; position: absolute; top: 50%; width: 14px; height: 18px; transform: translateY(-50%); background: inherit; pointer-events: none; }
+.message-line:not(.mine) .message-bubble.text-bubble::after { left: -7px; clip-path: polygon(100% 0, 100% 100%, 0 50%); border-radius: 3px 0 0 3px; }
+.message-line.mine .message-bubble.text-bubble::after { right: -7px; clip-path: polygon(0 0, 100% 50%, 0 100%); border-radius: 0 3px 3px 0; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; }
 .avatar-button { padding: 0; border: 0; font: inherit; cursor: pointer; transition: transform .16s ease, filter .16s ease; }
 .avatar-button:hover { transform: translateY(-1px); filter: brightness(1.06); }
@@ -802,7 +847,13 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .peer-copy { flex: 1; }
 .unread-badge { position: absolute; right: 10px; top: 50%; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 10px; transform: translateY(-50%); background: #f53f3f; color: #fff !important; font-size: 10px !important; font-weight: 700 !important; line-height: 18px; text-align: center; }
 .rail-unread-badge { right: 2px !important; top: 0 !important; }
-.info-overlay { top: 58px; bottom: calc(var(--composer-height, 158px) + 12px); width: min(320px, calc(100% - 24px)); padding: 16px; border-radius: 14px; }
+.info-overlay { position: fixed; z-index: 40; top: 52px; right: 0; bottom: 0; width: min(320px, 100vw); padding: 16px; border-radius: 14px 0 0 14px; }
+.peer-info-enter-active,
+.peer-info-leave-active { transition: transform .28s cubic-bezier(.22, .8, .28, 1), opacity .22s ease; will-change: transform, opacity; }
+.peer-info-enter-from,
+.peer-info-leave-to { transform: translateX(100%); opacity: 0; }
+.peer-info-enter-to,
+.peer-info-leave-from { transform: translateX(0); opacity: 1; }
 .info-profile { padding: 20px 0 18px; }
 .composer { display: flex; flex-direction: column; gap: 2px; padding: 8px 18px 10px; overflow: visible; }
 .composer-tools { height: 24px; flex: 0 0 24px; }
@@ -817,7 +868,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 @media (max-width: 760px) {
   .vertical-resizer { display: none; }
   .list-pane { width: 220px !important; flex-basis: 220px !important; }
-  .message-scroll { padding-left: 0; padding-right: 0; }
+  .message-scroll { padding-left: 14px; padding-right: 14px; }
 }
 
 </style>
