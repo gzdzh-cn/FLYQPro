@@ -263,10 +263,9 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 	case "ping":
 		_ = writeWire(conn, wireMessage{Type: "pong", Protocol: ProtocolName, Major: ProtocolMajor, Minor: ProtocolMinor})
 	case "friend_request":
-		profile := e.Profile()
-		if !profile.Discoverable {
-			return
-		}
+		// A known peer may send a request even when discovery is disabled. The
+		// discoverable flag controls presence broadcasts, not direct requests
+		// received over an already authenticated connection.
 		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", CreatedAt: nowString()}
 		if err := SaveFriendRequest(context.Background(), request); err == nil {
 			e.emit("chat:friend-request", request)

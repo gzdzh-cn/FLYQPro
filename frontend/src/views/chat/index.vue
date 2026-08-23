@@ -64,18 +64,18 @@
 
     <section v-else-if="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }">
-        <div class="pane-title"><div><strong>发现</strong><span>{{ store.discovered.length }}</span></div><a-button size="small" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span>{{ groups.requests ? '⌄' : '›' }} 新的朋友</span><b v-if="store.requests.length">{{ store.requests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectedRequest = request"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname }}</strong><span>{{ request.message || '请求添加你为好友' }}</span></div></button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span>{{ groups.discovered ? '⌄' : '›' }} 已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectedDiscovery = peer"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
+        <div class="pane-title"><div><strong>发现</strong><span>{{ store.discovered.length }}</span></div><a-button size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
+        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.requests.length">{{ store.requests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectedRequest = request; selectedDiscovery = undefined"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname }}</strong><span>{{ request.message || '请求添加你为好友' }}</span></div></button></div>
+        <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectedDiscovery = peer; selectedRequest = undefined"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
-      <main class="detail-pane" v-if="selectedRequest">
+      <main class="detail-pane" v-if="selectedRequest" @click.self="clearDiscoverySelection">
         <div class="detail-card"><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><p>{{ selectedRequest.message || '想和你成为好友' }}</p><span class="subtle">申请时间 {{ formatTime(selectedRequest.createdAt) }}</span><div class="detail-actions"><a-button type="primary" @click="acceptRequest">同意</a-button><a-button status="danger" @click="rejectRequest">拒绝</a-button></div></div>
       </main>
-      <main class="detail-pane" v-else-if="selectedDiscovery">
+      <main class="detail-pane" v-else-if="selectedDiscovery" @click.self="clearDiscoverySelection">
         <div class="detail-card"><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag color="green">{{ selectedDiscovery.online ? '在线' : '离线' }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">成为好友后，才会显示 IP、端口和完整设备指纹。</p></div>
       </main>
-      <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" @click="refreshPeers">立即扫描</a-button></main>
+      <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" :loading="scanning" :disabled="scanning" @click="refreshPeers">立即扫描</a-button></main>
     </section>
 
     <section v-else class="settings-shell">
@@ -108,7 +108,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
+import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { System, Window } from '@wailsio/runtime'
 import { ChatService } from '/#/helpfly/internal/service'
 import { useChatStore } from '@/store/modules/chat'
@@ -148,6 +148,7 @@ const messageScroll = ref<HTMLElement>()
 const newMessageCount = ref(0)
 const userNearBottom = ref(true)
 const migrationResultVisible = ref(false)
+const scanning = ref(false)
 let resizeState: { kind: 'friends' | 'discover' | 'composer'; startX: number; startY: number; startValue: number } | undefined
 let notificationAudio: AudioContext | undefined
 let audioUnlocked = false
@@ -204,7 +205,8 @@ async function chooseDirectory() { const path = await ChatService.PickDirectory(
 async function resetAttachmentPath() { if (defaultAttachmentPath.value) await migrateAttachmentPath(defaultAttachmentPath.value) }
 async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
 async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme) } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
-async function refreshPeers() { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') }
+async function refreshPeers() { if (scanning.value) return; scanning.value = true; try { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') } catch (error: any) { Message.error(error?.message || '扫描失败') } finally { scanning.value = false } }
+function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined }
 async function addPeer() { if (!selectedDiscovery.value) return; try { await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
 async function acceptRequest() { if (!selectedRequest.value) return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
 async function rejectRequest() { if (!selectedRequest.value) return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
@@ -718,7 +720,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .pane-title { padding: 18px 16px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .search { margin-top: 12px; margin-bottom: 12px; }
 .group-title { align-items: center; }
-.group-title > span { display: inline-flex; align-items: center; min-height: 22px; }
+.group-title > span { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; line-height: 20px; }
+.group-title > span svg { width: 14px; height: 14px; flex: 0 0 14px; }
 
 /* Chat density and interaction polish. */
 .conversation-head { height: 58px; flex-basis: 58px; padding: 0 18px; }
