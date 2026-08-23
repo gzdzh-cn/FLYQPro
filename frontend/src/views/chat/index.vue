@@ -11,7 +11,7 @@
         <div class="avatar large" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
       </button>
       <nav class="rail-nav">
-        <button :class="{ active: section === 'friends' }" @click="section = 'friends'" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small></button>
+        <button :class="{ active: section === 'friends' }" @click="section = 'friends'" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small><b v-if="totalUnreadCount" class="rail-unread-badge">{{ unreadLabel(totalUnreadCount) }}</b></button>
         <button :class="{ active: section === 'discover' }" @click="section = 'discover'" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.requests.length">{{ store.requests.length }}</b></button>
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
@@ -24,28 +24,28 @@
         <div class="list-scroll">
           <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId }" @click="selectPeer(peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
-            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}</strong><span>{{ peer.online ? '在线' : '离线' }}</span></div>
+            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}</strong><span>{{ peer.online ? '在线' : '离线' }}</span></div><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b>
           </button>
           <div v-if="!filteredFriends.length" class="empty-small"><div class="empty-icon">⌁</div><p>还没有好友</p><a-button type="primary" size="small" @click="section = 'discover'">去发现好友</a-button></div>
         </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('friends', $event)" title="调整列表宽度" />
-      <main class="conversation" v-if="activePeer">
-        <header class="conversation-head">
-          <div class="head-peer"><div><strong>{{ activePeer.remark || activePeer.nickname }}</strong><span :class="{ onlineText: activePeer.online }">{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div></div>
+        <main class="conversation" v-if="activePeer" :style="{ '--composer-height': `${composerHeight}px` }">
+          <header class="conversation-head">
+          <div class="head-peer"><strong>{{ activePeer.remark || activePeer.nickname }}</strong><span class="head-status" :class="{ onlineText: activePeer.online }"><i :class="{ online: activePeer.online }" />{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div>
           <a-button type="text" aria-label="好友资料" @click="showPeerInfo = !showPeerInfo" title="好友资料"><icon-more /></a-button>
         </header>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @click="markActiveRead">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
-            <div v-if="message.senderDeviceId !== deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div>
+            <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <div class="message-bubble"><template v-if="message.kind === 'file'"><button v-if="message.attachmentMime?.startsWith('image/')" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status) }}</span></template></small></div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :style="{ height: `${composerHeight}px` }">
-          <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button><span v-if="pickedFile" class="picked-file">{{ pickedFile }}</span></div>
+          <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button></div>
           <div v-if="emojiOpen" class="emoji-panel"><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
           <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
@@ -158,6 +158,7 @@ const filteredFriends = computed(() => {
   if (!keyword) return store.friends
   return store.friends.filter((peer) => `${peer.remark || ''} ${peer.nickname}`.toLowerCase().includes(keyword))
 })
+const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && message.attachmentMime?.startsWith('image/') && messagePreviews[message.messageId]))
 const imageViewerSource = computed(() => messagePreviews[imageMessages.value[imageViewerIndex.value]?.messageId] || '')
@@ -171,9 +172,11 @@ function avatarStyle(value: string, image?: string) { if (image) return { backgr
 function formatTime(value: string) { if (!value) return ''; const date = new Date(value); const now = new Date(); const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); const diff = Math.round((today.getTime() - day.getTime()) / 86400000); const time = date.toLocaleTimeString('zh-CN', { hour: 'numeric', minute: '2-digit', hour12: true }); if (diff === 0) return `今天 ${time}`; if (diff === 1) return `昨天 ${time}`; if (diff === 2) return `前天 ${time}`; return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${time}` }
 function formatLastSeen(value: string) { return value ? formatTime(value) : '未知' }
 function messageStatusText(status: string) { return ({ sending: '发送中', sent: '发送成功', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status }
+function unreadCount(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId)?.unreadCount || 0 }
+function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('popchat-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('popchat-dark') } }
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus() } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
-function selectPeer(peer: Peer) { store.selectPeer(peer.deviceId); showPeerInfo.value = false; peerRemark.value = peer.remark || ''; newMessageCount.value = 0; ChatService.EnsureConversation(peer.deviceId).then((id) => ChatService.ListMessages(id).then((messages) => { store.messages[id] = messages; requestAnimationFrame(scrollToBottom); return ChatService.MarkConversationRead(peer.deviceId) }).catch(() => undefined)) }
+function selectPeer(peer: Peer) { store.selectPeer(peer.deviceId); store.clearConversationUnread(peer.deviceId); showPeerInfo.value = false; peerRemark.value = peer.remark || ''; newMessageCount.value = 0; ChatService.EnsureConversation(peer.deviceId).then((id) => ChatService.ListMessages(id).then((messages) => { store.messages[id] = messages; requestAnimationFrame(scrollToBottom); return ChatService.MarkConversationRead(peer.deviceId) }).catch(() => undefined)) }
 function openSettings(tab: string) { if (store.attachmentMigration.active) return; section.value = 'settings'; settingsTab.value = tab }
 async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
 function syncNickname() { editProfile.nickname = editProfile.nickname.trim() }
@@ -207,8 +210,8 @@ async function acceptRequest() { if (!selectedRequest.value) return; await ChatS
 async function rejectRequest() { if (!selectedRequest.value) return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
 async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); store.handleEvent('chat:message', message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); store.handleEvent('chat:message', message) } draft.value = ''; pendingImages.value = []; requestAnimationFrame(scrollToBottom) } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
-async function loadMessagePreview(message: any) { if (!message?.attachmentId || !message.attachmentMime?.startsWith('image/') || messagePreviews[message.messageId]) return; try { messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId) } catch { /* pending remote image */ } }
-function openImage(message: any) { const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId); if (index >= 0) { imageViewerIndex.value = index; imageViewerOpen.value = true } }
+async function loadMessagePreview(message: any) { if (!message?.attachmentId || !message.attachmentMime?.startsWith('image/') || messagePreviews[message.messageId]) return; try { messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId) } catch { /* pending remote image; clicking the image retries */ } }
+async function openImage(message: any) { await loadMessagePreview(message); const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId); if (index >= 0) { imageViewerIndex.value = index; imageViewerOpen.value = true } else { Message.warning('图片仍在接收或暂时无法读取') } }
 function moveImage(direction: number) { const count = imageMessages.value.length; if (count) imageViewerIndex.value = (imageViewerIndex.value + direction + count) % count }
 function handleImageViewerKey(event: KeyboardEvent) { if (!imageViewerOpen.value) return; if (event.key === 'ArrowLeft') { event.preventDefault(); moveImage(-1) } if (event.key === 'ArrowRight') { event.preventDefault(); moveImage(1) } if (event.key === 'Escape') imageViewerOpen.value = false }
 function unlockNotificationAudio() {
@@ -241,7 +244,7 @@ async function pickFile() { pickedFile.value = await ChatService.PickFile(); if 
 async function acceptAttachment(message: any) { try { await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = 'saved'; await loadMessagePreview(message); Message.success('文件已保存') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
-function markActiveRead() { if (activePeer.value) void ChatService.MarkConversationRead(activePeer.value.deviceId) }
+function markActiveRead() { if (activePeer.value) { store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) } }
 function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (userNearBottom.value) newMessageCount.value = 0 }
 function scrollToBottom() { const el = messageScroll.value; if (el) { el.scrollTop = el.scrollHeight; userNearBottom.value = true; newMessageCount.value = 0 } }
 function startResize(kind: 'friends' | 'discover' | 'composer', event: PointerEvent) { resizeState = { kind, startX: event.clientX, startY: event.clientY, startValue: kind === 'friends' ? friendsWidth.value : kind === 'discover' ? discoveryWidth.value : composerHeight.value }; window.addEventListener('pointermove', onResize); window.addEventListener('pointerup', stopResize) }
@@ -716,6 +719,36 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerK
 .search { margin-top: 12px; margin-bottom: 12px; }
 .group-title { align-items: center; }
 .group-title > span { display: inline-flex; align-items: center; min-height: 22px; }
+
+/* Chat density and interaction polish. */
+.conversation-head { height: 58px; flex-basis: 58px; padding: 0 18px; }
+.head-peer { min-width: 0; gap: 9px; }
+.head-peer strong { max-width: min(45vw, 360px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head-peer > .head-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); white-space: nowrap; }
+.head-status i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--muted); }
+.head-status i.online { background: #00b42a; }
+.message-scroll { padding: 18px clamp(18px, 6vw, 72px); }
+.message-line { margin: 8px 0; gap: 8px; }
+.message-bubble { max-width: min(72%, 680px); padding: 9px 12px; border-radius: 14px 14px 14px 5px; line-height: 1.45; }
+.message-line.mine .message-bubble { border-radius: 14px 14px 5px 14px; }
+.message-avatar { width: 32px; height: 32px; border-radius: 10px; }
+.avatar-button { padding: 0; border: 0; font: inherit; cursor: pointer; transition: transform .16s ease, filter .16s ease; }
+.avatar-button:hover { transform: translateY(-1px); filter: brightness(1.06); }
+.peer-row { position: relative; padding-right: 42px; }
+.peer-copy { flex: 1; }
+.unread-badge { position: absolute; right: 10px; top: 50%; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 10px; transform: translateY(-50%); background: #f53f3f; color: #fff !important; font-size: 10px !important; font-weight: 700 !important; line-height: 18px; text-align: center; }
+.rail-unread-badge { right: 2px !important; top: 0 !important; }
+.info-overlay { top: 58px; bottom: calc(var(--composer-height, 158px) + 12px); width: min(320px, calc(100% - 24px)); padding: 16px; border-radius: 14px; }
+.info-profile { padding: 20px 0 18px; }
+.composer { display: flex; flex-direction: column; gap: 2px; padding: 8px 18px 10px; overflow: visible; }
+.composer-tools { height: 24px; flex: 0 0 24px; }
+.composer textarea { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 5px 0; }
+.composer-foot { min-height: 28px; flex: 0 0 28px; gap: 12px; }
+.composer-foot > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-foot :deep(.arco-btn) { flex: 0 0 auto; min-width: 72px; }
+.emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; width: 174px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); }
+.pending-images { flex: 0 0 auto; max-height: 50px; overflow-x: auto; flex-wrap: nowrap; padding: 3px 0; }
+.pending-image { width: 44px; height: 44px; flex: 0 0 44px; }
 
 @media (max-width: 760px) {
   .vertical-resizer { display: none; }

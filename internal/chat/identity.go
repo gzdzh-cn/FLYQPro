@@ -28,6 +28,9 @@ type Identity struct {
 }
 
 func AppDataDir() string {
+	if value := strings.TrimSpace(os.Getenv("POPCHAT_DATA_DIR")); value != "" {
+		return value
+	}
 	if value := strings.TrimSpace(os.Getenv("LANCHAT_DATA_DIR")); value != "" {
 		return value
 	}
@@ -35,7 +38,7 @@ func AppDataDir() string {
 	if err != nil || base == "" {
 		base = "."
 	}
-	return filepath.Join(base, "LANChat")
+	return filepath.Join(base, "POPChat")
 }
 
 func DefaultAttachmentDir() string {

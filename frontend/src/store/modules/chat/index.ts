@@ -52,6 +52,22 @@ export const useChatStore = defineStore('chat', {
         const index = list.findIndex((item) => item.messageId === value.messageId)
         if (index < 0) {
           this.messages[value.conversationId] = [...list, value]
+          const peerDeviceId = value.conversationId.startsWith('conv-') ? value.conversationId.slice(5) : ''
+          const conversation = this.conversations.find((item) => item.conversationId === value.conversationId || item.peerDeviceId === peerDeviceId)
+          if (conversation) {
+            conversation.lastMessage = value.content || value.attachmentName || ''
+            conversation.lastMessageAt = value.createdAt || conversation.lastMessageAt
+            conversation.unreadCount = this.activePeerId === peerDeviceId ? 0 : (conversation.unreadCount || 0) + 1
+          } else if (peerDeviceId) {
+            this.conversations = [...this.conversations, {
+              conversationId: value.conversationId,
+              peerDeviceId,
+              lastMessage: value.content || value.attachmentName || '',
+              lastMessageAt: value.createdAt || '',
+              unreadCount: this.activePeerId === peerDeviceId ? 0 : 1,
+              pinned: false,
+            }]
+          }
           if (name === 'chat:message') this.lastMessageEvent = value
         } else {
           const next = list.slice()
@@ -61,6 +77,10 @@ export const useChatStore = defineStore('chat', {
       }
     },
     selectPeer(deviceId: string) { this.activePeerId = deviceId },
+    clearConversationUnread(deviceId: string) {
+      const conversation = this.conversations.find((item) => item.peerDeviceId === deviceId)
+      if (conversation) conversation.unreadCount = 0
+    },
     setSection(section: string) { this.activeSection = section },
   },
 })

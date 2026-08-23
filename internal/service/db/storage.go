@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	defaultAppDataDir = "LANChat"
+	defaultAppDataDir = "POPChat"
+	legacyAppDataDir  = "LANChat"
 	defaultSQLiteName = "app.db"
 )
 
@@ -219,7 +220,17 @@ func resolveSQLitePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, defaultAppDataDir, defaultSQLiteName), nil
+	preferred := filepath.Join(configDir, defaultAppDataDir, defaultSQLiteName)
+	legacy := filepath.Join(configDir, legacyAppDataDir, defaultSQLiteName)
+	if _, err := os.Stat(preferred); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if _, err := os.Stat(preferred); os.IsNotExist(err) {
+		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+			return legacy, nil
+		}
+	}
+	return preferred, nil
 }
 
 func developmentResourceDir() string {
