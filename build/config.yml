@@ -7,7 +7,7 @@ version: '3'
 info:
   companyName: "DZH"
   productName: "POPChat"
-  productIdentifier: "com.dzh.lanchat"
+  productIdentifier: "com.dzh.popchat"
   description: "局域网点对点聊天工具"
   copyright: "(c) 2026, DZH"
   comments: "POPChat desktop application"

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gogf/gf/v2/database/gdb"
-	"helpfly/internal/service/db"
+	"popchat/internal/service/db"
 )
 
 type profileRow struct {

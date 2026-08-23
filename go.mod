@@ -1,4 +1,4 @@
-module helpfly
+module popchat
 
 go 1.25.0
 

@@ -6,7 +6,11 @@ build/linux/appimage/build
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
 
 frontend/.npm-cache
-frontend/bindings
+frontend/bindings/*
+!frontend/bindings/github.com/
+!frontend/bindings/github.com/**
+!frontend/bindings/popchat/
+!frontend/bindings/popchat/**
 
 # Local SQLite development data and sidecar files
 **/resource/app.db

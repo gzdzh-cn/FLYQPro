@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"helpfly/internal/service/db"
+	"popchat/internal/service/db"
 )
 
 func TestAttachmentTargetPathUsesStablePeerDirectoryAndSuffix(t *testing.T) {

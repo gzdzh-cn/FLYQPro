@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"helpfly/internal/service/db"
+	"popchat/internal/service/db"
 )
 
 func TestIdentityAndProfilePersist(t *testing.T) {

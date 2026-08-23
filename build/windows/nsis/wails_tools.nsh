@@ -5,13 +5,13 @@
 !include "FileFunc.nsh"
 
 !ifndef INFO_PROJECTNAME
-    !define INFO_PROJECTNAME "helpFly"
+    !define INFO_PROJECTNAME "POPChat"
 !endif
 !ifndef INFO_COMPANYNAME
     !define INFO_COMPANYNAME "gofly"
 !endif
 !ifndef INFO_PRODUCTNAME
-    !define INFO_PRODUCTNAME "helpFly"
+    !define INFO_PRODUCTNAME "POPChat"
 !endif
 !ifndef INFO_PRODUCTVERSION
     !define INFO_PRODUCTVERSION "0.1.0"

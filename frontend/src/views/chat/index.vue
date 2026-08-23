@@ -65,8 +65,7 @@
     <section v-else-if="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><div><strong>发现</strong><span>{{ store.discovered.length }}</span></div><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />收到的申请</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in incomingRequests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || '请求添加你为好友' }}</span></div></button><span v-if="!incomingRequests.length && groups.requests" class="empty-request-history">暂无收到的申请</span></div>
-        <div class="discover-group"><button class="group-title" @click="groups.sent = !groups.sent"><span><icon-down v-if="groups.sent" /><icon-right v-else />我发出的申请</span><b v-if="outgoingRequests.some((request) => request.status === 'sent' || request.status === 'queued')">{{ outgoingRequests.filter((request) => request.status === 'sent' || request.status === 'queued').length }}</b></button><button v-for="request in outgoingRequests" v-show="groups.sent" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || '我发起的好友申请' }}</span></div></button><span v-if="!outgoingRequests.length && groups.sent" class="empty-request-history">暂无发出的申请</span></div>
+        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status) }} · {{ request.message || (request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
         <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
@@ -111,7 +110,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { System, Window } from '@wailsio/runtime'
-import { ChatService } from '/#/helpfly/internal/service'
+import { ChatService } from '/#/popchat/internal/service'
 import { useChatStore } from '@/store/modules/chat'
 import type { FriendRequest, Peer } from '@/store/modules/chat/types'
 
@@ -131,9 +130,7 @@ const appVersion = ref('')
 const isDark = ref(false)
 const isMac = ref(false)
 const editProfile = reactive({ ...store.profile })
-const groups = reactive({ requests: true, sent: true, discovered: true })
-const incomingRequests = computed(() => store.requests.filter((request) => request.direction !== 'sent'))
-const outgoingRequests = computed(() => store.requests.filter((request) => request.direction === 'sent'))
+const groups = reactive({ requests: true, discovered: true })
 function storedSize(key: string, fallback: number, min: number, max: number) {
   const value = Number(localStorage.getItem(key))
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback

@@ -8,7 +8,7 @@
         <key>CFBundleExecutable</key>
         <string>POPChat</string>
         <key>CFBundleIdentifier</key>
-        <string>com.dzh.lanchat</string>
+        <string>com.dzh.popchat</string>
         <key>CFBundleVersion</key>
         <string>0.1.0</string>
         <key>CFBundleGetInfoString</key>

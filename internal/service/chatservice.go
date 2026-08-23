@@ -13,9 +13,9 @@ import (
 
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"helpfly/internal/chat"
-	"helpfly/internal/platform/startup"
-	"helpfly/internal/version"
+	"popchat/internal/chat"
+	"popchat/internal/platform/startup"
+	"popchat/internal/version"
 )
 
 type ChatService struct{ engine *chat.Engine }

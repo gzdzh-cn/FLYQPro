@@ -7,8 +7,8 @@ import (
 
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"helpfly/internal/service"
-	"helpfly/internal/service/db"
+	"popchat/internal/service"
+	"popchat/internal/service/db"
 )
 
 //go:embed all:frontend/dist

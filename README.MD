@@ -1,6 +1,6 @@
-# helpFly 助手
+# POPChat
 
-一款基于 **Wails3 + Vue3 + ArcoDesign + GoFrame** 的桌面端应用脚手架。
+一款基于 **Wails3 + Vue3 + ArcoDesign + GoFrame** 的局域网点对点聊天应用。
 
 项目仓库：[gzdzh-cn/helpFly-tool](https://github.com/gzdzh-cn/helpFly-tool)
 
@@ -71,10 +71,10 @@ Wails3 的打包任务是平台相关的，**在哪个平台上运行，就打�
 
 | 目标平台 | 执行环境 | 一键打包命令 | 产出 |
 | --- | --- | --- | --- |
-| macOS | 在 macOS 上 | `wails3 package` | `bin/helpFly.app` |
-| macOS（带可拖拽安装窗口的 DMG） | 在 macOS 上 | `wails3 task darwin:package:macdmg` | `bin/helpFly.dmg`（含 Applications 链接） |
-| macOS 通用二进制（Intel + Apple 芯片） | 在 macOS 上 | `wails3 task darwin:package:universal` | 通用 `bin/helpFly.app` |
-| Windows | 在 Windows 上 | `wails3 task windows:package:installer` | `bin/helpFly-installer.exe`（NSIS 安装包，含 WebView2 引导器） |
+| macOS | 在 macOS 上 | `wails3 package` | `bin/POPChat.app` |
+| macOS（带可拖拽安装窗口的 DMG） | 在 macOS 上 | `wails3 task darwin:package:macdmg` | `bin/POPChat.dmg`（含 Applications 链接） |
+| macOS 通用二进制（Intel + Apple 芯片） | 在 macOS 上 | `wails3 task darwin:package:universal` | 通用 `bin/POPChat.app` |
+| Windows | 在 Windows 上 | `wails3 task windows:package:installer` | `bin/POPChat-installer.exe`（NSIS 安装包，含 WebView2 引导器） |
 | Linux | 在 Linux 上 | `wails3 package` | 可执行文件 / `.deb` / `.AppImage` 等 |
 
 > 注意：跨平台只能做到「交叉编译出二进制」，完整安装包（含图标、签名、注册表/桌面集成）必须在目标系统上执行对应命令。CI 中可用 GitHub Actions 矩阵分别在各平台 runner 上执行对应命令。
@@ -89,11 +89,11 @@ Wails3 的打包任务是平台相关的，**在哪个平台上运行，就打�
 本项目已在 `build/darwin/Taskfile.yml` 中封装好 `package:macdmg` 任务，它会依次完成「编译 → 打包 `.app` → 加 Applications 符号链接 → 生成 DMG」，全程仅用 macOS 自带的 `hdiutil`，无需安装任何第三方工具：
 
 ```bash
-# 在 macOS 上执行，一步产出 bin/helpFly.dmg（带可拖拽安装窗口）
+# 在 macOS 上执行，一步产出 bin/POPChat.dmg（带可拖拽安装窗口）
 wails3 task darwin:package:macdmg
 ```
 
-完成后 `bin/helpFly.dmg` 即为可分发的安装镜像：双击挂载后，窗口里同时显示 `helpFly.app` 和 `Applications` 文件夹图标，**把 app 拖到 Applications 即可完成安装**。
+完成后 `bin/POPChat.dmg` 即为可分发的安装镜像：双击挂载后，窗口里同时显示 `POPChat.app` 和 `Applications` 文件夹图标，**把 app 拖到 Applications 即可完成安装**。
 
 #### 手动分步（等价于上面的命令，便于理解或非 Task 环境使用）
 
@@ -102,18 +102,18 @@ wails3 task darwin:package:macdmg
 wails3 package
 
 # 2) 准备 DMG 暂存目录：放入 app + 一个名为 Applications 的符号链接
-DMG_STAGING=/tmp/helpFly-dmg
+DMG_STAGING=/tmp/popchat-dmg
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
-cp -R bin/helpFly.app "$DMG_STAGING/"
+cp -R bin/POPChat.app "$DMG_STAGING/"
 # 关键：创建指向系统「应用程序」文件夹的符号链接，拖拽时即安装到 /Applications
 ln -s /Applications "$DMG_STAGING/Applications"
 
 # 3) 生成可拖拽安装的 DMG（无需额外依赖，使用 macOS 自带 hdiutil）
-hdiutil create -volname "helpFly" \
+hdiutil create -volname "POPChat" \
   -srcfolder "$DMG_STAGING" \
   -ov -format UDZO \
-  bin/helpFly.dmg
+  bin/POPChat.dmg
 
 # 4) 清理暂存目录
 rm -rf "$DMG_STAGING"
@@ -125,7 +125,7 @@ rm -rf "$DMG_STAGING"
 
 ```bash
 npm i -g create-dmg
-create-dmg bin/helpFly.dmg bin/helpFly.app --volname "helpFly" --overwrite
+create-dmg bin/POPChat.dmg bin/POPChat.app --volname "POPChat" --overwrite
 ```
 
 > 提示：`wails3 task darwin:package:macdmg`（基于 `hdiutil`）零依赖、最稳妥；`create-dmg` 更美观但依赖第三方包，可按需选择。
@@ -136,10 +136,10 @@ create-dmg bin/helpFly.dmg bin/helpFly.app --volname "helpFly" --overwrite
 
 | | 开发模式 | 生产模式 |
 | --- | --- | --- |
-| 数据库位置 | 项目目录下的 `resource/app.db` | 系统用户配置目录中的 `helpfly/app.db` |
-| Windows | 项目 `resource/` | `%AppData%/helpfly/app.db` |
-| macOS | 项目 `resource/` | `~/Library/Application Support/helpfly/app.db` |
-| Linux | 项目 `resource/` | `~/.config/helpfly/app.db` |
+| 数据库位置 | 项目目录下的 `resource/app.db` | 系统用户配置目录中的 `POPChat/app.db` |
+| Windows | 项目 `resource/` | `%AppData%/POPChat/app.db` |
+| macOS | 项目 `resource/` | `~/Library/Application Support/POPChat/app.db` |
+| Linux | 项目 `resource/` | `~/.config/POPChat/app.db` |
 | 调试日志 | 开启（可见 SQL） | 关闭（更干净，启用 WAL） |
 
 > 首次启动会自动创建目录与数据表，无需手动初始化。
