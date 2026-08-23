@@ -205,7 +205,7 @@ async function refreshPeers() { await ChatService.ScanPeers(); await new Promise
 async function addPeer() { if (!selectedDiscovery.value) return; try { await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
 async function acceptRequest() { if (!selectedRequest.value) return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
 async function rejectRequest() { if (!selectedRequest.value) return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
-async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; try { if (draft.value.trim()) await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); for (const image of pendingImages.value) await ChatService.SendImage(activePeer.value.deviceId, image); draft.value = ''; pendingImages.value = []; requestAnimationFrame(scrollToBottom) } catch (error: any) { Message.error(error?.message || '发送失败') } }
+async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); store.handleEvent('chat:message', message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); store.handleEvent('chat:message', message) } draft.value = ''; pendingImages.value = []; requestAnimationFrame(scrollToBottom) } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) { if (!message?.attachmentId || !message.attachmentMime?.startsWith('image/') || messagePreviews[message.messageId]) return; try { messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId) } catch { /* pending remote image */ } }
 function openImage(message: any) { const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId); if (index >= 0) { imageViewerIndex.value = index; imageViewerOpen.value = true } }
@@ -237,7 +237,7 @@ function playNotificationTone() {
     oscillator.stop(context.currentTime + .17)
   } catch { /* browser audio may be unavailable */ }
 }
-async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); Message.success('文件已发送') } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
+async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); store.handleEvent('chat:message', message); Message.success('文件已发送') } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
 async function acceptAttachment(message: any) { try { await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = 'saved'; await loadMessagePreview(message); Message.success('文件已保存') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
@@ -255,10 +255,17 @@ function closeWindow() { Window.Close() }
 watch(() => store.profile, (value) => Object.assign(editProfile, value), { deep: true })
 watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
 watch(() => activeMessages.value, (messages) => messages.forEach(loadMessagePreview), { deep: true, immediate: true })
-watch(() => store.lastMessageEvent, (message) => { if (!message || message.senderDeviceId === deviceInfo.value?.deviceId) return; if (message.conversationId === `conv-${activePeer.value?.deviceId}` && userNearBottom.value) requestAnimationFrame(scrollToBottom); else newMessageCount.value += 1; playNotificationTone() })
+watch(() => store.lastMessageEvent, (message) => { if (!message || message.senderDeviceId === deviceInfo.value?.deviceId) return; if (message.conversationId === `conv-${activePeer.value?.deviceId}` && userNearBottom.value) requestAnimationFrame(() => { scrollToBottom(); markActiveRead() }); else newMessageCount.value += 1; playNotificationTone() })
 watch(() => editProfile.theme, (value) => applyTheme(value))
 watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
-onMounted(async () => { window.addEventListener('keydown', handleImageViewerKey); window.addEventListener('pointerdown', unlockNotificationAudio, { once: true }); window.addEventListener('keydown', unlockNotificationAudio, { once: true }); isMac.value = System.IsMac(); defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath(); load() })
+onMounted(async () => {
+  window.addEventListener('keydown', handleImageViewerKey)
+  window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
+  window.addEventListener('keydown', unlockNotificationAudio, { once: true })
+  try { isMac.value = System.IsMac() } catch { isMac.value = false }
+  try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
+  await load()
+})
 onBeforeUnmount(() => { window.removeEventListener('keydown', handleImageViewerKey); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
 </script>
 

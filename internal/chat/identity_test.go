@@ -59,6 +59,16 @@ func TestIdentityAndProfilePersist(t *testing.T) {
 	if loaded.Nickname != "测试用户" {
 		t.Fatalf("资料未持久化: %q", loaded.Nickname)
 	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loadedAgain, err := GetProfile(context.Background())
+	if err != nil || loadedAgain.Nickname != "测试用户" {
+		t.Fatalf("SQLite 重启恢复失败: %v, %+v", err, loadedAgain)
+	}
 }
 
 func TestWireMessageIsPortableJSON(t *testing.T) {
@@ -102,13 +112,74 @@ func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
 	root := t.TempDir()
 	_ = os.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
 	defer os.Unsetenv("GOFLY_DB_PATH")
-	if err := db.Open(context.Background()); err != nil { t.Fatal(err) }
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	defer db.Close(context.Background())
-	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil { t.Fatal(err) }
-	if err := SetPeerRelation(context.Background(), "peer-1", PeerRelation); err != nil { t.Fatal(err) }
-	if err := SetPeerRemark(context.Background(), "peer-1", "我的备注"); err != nil { t.Fatal(err) }
-	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "新昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil { t.Fatal(err) }
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerRelation(context.Background(), "peer-1", PeerRelation); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerRemark(context.Background(), "peer-1", "我的备注"); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "新昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil {
+		t.Fatal(err)
+	}
 	peers, err := ListPeers(context.Background(), "")
-	if err != nil || len(peers) != 1 { t.Fatalf("读取好友失败: %v, %d", err, len(peers)) }
-	if peers[0].Relation != PeerRelation || peers[0].Remark != "我的备注" { t.Fatalf("好友关系被发现更新覆盖: %+v", peers[0]) }
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("读取好友失败: %v, %d", err, len(peers))
+	}
+	if peers[0].Relation != PeerRelation || peers[0].Remark != "我的备注" {
+		t.Fatalf("好友关系被发现更新覆盖: %+v", peers[0])
+	}
+}
+
+func TestConversationUnreadAndOutboxPersistence(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := EnsureDefaults(ctx, filepath.Join(root, "attachments")); err != nil {
+		t.Fatal(err)
+	}
+	conversationID, err := EnsureConversation(ctx, "peer-unread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveMessage(ctx, Message{MessageID: "unread-message", ConversationID: conversationID, SenderDeviceID: "peer-unread", Kind: "text", Content: "hello", Status: "sent", CreatedAt: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := IncrementConversationUnread(ctx, conversationID); err != nil {
+		t.Fatal(err)
+	}
+	conversations, err := ListConversations(ctx)
+	if err != nil || len(conversations) != 1 || conversations[0].UnreadCount != 1 {
+		t.Fatalf("未读数未持久化: %v, %+v", err, conversations)
+	}
+	if err := ClearConversationUnread(ctx, conversationID); err != nil {
+		t.Fatal(err)
+	}
+	conversations, err = ListConversations(ctx)
+	if err != nil || len(conversations) != 1 || conversations[0].UnreadCount != 0 {
+		t.Fatalf("未读数未清理: %v, %+v", err, conversations)
+	}
+	if err := SaveOutbox(ctx, "outbox-message", "peer-unread", "message", `{"type":"message","messageId":"unread-message"}`); err != nil {
+		t.Fatal(err)
+	}
+	items, err := ListOutbox(ctx, "peer-unread")
+	if err != nil || len(items) != 1 || items[0].ItemID != "outbox-message" {
+		t.Fatalf("outbox 未持久化: %v, %+v", err, items)
+	}
+	if err := MarkOutboxRetry(ctx, items[0].ItemID, items[0].Attempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteOutbox(ctx, items[0].ItemID); err != nil {
+		t.Fatal(err)
+	}
 }

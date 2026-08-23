@@ -37,6 +37,7 @@ type Engine struct {
 	lastScan            time.Time
 	lastErr             string
 	started             bool
+	serviceStopped      bool
 	attachmentMigration bool
 }
 
@@ -125,6 +126,7 @@ func (e *Engine) Start(ctx context.Context) error {
 
 	e.mu.Lock()
 	e.profile, e.identity, e.listener, e.discoveryTCP, e.udp = profile, identity, listener, discoveryTCP, udp
+	e.serviceStopped = false
 	if peers, peerErr := ListPeers(ctx, ""); peerErr == nil {
 		for _, peer := range peers {
 			e.peers[peer.DeviceID] = peer
@@ -132,6 +134,11 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	e.stop, e.done, e.started = make(chan struct{}), make(chan struct{}), true
 	e.mu.Unlock()
+	for _, peer := range e.Peers() {
+		if peer.Relation == PeerRelation {
+			go e.retryOutbox(peer)
+		}
+	}
 	go e.acceptLoop()
 	go e.discoveryTCPLoop()
 	go e.discoveryLoop()
@@ -151,8 +158,13 @@ func (e *Engine) Stop() {
 	_ = e.listener.Close()
 	_ = e.discoveryTCP.Close()
 	_ = e.udp.Close()
+	for attachmentID, transfer := range e.incoming {
+		_ = transfer.file.Close()
+		delete(e.incoming, attachmentID)
+	}
 	done := e.done
 	e.started = false
+	e.serviceStopped = true
 	e.mu.Unlock()
 	select {
 	case <-done:
@@ -228,6 +240,7 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	if peerErr != nil || verifyPeerCertificate(conn, peer) != nil {
 		return
 	}
+	e.touchPeer(hello.DeviceID)
 	_ = writeWire(conn, e.helloMessage("hello_ack"))
 	_ = conn.SetDeadline(time.Time{})
 	for {
@@ -281,6 +294,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: message.Kind, Content: message.Content, Status: "sent", CreatedAt: nowString()}
 		if err := SaveMessage(context.Background(), messageRecord); err == nil {
+			_ = IncrementConversationUnread(context.Background(), conversationID)
 			e.emit("chat:message", messageRecord)
 		}
 	case "avatar_request":
@@ -364,6 +378,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = file.Close()
 			return
 		}
+		_ = IncrementConversationUnread(context.Background(), conversationID)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: message.MimeType, FileSize: message.FileSize, SHA256: message.SHA256, LocalPath: tempPath, Status: "receiving"})
 		e.mu.Lock()
 		e.incoming[attachmentID] = &incomingFile{file: file, tempPath: tempPath, messageID: message.MessageID, senderID: hello.DeviceID, fileName: message.FileName, expected: message.FileSize, sha256: message.SHA256}
@@ -407,7 +422,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) {
 	valid := sha256Hex(data) == transfer.sha256
 	status := "pending"
 	localPath := transfer.tempPath
-	if valid && e.Profile().AutoSave {
+	if valid && e.Profile().AutoSave && !e.IsAttachmentMigrationActive() {
 		if target, targetErr := AttachmentTargetPath(e.Profile().FileSavePath, transfer.senderID, transfer.fileName); targetErr == nil {
 			localPath = target
 			if os.Rename(transfer.tempPath, localPath) == nil {
@@ -429,6 +444,47 @@ func (e *Engine) finishIncomingFile(attachmentID string) {
 	}
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
+}
+
+// ArchivePendingAttachments moves files that arrived during a storage
+// migration out of the app temp directory after the migration lock is
+// released. Manual-receive attachments remain pending and are handled by the
+// explicit AcceptAttachment action.
+func (e *Engine) ArchivePendingAttachments() {
+	if e.IsAttachmentMigrationActive() || !e.Profile().AutoSave {
+		return
+	}
+	profile := e.Profile()
+	tempRoot, err := absoluteCleanPath(filepath.Join(AppDataDir(), "temp"))
+	if err != nil {
+		return
+	}
+	rows, err := ListAttachmentMigrationRows(context.Background())
+	if err != nil {
+		return
+	}
+	for _, row := range rows {
+		if row.Status != "pending" {
+			continue
+		}
+		source, sourceErr := absoluteCleanPath(row.LocalPath)
+		if sourceErr != nil || !isWithin(source, tempRoot) {
+			continue
+		}
+		if _, statErr := os.Stat(source); statErr != nil {
+			continue
+		}
+		target, targetErr := AttachmentTargetPath(profile.FileSavePath, row.PeerDeviceID, row.FileName)
+		if targetErr != nil || os.Rename(source, target) != nil {
+			continue
+		}
+		if err := UpdateAttachmentLocalPath(context.Background(), row.AttachmentID, target); err != nil {
+			_ = os.Rename(target, source)
+			continue
+		}
+		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, LocalPath: target, Status: "saved"})
+		e.emit("chat:attachment", map[string]any{"attachmentId": row.AttachmentID, "status": "saved", "localPath": target})
+	}
 }
 
 func (e *Engine) discoveryLoop() {
@@ -731,6 +787,7 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 	if err := SaveMessage(ctx, message); err != nil {
 		return Message{}, err
 	}
+	e.emit("chat:message", message)
 	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: content}
 	peer, err := e.peer(deviceID)
 	if err != nil {
@@ -778,7 +835,11 @@ func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) erro
 		readIDs = append(readIDs, message.MessageID)
 	}
 	if len(readIDs) == 0 {
+		_ = ClearConversationUnread(ctx, conversationID)
 		return nil
+	}
+	if err := ClearConversationUnread(ctx, conversationID); err != nil {
+		return err
 	}
 	peer, err := e.peer(deviceID)
 	if err != nil {
@@ -831,42 +892,37 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "sending"}); err != nil {
 		return Message{}, err
 	}
+	e.emit("chat:message", message)
+	fail := func(sendErr error) (Message, error) {
+		message.Status, message.AttachmentStatus = "failed", "failed"
+		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
+		_ = SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "failed"})
+		e.emit("chat:message-status", map[string]any{"messageId": message.MessageID, "status": message.Status})
+		return message, sendErr
+	}
 	peer, err := e.peer(deviceID)
 	if err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, message.Status, message.MessageID)
-		_ = SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "failed"})
-		return message, err
+		return fail(err)
 	}
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		_ = SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "failed"})
-		return message, err
+		return fail(err)
 	}
 	defer conn.Close()
 	if err := verifyPeerCertificate(conn, peer); err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		return message, err
+		return fail(err)
 	}
 	decoder := json.NewDecoder(conn)
 	if err := writeWire(conn, e.helloMessage("hello")); err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		return message, err
+		return fail(err)
 	}
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil || response.Type != "hello_ack" {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		return message, fmt.Errorf("对方握手失败")
+		return fail(fmt.Errorf("对方握手失败"))
 	}
+	e.touchPeer(peer.DeviceID)
 	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: messageID, AttachmentID: attachmentID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum}); err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		return message, err
+		return fail(err)
 	}
 	buffer := make([]byte, 32*1024)
 	index := 0
@@ -874,9 +930,7 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		n, readErr := file.Read(buffer)
 		if n > 0 {
 			if err := writeWire(conn, wireMessage{Type: "file_chunk", AttachmentID: attachmentID, ChunkIndex: index, Payload: base64.StdEncoding.EncodeToString(buffer[:n])}); err != nil {
-				message.Status, message.AttachmentStatus = "failed", "failed"
-				_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-				return message, err
+				return fail(err)
 			}
 			index++
 		}
@@ -884,15 +938,11 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 			break
 		}
 		if readErr != nil {
-			message.Status, message.AttachmentStatus = "failed", "failed"
-			_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-			return message, readErr
+			return fail(readErr)
 		}
 	}
 	if err := writeWire(conn, wireMessage{Type: "file_complete", AttachmentID: attachmentID}); err != nil {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = exec(ctx, `UPDATE messages SET status='failed' WHERE message_id=?`, message.MessageID)
-		return message, err
+		return fail(err)
 	}
 	message.Status, message.AttachmentStatus = "sent", "sent"
 	_ = exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, message.Status, message.MessageID)
@@ -921,6 +971,7 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	if err := decoder.Decode(&response); err != nil || response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
+	e.touchPeer(peer.DeviceID)
 	if peer.Relation == PeerRelation && peer.AvatarHash != "" && !cachedAvatarMatches(peer) {
 		_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
 		if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err == nil {
@@ -943,8 +994,23 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 		if ack.Type == "error" {
 			return fmt.Errorf("%s", ack.Status)
 		}
+		if ack.Type != "ack" || ack.MessageID != message.MessageID || ack.Status != "sent" {
+			return fmt.Errorf("消息确认无效")
+		}
 	}
 	return nil
+}
+
+func (e *Engine) touchPeer(deviceID string) {
+	seen := nowString()
+	_ = exec(context.Background(), `UPDATE peers SET last_seen=?, updated_at=? WHERE device_id=?`, seen, seen, deviceID)
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.LastSeen = seen
+		peer.Online = true
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
 }
 
 func cachedAvatarMatches(peer Peer) bool {
@@ -981,9 +1047,28 @@ func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
 	if len(state.PeerCertificates) == 0 {
 		return fmt.Errorf("对方没有提供证书")
 	}
-	actual := sha256Hex(state.PeerCertificates[0].Raw)
+	certificate := state.PeerCertificates[0]
+	actual := sha256Hex(certificate.Raw)
 	if peer.CertificateFingerprint != "" && !strings.EqualFold(actual, peer.CertificateFingerprint) {
 		return fmt.Errorf("CERTIFICATE_CHANGED")
+	}
+	if peer.CertificateFingerprint == "" && peer.PublicKeyPEM != "" {
+		block, _ := pem.Decode([]byte(peer.PublicKeyPEM))
+		if block == nil {
+			return fmt.Errorf("设备公钥无效")
+		}
+		expected, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("设备公钥无效")
+		}
+		expectedDER, err := x509.MarshalPKIXPublicKey(expected)
+		if err != nil {
+			return err
+		}
+		actualDER, err := x509.MarshalPKIXPublicKey(certificate.PublicKey)
+		if err != nil || !strings.EqualFold(hex.EncodeToString(actualDER), hex.EncodeToString(expectedDER)) {
+			return fmt.Errorf("设备身份不匹配")
+		}
 	}
 	return nil
 }
@@ -1039,7 +1124,13 @@ func (e *Engine) UpdateProfile(profile Profile) {
 
 func (e *Engine) Peers() []Peer {
 	peers, _ := ListPeers(context.Background(), "")
+	e.mu.RLock()
+	serviceStopped := e.serviceStopped
+	e.mu.RUnlock()
 	for index := range peers {
+		if serviceStopped {
+			peers[index].Online = false
+		}
 		if peers[index].AvatarPath == "" {
 			continue
 		}

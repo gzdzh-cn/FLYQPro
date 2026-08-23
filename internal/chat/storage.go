@@ -335,6 +335,14 @@ func SaveMessage(ctx context.Context, message Message) error {
 	return exec(ctx, `UPDATE conversations SET last_message=?, last_message_at=?, updated_at=? WHERE conversation_id=?`, message.Content, message.CreatedAt, nowString(), message.ConversationID)
 }
 
+func IncrementConversationUnread(ctx context.Context, conversationID string) error {
+	return exec(ctx, `UPDATE conversations SET unread_count=unread_count+1, updated_at=? WHERE conversation_id=?`, nowString(), conversationID)
+}
+
+func ClearConversationUnread(ctx context.Context, conversationID string) error {
+	return exec(ctx, `UPDATE conversations SET unread_count=0, updated_at=? WHERE conversation_id=?`, nowString(), conversationID)
+}
+
 func UpdateMessageStatus(ctx context.Context, messageID, status string) error {
 	return exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, status, messageID)
 }

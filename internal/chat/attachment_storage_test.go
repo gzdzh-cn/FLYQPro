@@ -84,3 +84,50 @@ func TestMigrateAttachmentsClassifiesAndVerifiesFiles(t *testing.T) {
 		t.Fatalf("attachment path not persisted: %+v, %v", attachment, err)
 	}
 }
+
+func TestArchivePendingAttachmentsAfterMigration(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	t.Setenv("LANCHAT_DATA_DIR", filepath.Join(root, "data"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := EnsureDataDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDefaults(ctx, filepath.Join(root, "attachments")); err != nil {
+		t.Fatal(err)
+	}
+	conversationID, err := EnsureConversation(ctx, "peer-archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := "archive-message"
+	if err := SaveMessage(ctx, Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: "peer-archive", Kind: "file", Content: "photo.png", Status: "sent", CreatedAt: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	tempPath := filepath.Join(AppDataDir(), "temp", "photo.png")
+	if err := os.WriteFile(tempPath, []byte("photo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: "archive-attachment", MessageID: messageID, FileName: "photo.png", FileSize: 5, LocalPath: tempPath, Status: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := filepath.Join(root, "attachments")
+	engine := NewEngine()
+	engine.profile = Profile{AutoSave: true, FileSavePath: targetRoot}
+	engine.ArchivePendingAttachments()
+	attachment, err := GetAttachment(ctx, "archive-attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(targetRoot, "peer-archive", "photo.png")
+	if attachment.Status != "saved" || attachment.LocalPath != expected {
+		t.Fatalf("pending attachment was not archived: %+v", attachment)
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("archived file missing: %v", err)
+	}
+}

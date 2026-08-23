@@ -49,8 +49,15 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:message' || name === 'chat:attachment') {
         if (!value?.conversationId) return
         const list = this.messages[value.conversationId] || []
-        if (!list.some((item) => item.messageId === value.messageId)) this.messages[value.conversationId] = [...list, value]
-        if (name === 'chat:message') this.lastMessageEvent = value
+        const index = list.findIndex((item) => item.messageId === value.messageId)
+        if (index < 0) {
+          this.messages[value.conversationId] = [...list, value]
+          if (name === 'chat:message') this.lastMessageEvent = value
+        } else {
+          const next = list.slice()
+          next[index] = { ...next[index], ...value }
+          this.messages[value.conversationId] = next
+        }
       }
     },
     selectPeer(deviceId: string) { this.activePeerId = deviceId },

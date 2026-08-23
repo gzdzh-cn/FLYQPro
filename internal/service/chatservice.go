@@ -191,8 +191,27 @@ func (s *ChatService) MigrateAttachmentStorage(targetRoot string) (chat.Attachme
 		return chat.AttachmentMigrationResult{}, fmt.Errorf("保存路径不能为空")
 	}
 	s.engine.SetAttachmentMigrationActive(true)
-	defer s.engine.SetAttachmentMigrationActive(false)
+	var completion *chat.AttachmentMigrationProgress
+	defer func() {
+		s.engine.SetAttachmentMigrationActive(false)
+		// Files received while the migration lock was active stayed in the
+		// application temp directory. Once the final profile root is known,
+		// archive only those eligible files into the new root.
+		s.engine.ArchivePendingAttachments()
+		if completion != nil {
+			if app := application.Get(); app != nil {
+				app.Event.Emit("chat:attachment-migration", *completion)
+			}
+		}
+	}()
 	report := func(progress chat.AttachmentMigrationProgress) {
+		// The profile path is not switched until after the file loop and its
+		// deferred temp-file archive complete. Emit completion only then so the
+		// frontend remains blocked for the entire atomic operation.
+		if progress.Phase == "completed" {
+			completion = &progress
+			return
+		}
 		if app := application.Get(); app != nil {
 			app.Event.Emit("chat:attachment-migration", progress)
 		}
@@ -203,6 +222,7 @@ func (s *ChatService) MigrateAttachmentStorage(targetRoot string) (chat.Attachme
 	}
 	profile.FileSavePath = targetRoot
 	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
+		completion = &chat.AttachmentMigrationProgress{Phase: "failed", SourceRoot: oldRoot, TargetRoot: targetRoot, Current: result.Total, Total: result.Total, Migrated: result.Migrated, Skipped: result.Skipped, Failed: result.Failed + 1, Unclassified: result.Unclassified, ErrorMessage: err.Error()}
 		return result, err
 	}
 	s.engine.UpdateProfile(profile)
@@ -278,7 +298,11 @@ func (s *ChatService) SendImage(deviceID, dataURL string) (chat.Message, error) 
 	if err != nil || len(data) == 0 || len(data) > 100*1024*1024 {
 		return chat.Message{}, fmt.Errorf("图片大小无效")
 	}
-	path := filepath.Join(chat.AppDataDir(), "attachments", "clipboard-"+fmt.Sprintf("%d", time.Now().UnixNano())+ext)
+	tempDir := filepath.Join(chat.AppDataDir(), "temp")
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return chat.Message{}, err
+	}
+	path := filepath.Join(tempDir, "clipboard-"+fmt.Sprintf("%d", time.Now().UnixNano())+ext)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return chat.Message{}, err
 	}
