@@ -46,14 +46,14 @@ func main() {
 		Height:           700,
 		MinWidth:         980,
 		MinHeight:        640,
-		BackgroundType:   application.BackgroundTypeTransparent,
-		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
+		BackgroundType:   application.BackgroundTypeSolid,
+		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
 		Windows: application.WindowsWindow{
 			Theme:                  0,
 			NonClientRegionSupport: true,
 		},
 		Mac: application.MacWindow{
-			Backdrop:     application.MacBackdropTransparent,
+			Backdrop:     application.MacBackdropNormal,
 			CornerType:   application.MacWindowCornerTypeRounded,
 			CornerRadius: 16,
 			TitleBar:     application.MacTitleBarHiddenInsetUnified,

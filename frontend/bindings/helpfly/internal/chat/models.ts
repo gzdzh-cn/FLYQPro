@@ -54,6 +54,56 @@ export class Attachment {
     }
 }
 
+export class AttachmentMigrationResult {
+    "sourceRoot": string;
+    "targetRoot": string;
+    "total": number;
+    "migrated": number;
+    "skipped": number;
+    "failed": number;
+    "unclassified": number;
+    "completed": boolean;
+    "errorMessage"?: string;
+
+    /** Creates a new AttachmentMigrationResult instance. */
+    constructor($$source: Partial<AttachmentMigrationResult> = {}) {
+        if (!("sourceRoot" in $$source)) {
+            this["sourceRoot"] = "";
+        }
+        if (!("targetRoot" in $$source)) {
+            this["targetRoot"] = "";
+        }
+        if (!("total" in $$source)) {
+            this["total"] = 0;
+        }
+        if (!("migrated" in $$source)) {
+            this["migrated"] = 0;
+        }
+        if (!("skipped" in $$source)) {
+            this["skipped"] = 0;
+        }
+        if (!("failed" in $$source)) {
+            this["failed"] = 0;
+        }
+        if (!("unclassified" in $$source)) {
+            this["unclassified"] = 0;
+        }
+        if (!("completed" in $$source)) {
+            this["completed"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new AttachmentMigrationResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): AttachmentMigrationResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new AttachmentMigrationResult($$parsedSource as Partial<AttachmentMigrationResult>);
+    }
+}
+
 export class Conversation {
     "conversationId": string;
     "peerDeviceId": string;
@@ -264,6 +314,7 @@ export class Message {
     "attachmentSize"?: number;
     "attachmentMime"?: string;
     "attachmentStatus"?: string;
+    "attachmentPath"?: string;
 
     /** Creates a new Message instance. */
     constructor($$source: Partial<Message> = {}) {
@@ -366,6 +417,9 @@ export class Peer {
     "deviceId": string;
     "nickname": string;
     "avatarPath": string;
+    "avatarData"?: string;
+    "avatarHash"?: string;
+    "avatarVersion"?: number;
     "platform": string;
     "osVersion": string;
     "ip": string;
@@ -439,6 +493,8 @@ export class Profile {
     "nickname": string;
     "avatarPath": string;
     "avatarData"?: string;
+    "avatarHash"?: string;
+    "avatarVersion"?: number;
     "discoverable": boolean;
     "autoSave": boolean;
     "fileSavePath": string;

@@ -16,6 +16,8 @@ type Profile struct {
 	Nickname        string `json:"nickname"`
 	AvatarPath      string `json:"avatarPath"`
 	AvatarData      string `json:"avatarData,omitempty"`
+	AvatarHash      string `json:"avatarHash,omitempty"`
+	AvatarVersion   int64  `json:"avatarVersion,omitempty"`
 	Discoverable    bool   `json:"discoverable"`
 	AutoSave        bool   `json:"autoSave"`
 	FileSavePath    string `json:"fileSavePath"`
@@ -37,6 +39,9 @@ type Peer struct {
 	DeviceID               string    `json:"deviceId"`
 	Nickname               string    `json:"nickname"`
 	AvatarPath             string    `json:"avatarPath"`
+	AvatarData             string    `json:"avatarData,omitempty"`
+	AvatarHash             string    `json:"avatarHash,omitempty"`
+	AvatarVersion          int64     `json:"avatarVersion,omitempty"`
 	Platform               string    `json:"platform"`
 	OSVersion              string    `json:"osVersion"`
 	IP                     string    `json:"ip"`
@@ -82,6 +87,7 @@ type Message struct {
 	AttachmentSize   int64  `json:"attachmentSize,omitempty"`
 	AttachmentMime   string `json:"attachmentMime,omitempty"`
 	AttachmentStatus string `json:"attachmentStatus,omitempty"`
+	AttachmentPath   string `json:"attachmentPath,omitempty"`
 }
 
 type Attachment struct {
@@ -93,6 +99,33 @@ type Attachment struct {
 	SHA256       string `json:"sha256"`
 	LocalPath    string `json:"localPath"`
 	Status       string `json:"status"`
+}
+
+type AttachmentMigrationResult struct {
+	SourceRoot   string `json:"sourceRoot"`
+	TargetRoot   string `json:"targetRoot"`
+	Total        int    `json:"total"`
+	Migrated     int    `json:"migrated"`
+	Skipped      int    `json:"skipped"`
+	Failed       int    `json:"failed"`
+	Unclassified int    `json:"unclassified"`
+	Completed    bool   `json:"completed"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
+type AttachmentMigrationProgress struct {
+	Phase        string `json:"phase"`
+	SourceRoot   string `json:"sourceRoot"`
+	TargetRoot   string `json:"targetRoot"`
+	Current      int    `json:"current"`
+	Total        int    `json:"total"`
+	FileName     string `json:"fileName,omitempty"`
+	PeerDeviceID string `json:"peerDeviceId,omitempty"`
+	Migrated     int    `json:"migrated"`
+	Skipped      int    `json:"skipped"`
+	Failed       int    `json:"failed"`
+	Unclassified int    `json:"unclassified"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
 }
 
 type NetworkStatus struct {
@@ -121,33 +154,41 @@ type DiagnosticResult struct {
 }
 
 type wireMessage struct {
-	Magic        string   `json:"magic,omitempty"`
-	Type         string   `json:"type"`
-	Protocol     string   `json:"protocol,omitempty"`
-	Major        int      `json:"major,omitempty"`
-	Minor        int      `json:"minor,omitempty"`
-	MinMajor     int      `json:"minMajor,omitempty"`
-	MinMinor     int      `json:"minMinor,omitempty"`
-	RequestID    string   `json:"requestId,omitempty"`
-	MessageID    string   `json:"messageId,omitempty"`
-	DeviceID     string   `json:"deviceId,omitempty"`
-	Nickname     string   `json:"nickname,omitempty"`
-	Platform     string   `json:"platform,omitempty"`
-	OSVersion    string   `json:"osVersion,omitempty"`
-	IP           string   `json:"ip,omitempty"`
-	Port         int      `json:"port,omitempty"`
-	PublicKey    string   `json:"publicKey,omitempty"`
-	CertFP       string   `json:"certificateFingerprint,omitempty"`
-	Content      string   `json:"content,omitempty"`
-	Kind         string   `json:"kind,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	FileName     string   `json:"fileName,omitempty"`
-	MimeType     string   `json:"mimeType,omitempty"`
-	FileSize     int64    `json:"fileSize,omitempty"`
-	SHA256       string   `json:"sha256,omitempty"`
-	AttachmentID string   `json:"attachmentId,omitempty"`
-	MessageIDs   []string `json:"messageIds,omitempty"`
-	ChunkIndex   int      `json:"chunkIndex,omitempty"`
-	Payload      string   `json:"payload,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Magic         string   `json:"magic,omitempty"`
+	Type          string   `json:"type"`
+	Protocol      string   `json:"protocol,omitempty"`
+	Major         int      `json:"major,omitempty"`
+	Minor         int      `json:"minor,omitempty"`
+	MinMajor      int      `json:"minMajor,omitempty"`
+	MinMinor      int      `json:"minMinor,omitempty"`
+	RequestID     string   `json:"requestId,omitempty"`
+	MessageID     string   `json:"messageId,omitempty"`
+	DeviceID      string   `json:"deviceId,omitempty"`
+	Nickname      string   `json:"nickname,omitempty"`
+	AvatarHash    string   `json:"avatarHash,omitempty"`
+	AvatarVersion int64    `json:"avatarVersion,omitempty"`
+	AvatarData    string   `json:"avatarData,omitempty"`
+	AvatarMime    string   `json:"avatarMime,omitempty"`
+	Platform      string   `json:"platform,omitempty"`
+	OSVersion     string   `json:"osVersion,omitempty"`
+	IP            string   `json:"ip,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	PublicKey     string   `json:"publicKey,omitempty"`
+	CertFP        string   `json:"certificateFingerprint,omitempty"`
+	Content       string   `json:"content,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	FileName      string   `json:"fileName,omitempty"`
+	MimeType      string   `json:"mimeType,omitempty"`
+	FileSize      int64    `json:"fileSize,omitempty"`
+	SHA256        string   `json:"sha256,omitempty"`
+	AttachmentID  string   `json:"attachmentId,omitempty"`
+	MessageIDs    []string `json:"messageIds,omitempty"`
+	ChunkIndex    int      `json:"chunkIndex,omitempty"`
+	Payload       string   `json:"payload,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	SyncSince     string   `json:"syncSince,omitempty"`
+	SyncUntil     string   `json:"syncUntil,omitempty"`
+	SyncToken     string   `json:"syncToken,omitempty"`
+	ReadAt        string   `json:"readAt,omitempty"`
 }

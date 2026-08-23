@@ -63,6 +63,38 @@ func Open(ctx context.Context) error {
 			return gerror.WrapCode(gcode.CodeInternalError, err, "初始化 SQLite 表结构失败")
 		}
 	}
+	for _, migration := range []struct{ table, column, definition string }{
+		{"profiles", "avatar_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"profiles", "avatar_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"peers", "avatar_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"peers", "avatar_version", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		var columns []struct {
+			Name string `orm:"name"`
+		}
+		rows, queryErr := database.GetAll(ctx, "PRAGMA table_info("+migration.table+")")
+		if queryErr != nil || rows.Structs(&columns) != nil {
+			database = nil
+			return gerror.NewCode(gcode.CodeInternalError, "检查 SQLite 字段失败")
+		}
+		found := false
+		for _, column := range columns {
+			if column.Name == migration.column {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if _, err := database.Exec(ctx, "ALTER TABLE "+migration.table+" ADD COLUMN "+migration.column+" "+migration.definition); err != nil {
+				database = nil
+				return gerror.WrapCode(gcode.CodeInternalError, err, "迁移 SQLite 字段失败")
+			}
+		}
+	}
+	if _, err := database.Exec(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(1, datetime('now')) ON CONFLICT(version) DO NOTHING`); err != nil {
+		database = nil
+		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
+	}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 5000",

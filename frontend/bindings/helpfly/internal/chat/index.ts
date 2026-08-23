@@ -3,6 +3,7 @@
 
 export {
     Attachment,
+    AttachmentMigrationResult,
     Conversation,
     DeviceInfo,
     DiagnosticItem,

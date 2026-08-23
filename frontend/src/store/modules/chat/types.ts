@@ -1,6 +1,9 @@
 export interface Profile {
   nickname: string
   avatarPath: string
+  avatarData?: string
+  avatarHash?: string
+  avatarVersion?: number
   discoverable: boolean
   autoSave: boolean
   fileSavePath: string
@@ -12,6 +15,9 @@ export interface Peer {
   deviceId: string
   nickname: string
   avatarPath: string
+  avatarData?: string
+  avatarHash?: string
+  avatarVersion?: number
   platform: string
   osVersion: string
   ip: string
@@ -55,6 +61,12 @@ export interface Message {
   content: string
   status: string
   createdAt: string
+  attachmentId?: string
+  attachmentName?: string
+  attachmentSize?: number
+  attachmentMime?: string
+  attachmentStatus?: string
+  attachmentPath?: string
 }
 
 export interface NetworkStatus {
@@ -67,4 +79,19 @@ export interface NetworkStatus {
   onlineCount: number
   lastScanAt: string
   lastError?: string
+}
+
+export interface AttachmentMigrationProgress {
+  phase: string
+  sourceRoot: string
+  targetRoot: string
+  current: number
+  total: number
+  fileName?: string
+  peerDeviceId?: string
+  migrated: number
+  skipped: number
+  failed: number
+  unclassified: number
+  errorMessage?: string
 }

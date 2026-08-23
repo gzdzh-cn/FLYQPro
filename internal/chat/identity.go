@@ -39,10 +39,6 @@ func AppDataDir() string {
 }
 
 func DefaultAttachmentDir() string {
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		return filepath.Join(home, "Downloads", "POPChat")
-	}
 	return filepath.Join(AppDataDir(), "attachments")
 }
 

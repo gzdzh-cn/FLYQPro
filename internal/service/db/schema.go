@@ -13,6 +13,8 @@ var schemaStatements = []string{
 		id INTEGER PRIMARY KEY CHECK(id = 1),
 		nickname TEXT NOT NULL DEFAULT '',
 		avatar_path TEXT NOT NULL DEFAULT '',
+		avatar_hash TEXT NOT NULL DEFAULT '',
+		avatar_version INTEGER NOT NULL DEFAULT 0,
 		discoverable INTEGER NOT NULL DEFAULT 0,
 		auto_save INTEGER NOT NULL DEFAULT 0,
 		file_save_path TEXT NOT NULL DEFAULT '',
@@ -35,6 +37,8 @@ var schemaStatements = []string{
 		device_id TEXT PRIMARY KEY,
 		nickname TEXT NOT NULL DEFAULT '',
 		avatar_path TEXT NOT NULL DEFAULT '',
+		avatar_hash TEXT NOT NULL DEFAULT '',
+		avatar_version INTEGER NOT NULL DEFAULT 0,
 		platform TEXT NOT NULL DEFAULT '',
 		os_version TEXT NOT NULL DEFAULT '',
 		ip TEXT NOT NULL DEFAULT '',
@@ -100,6 +104,8 @@ var schemaStatements = []string{
 		next_attempt_at TEXT NOT NULL,
 		created_at TEXT NOT NULL
 	)`,
+	`CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_outbox_retry ON outbox(peer_device_id, next_attempt_at, created_at)`,
 	`CREATE TABLE IF NOT EXISTS network_diagnostics (
 		id TEXT PRIMARY KEY,
 		status TEXT NOT NULL,

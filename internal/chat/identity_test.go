@@ -97,3 +97,18 @@ func TestRandomChineseNicknameUsesThemeWords(t *testing.T) {
 		}
 	}
 }
+
+func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
+	root := t.TempDir()
+	_ = os.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	defer os.Unsetenv("GOFLY_DB_PATH")
+	if err := db.Open(context.Background()); err != nil { t.Fatal(err) }
+	defer db.Close(context.Background())
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil { t.Fatal(err) }
+	if err := SetPeerRelation(context.Background(), "peer-1", PeerRelation); err != nil { t.Fatal(err) }
+	if err := SetPeerRemark(context.Background(), "peer-1", "我的备注"); err != nil { t.Fatal(err) }
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "新昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil { t.Fatal(err) }
+	peers, err := ListPeers(context.Background(), "")
+	if err != nil || len(peers) != 1 { t.Fatalf("读取好友失败: %v, %d", err, len(peers)) }
+	if peers[0].Relation != PeerRelation || peers[0].Remark != "我的备注" { t.Fatalf("好友关系被发现更新覆盖: %+v", peers[0]) }
+}

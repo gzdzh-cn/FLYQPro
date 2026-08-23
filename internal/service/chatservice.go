@@ -1,12 +1,15 @@
 package service
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -37,6 +40,10 @@ func (s *ChatService) profileWithAvatar(profile chat.Profile) chat.Profile {
 	if err != nil || len(data) > 5*1024*1024 {
 		return profile
 	}
+	if profile.AvatarHash == "" {
+		sum := sha256.Sum256(data)
+		profile.AvatarHash = hex.EncodeToString(sum[:])
+	}
 	ext := strings.TrimPrefix(filepath.Ext(profile.AvatarPath), ".")
 	if ext == "" {
 		ext = "png"
@@ -54,6 +61,12 @@ func (s *ChatService) UpdateProfile(profile chat.Profile) (chat.Profile, error) 
 	}
 	if profile.FileSavePath == "" {
 		profile.FileSavePath = chat.DefaultAttachmentDir()
+	}
+	if s.engine.IsAttachmentMigrationActive() {
+		current := s.engine.Profile()
+		if filepath.Clean(profile.FileSavePath) != filepath.Clean(current.FileSavePath) || profile.AutoSave != current.AutoSave {
+			return chat.Profile{}, fmt.Errorf("附件迁移正在进行")
+		}
 	}
 	if err := os.MkdirAll(profile.FileSavePath, 0o700); err != nil {
 		return chat.Profile{}, err
@@ -96,7 +109,15 @@ func (s *ChatService) SetAvatar(sourcePath string) (chat.Profile, error) {
 		return profile, err
 	}
 	profile.AvatarPath = targetPath
+	sum := sha256.Sum256(inputBytesForAvatar(targetPath))
+	profile.AvatarHash = hex.EncodeToString(sum[:])
+	profile.AvatarVersion++
 	return s.UpdateProfile(profile)
+}
+
+func inputBytesForAvatar(path string) []byte {
+	data, _ := os.ReadFile(path)
+	return data
 }
 
 func (s *ChatService) ResetAvatar() (chat.Profile, error) {
@@ -111,6 +132,8 @@ func (s *ChatService) ResetAvatar() (chat.Profile, error) {
 	}
 	profile.AvatarPath = ""
 	profile.AvatarData = ""
+	profile.AvatarHash = ""
+	profile.AvatarVersion++
 	return s.UpdateProfile(profile)
 }
 
@@ -143,8 +166,47 @@ func (s *ChatService) SetFileSavePath(path string) (chat.Profile, error) {
 	if err != nil {
 		return profile, err
 	}
-	profile.FileSavePath = path
-	return s.UpdateProfile(profile)
+	if filepath.Clean(strings.TrimSpace(path)) == filepath.Clean(profile.FileSavePath) {
+		return profile, nil
+	}
+	if _, err := s.MigrateAttachmentStorage(path); err != nil {
+		return profile, err
+	}
+	return s.GetProfile()
+}
+
+func (s *ChatService) DefaultAttachmentPath() string { return chat.DefaultAttachmentDir() }
+
+func (s *ChatService) MigrateAttachmentStorage(targetRoot string) (chat.AttachmentMigrationResult, error) {
+	if s.engine.IsAttachmentMigrationActive() {
+		return chat.AttachmentMigrationResult{}, fmt.Errorf("附件迁移正在进行")
+	}
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return chat.AttachmentMigrationResult{}, err
+	}
+	oldRoot := filepath.Clean(profile.FileSavePath)
+	targetRoot = filepath.Clean(strings.TrimSpace(targetRoot))
+	if targetRoot == "." || targetRoot == "" {
+		return chat.AttachmentMigrationResult{}, fmt.Errorf("保存路径不能为空")
+	}
+	s.engine.SetAttachmentMigrationActive(true)
+	defer s.engine.SetAttachmentMigrationActive(false)
+	report := func(progress chat.AttachmentMigrationProgress) {
+		if app := application.Get(); app != nil {
+			app.Event.Emit("chat:attachment-migration", progress)
+		}
+	}
+	result, err := chat.MigrateAttachments(gctx.New(), oldRoot, targetRoot, report)
+	if err != nil {
+		return result, err
+	}
+	profile.FileSavePath = targetRoot
+	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
+		return result, err
+	}
+	s.engine.UpdateProfile(profile)
+	return result, nil
 }
 
 func (s *ChatService) SetLaunchAtStartup(value bool) (chat.Profile, error) {
@@ -166,10 +228,7 @@ func (s *ChatService) SetLaunchAtStartup(value bool) (chat.Profile, error) {
 func (s *ChatService) GetDeviceInfo() chat.DeviceInfo { return s.engine.DeviceInfo() }
 func (s *ChatService) ListPeers() []chat.Peer         { return s.engine.Peers() }
 func (s *ChatService) ScanPeers()                     { s.engine.Scan() }
-func (s *ChatService) ListFriends() []chat.Peer {
-	peers, _ := chat.ListPeers(gctx.New(), chat.PeerRelation)
-	return peers
-}
+func (s *ChatService) ListFriends() []chat.Peer       { return s.engine.PeersByRelation(chat.PeerRelation) }
 func (s *ChatService) ListFriendRequests() []chat.FriendRequest {
 	requests, _ := chat.ListFriendRequests(gctx.New(), "pending")
 	return requests
@@ -201,7 +260,46 @@ func (s *ChatService) MarkConversationRead(deviceID string) error {
 func (s *ChatService) SendFile(deviceID, path string) (chat.Message, error) {
 	return s.engine.SendFile(gctx.New(), deviceID, path)
 }
+
+func (s *ChatService) SendImage(deviceID, dataURL string) (chat.Message, error) {
+	if !strings.HasPrefix(dataURL, "data:image/") {
+		return chat.Message{}, fmt.Errorf("图片数据无效")
+	}
+	parts := strings.SplitN(dataURL, ",", 2)
+	if len(parts) != 2 || !strings.Contains(parts[0], ";base64") {
+		return chat.Message{}, fmt.Errorf("图片数据无效")
+	}
+	mimeType := strings.TrimPrefix(strings.Split(parts[0], ";")[0], "data:")
+	ext := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}[mimeType]
+	if ext == "" {
+		return chat.Message{}, fmt.Errorf("不支持的图片格式")
+	}
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil || len(data) == 0 || len(data) > 100*1024*1024 {
+		return chat.Message{}, fmt.Errorf("图片大小无效")
+	}
+	path := filepath.Join(chat.AppDataDir(), "attachments", "clipboard-"+fmt.Sprintf("%d", time.Now().UnixNano())+ext)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return chat.Message{}, err
+	}
+	return s.engine.SendFile(gctx.New(), deviceID, path)
+}
+
+func (s *ChatService) GetAttachmentPreview(attachmentID string) (string, error) {
+	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
+	if err != nil || !strings.HasPrefix(attachment.MimeType, "image/") || attachment.LocalPath == "" {
+		return "", fmt.Errorf("图片预览不可用")
+	}
+	data, err := os.ReadFile(attachment.LocalPath)
+	if err != nil || len(data) == 0 || len(data) > 20*1024*1024 {
+		return "", fmt.Errorf("图片预览不可用")
+	}
+	return "data:" + attachment.MimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
 func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, error) {
+	if s.engine.IsAttachmentMigrationActive() {
+		return chat.Attachment{}, fmt.Errorf("附件迁移正在进行")
+	}
 	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
 	if err != nil {
 		return attachment, err
@@ -216,17 +314,26 @@ func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, er
 	if err := os.MkdirAll(profile.FileSavePath, 0o700); err != nil {
 		return attachment, err
 	}
-	target := filepath.Join(profile.FileSavePath, filepath.Base(attachment.FileName))
-	if err := os.Rename(attachment.LocalPath, target); err != nil {
+	peerDeviceID, _ := chat.AttachmentPeerDeviceID(gctx.New(), attachmentID)
+	target, err := chat.AttachmentTargetPath(profile.FileSavePath, peerDeviceID, attachment.FileName)
+	if err != nil {
+		return attachment, err
+	}
+	oldPath := attachment.LocalPath
+	if err := os.Rename(oldPath, target); err != nil {
 		return attachment, err
 	}
 	attachment.LocalPath, attachment.Status = target, "saved"
 	if err := chat.SaveAttachment(gctx.New(), attachment); err != nil {
+		_ = os.Rename(target, oldPath)
 		return attachment, err
 	}
 	return attachment, nil
 }
 func (s *ChatService) RejectAttachment(attachmentID string) error {
+	if s.engine.IsAttachmentMigrationActive() {
+		return fmt.Errorf("附件迁移正在进行")
+	}
 	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
 	if err != nil {
 		return err

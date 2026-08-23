@@ -23,8 +23,16 @@ export function ClearApplicationData(): $CancellablePromise<void> {
     return $Call.ByID(524311113);
 }
 
+export function DefaultAttachmentPath(): $CancellablePromise<string> {
+    return $Call.ByID(1130179091);
+}
+
 export function EnsureConversation(deviceID: string): $CancellablePromise<string> {
     return $Call.ByID(2831782417, deviceID);
+}
+
+export function GetAttachmentPreview(attachmentID: string): $CancellablePromise<string> {
+    return $Call.ByID(3911787527, attachmentID);
 }
 
 export function GetDeviceInfo(): $CancellablePromise<chat$0.DeviceInfo> {
@@ -73,9 +81,15 @@ export function MarkConversationRead(deviceID: string): $CancellablePromise<void
     return $Call.ByID(1619252398, deviceID);
 }
 
+export function MigrateAttachmentStorage(targetRoot: string): $CancellablePromise<chat$0.AttachmentMigrationResult> {
+    return $Call.ByID(478406701, targetRoot).then(($result: any) => {
+        return $$createType11($result);
+    });
+}
+
 export function NetworkStatus(): $CancellablePromise<chat$0.NetworkStatus> {
     return $Call.ByID(2032026300).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType12($result);
     });
 }
 
@@ -103,7 +117,7 @@ export function ResetAvatar(): $CancellablePromise<chat$0.Profile> {
 
 export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticResult> {
     return $Call.ByID(3973181866).then(($result: any) => {
-        return $$createType12($result);
+        return $$createType13($result);
     });
 }
 
@@ -120,6 +134,12 @@ export function SendFile(deviceID: string, path: string): $CancellablePromise<ch
 export function SendFriendRequest(deviceID: string, message: string): $CancellablePromise<chat$0.FriendRequest> {
     return $Call.ByID(273264067, deviceID, message).then(($result: any) => {
         return $$createType5($result);
+    });
+}
+
+export function SendImage(deviceID: string, dataURL: string): $CancellablePromise<chat$0.Message> {
+    return $Call.ByID(3796106183, deviceID, dataURL).then(($result: any) => {
+        return $$createType9($result);
     });
 }
 
@@ -195,5 +215,6 @@ const $$createType7 = chat$0.Peer.createFrom;
 const $$createType8 = $Create.Array($$createType7);
 const $$createType9 = chat$0.Message.createFrom;
 const $$createType10 = $Create.Array($$createType9);
-const $$createType11 = chat$0.NetworkStatus.createFrom;
-const $$createType12 = chat$0.DiagnosticResult.createFrom;
+const $$createType11 = chat$0.AttachmentMigrationResult.createFrom;
+const $$createType12 = chat$0.NetworkStatus.createFrom;
+const $$createType13 = chat$0.DiagnosticResult.createFrom;

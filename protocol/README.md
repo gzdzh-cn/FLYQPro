@@ -22,6 +22,8 @@ Example announcement:
   "minor": 0,
   "deviceId": "sha256-of-public-key",
   "nickname": "Alice",
+  "avatarHash": "sha256-of-avatar",
+  "avatarVersion": 1,
   "platform": "macOS",
   "osVersion": "darwin arm64",
   "port": 42000,
@@ -40,6 +42,18 @@ Example announcement:
 - Certificate fingerprint: SHA-256 of the DER encoded X.509 certificate.
 
 The first frame is `hello`; the peer answers with `hello_ack`. Friend requests and messages are rejected until the local database marks the device as a friend.
+
+After a friend handshake, a client may send `avatar_request`. The friend may answer with an optional `avatar_response` containing `avatarHash`, `avatarVersion`, `avatarMime`, and base64 `avatarData`. Avatar bytes are never sent through discovery announcements and are accepted only after the certificate-verified TLS handshake and friendship check.
+
+The following fields are optional and may be ignored by older clients:
+
+- `avatarHash`, `avatarVersion`, `avatarMime`, `avatarData`: profile avatar cache negotiation and transfer.
+- `capabilities`: supported message kinds such as `text`, `image`, and `file`.
+- `messageIds`: message IDs carried by `read_receipt`.
+- `syncSince`, `syncUntil`, `syncToken`, `readAt`: optional message synchronization and read-state hints.
+- `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`, and `payload`: encrypted attachment transfer metadata and chunks.
+
+Message status values exposed by the application are `sending`, `sent`, `read`, and `failed`. A receiver must acknowledge a duplicate `messageId`, but must not persist or display it again.
 
 ## Versioning
 

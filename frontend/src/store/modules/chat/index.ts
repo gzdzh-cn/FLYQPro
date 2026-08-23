@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile } from './types'
+import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile } from './types'
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
@@ -11,6 +11,8 @@ export const useChatStore = defineStore('chat', {
     network: { status: 'unknown', interfaces: [], localIps: [], discoveryPort: 39190, chatPort: 0, peerCount: 0, onlineCount: 0, lastScanAt: '' } as NetworkStatus,
     activeSection: 'friends',
     activePeerId: '',
+    lastMessageEvent: null as Message | null,
+    attachmentMigration: { active: false, phase: '', sourceRoot: '', targetRoot: '', current: 0, total: 0, fileName: '', peerDeviceId: '', migrated: 0, skipped: 0, failed: 0, unclassified: 0, errorMessage: '' } as AttachmentMigrationProgress & { active: boolean },
   }),
   getters: {
     friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
@@ -29,13 +31,26 @@ export const useChatStore = defineStore('chat', {
         return
       }
       if (name === 'chat:attachment' && !value?.conversationId) {
-        Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.attachmentId === value.attachmentId) item.attachmentStatus = value.status }))
+        Object.values(this.messages).forEach((list) => list.forEach((item) => {
+          if (item.attachmentId === value.attachmentId) {
+            item.attachmentStatus = value.status
+            if (value.localPath) item.attachmentPath = value.localPath
+          }
+        }))
+        return
+      }
+      if (name === 'chat:attachment-migration') {
+        const progress = value as AttachmentMigrationProgress
+        this.attachmentMigration = { ...this.attachmentMigration, ...progress, active: !['completed', 'failed'].includes(progress.phase) }
+        if (progress.phase === 'completed') this.attachmentMigration.active = false
+        if (progress.phase === 'failed') this.attachmentMigration.active = false
         return
       }
       if (name === 'chat:message' || name === 'chat:attachment') {
         if (!value?.conversationId) return
         const list = this.messages[value.conversationId] || []
         if (!list.some((item) => item.messageId === value.messageId)) this.messages[value.conversationId] = [...list, value]
+        if (name === 'chat:message') this.lastMessageEvent = value
       }
     },
     selectPeer(deviceId: string) { this.activePeerId = deviceId },
