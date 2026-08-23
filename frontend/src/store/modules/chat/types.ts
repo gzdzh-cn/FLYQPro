@@ -36,7 +36,10 @@ export interface FriendRequest {
   nickname: string
   message: string
   status: string
+  direction: string
   createdAt: string
+  acceptedAt?: string
+  updatedAt: string
   attachmentId?: string
   attachmentName?: string
   attachmentSize?: number

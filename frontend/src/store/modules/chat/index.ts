@@ -26,11 +26,12 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:profile-updated') this.profile = { ...this.profile, ...value }
       if (name === 'chat:network-status') this.network = value
       if (name === 'chat:peer-updated') this.peers = value || []
-      if (name === 'chat:friend-request') this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId)]
+      if (name === 'chat:friend-request') this.requests = [value, ...this.requests.filter((item) => item.deviceId !== value.deviceId)]
       if (name === 'chat:friend-request-updated') {
-        const request = this.requests.find((item) => item.requestId === value?.requestId)
+        const request = this.requests.find((item) => item.deviceId === value?.deviceId) || this.requests.find((item) => item.requestId === value?.requestId)
         if (request && value?.status) {
           request.status = value.status
+          if (value.direction !== undefined) request.direction = value.direction
           if (value.acceptedAt !== undefined) request.acceptedAt = value.acceptedAt
         }
       }

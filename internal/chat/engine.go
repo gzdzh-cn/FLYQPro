@@ -267,28 +267,60 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		// A known peer may send a request even when discovery is disabled. The
 		// discoverable flag controls presence broadcasts, not direct requests
 		// received over an already authenticated connection.
-		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
-		if err := SaveFriendRequest(context.Background(), request); err == nil {
-			e.emit("chat:friend-request", request)
+		status := "pending"
+		acceptedAt := ""
+		if e.isFriend(hello.DeviceID) {
+			status = "accepted"
+			acceptedAt = nowString()
 		}
-	case "friend_request_response":
-		status := message.Status
-		if status == "accepted" {
-			if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err == nil {
-				e.updatePeerRelation(hello.DeviceID, PeerRelation)
-			}
-		}
-		_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
-		update := map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID}
-		if requests, listErr := ListFriendRequests(context.Background(), ""); listErr == nil {
-			for _, request := range requests {
-				if request.RequestID == message.RequestID {
-					update["acceptedAt"] = request.AcceptedAt
+		duplicate := false
+		if requests, listErr := listFriendRequestRows(context.Background(), ""); listErr == nil {
+			for _, existing := range requests {
+				if existing.RequestID == message.RequestID {
+					duplicate = true
 					break
 				}
 			}
 		}
-		e.emit("chat:friend-request-updated", update)
+		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: status, Direction: "received", CreatedAt: nowString(), AcceptedAt: acceptedAt}
+		if err := SaveFriendRequest(context.Background(), request); err == nil {
+			if status == "accepted" {
+				_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, "accepted", acceptedAt)
+				_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: message.RequestID, Status: "accepted", AcceptedAt: acceptedAt})
+			} else if !duplicate {
+				if aggregated, ok := e.friendRequestForDevice(hello.DeviceID); ok {
+					e.emit("chat:friend-request", aggregated)
+				}
+			}
+		}
+	case "friend_request_response":
+		status := message.Status
+		acceptedAt := ""
+		if status == "accepted" {
+			acceptedAt = message.AcceptedAt
+			if requests, listErr := listFriendRequestRows(context.Background(), ""); listErr == nil {
+				localAcceptedAt := earliestAcceptedAt(requests, hello.DeviceID)
+				if localAcceptedAt != "" && (acceptedAt == "" || requestTimeBefore(localAcceptedAt, acceptedAt)) {
+					acceptedAt = localAcceptedAt
+				}
+			}
+			if acceptedAt == "" {
+				acceptedAt = nowString()
+			}
+			if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err == nil {
+				e.updatePeerRelation(hello.DeviceID, PeerRelation)
+			}
+			_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, status, acceptedAt)
+		} else if status == "rejected" {
+			_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, status, "")
+		} else {
+			_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
+		}
+		if aggregated, ok := e.friendRequestForDevice(hello.DeviceID); ok {
+			e.emit("chat:friend-request-updated", aggregated)
+		} else {
+			e.emit("chat:friend-request-updated", map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID, "acceptedAt": acceptedAt})
+		}
 		e.emit("chat:peer-updated", e.Peers())
 	case "friend_restore":
 		e.mu.RLock()
@@ -773,10 +805,55 @@ func validDevicePublicKey(deviceID, publicKeyPEM string) bool {
 	return strings.EqualFold(deviceID, sha256Hex(der))
 }
 
+func (e *Engine) friendRequestForDevice(deviceID string) (FriendRequest, bool) {
+	requests, err := ListFriendRequests(context.Background(), "")
+	if err != nil {
+		return FriendRequest{}, false
+	}
+	for _, request := range requests {
+		if request.DeviceID == deviceID {
+			return request, true
+		}
+	}
+	return FriendRequest{}, false
+}
+
+func earliestAcceptedAt(requests []FriendRequest, deviceID string) string {
+	acceptedAt := ""
+	for _, request := range requests {
+		if request.DeviceID == deviceID && request.AcceptedAt != "" && requestTimeBefore(request.AcceptedAt, acceptedAt) {
+			acceptedAt = request.AcceptedAt
+		}
+		if request.DeviceID == deviceID && acceptedAt == "" && request.AcceptedAt != "" {
+			acceptedAt = request.AcceptedAt
+		}
+	}
+	return acceptedAt
+}
+
+func (e *Engine) emitFriendRequestUpdate(deviceID string) {
+	if request, ok := e.friendRequestForDevice(deviceID); ok {
+		e.emit("chat:friend-request-updated", request)
+	}
+}
+
 func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string) (FriendRequest, error) {
 	peer, err := e.peer(deviceID)
 	if err != nil {
 		return FriendRequest{}, err
+	}
+	if existing, ok := e.friendRequestForDevice(deviceID); ok {
+		rows, rowsErr := listFriendRequestRows(ctx, "")
+		if rowsErr == nil {
+			for _, row := range rows {
+				if row.DeviceID == deviceID && row.Direction == "sent" && (row.Status == "sent" || row.Status == "queued" || row.Status == "pending") {
+					return existing, nil
+				}
+			}
+		}
+		if existing.Status == "accepted" && e.isFriend(deviceID) {
+			return existing, nil
+		}
 	}
 	request := FriendRequest{RequestID: newID(), DeviceID: deviceID, Nickname: peer.Nickname, Message: strings.TrimSpace(message), Status: "queued", Direction: "sent", CreatedAt: nowString()}
 	if err := SaveFriendRequest(ctx, request); err != nil {
@@ -786,50 +863,92 @@ func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string
 		return request, err
 	}
 	_ = UpdateFriendRequest(ctx, request.RequestID, "sent")
+	if aggregated, ok := e.friendRequestForDevice(deviceID); ok {
+		e.emit("chat:friend-request-updated", aggregated)
+		return aggregated, nil
+	}
 	request.Status = "sent"
 	e.emit("chat:friend-request-updated", request)
 	return request, nil
 }
 
 func (e *Engine) AcceptFriendRequest(ctx context.Context, requestID string) error {
-	requests, err := ListFriendRequests(ctx, "pending")
+	requests, err := listFriendRequestRows(ctx, "")
 	if err != nil {
 		return err
 	}
-	for _, request := range requests {
-		if request.RequestID != requestID {
-			continue
+	var target *FriendRequest
+	for index := range requests {
+		if requests[index].RequestID == requestID {
+			target = &requests[index]
+			break
 		}
-		if err := SetPeerRelation(ctx, request.DeviceID, PeerRelation); err != nil {
-			return err
-		}
-		e.updatePeerRelation(request.DeviceID, PeerRelation)
-		_ = UpdateFriendRequest(ctx, requestID, "accepted")
-		if peer, peerErr := e.peer(request.DeviceID); peerErr == nil {
-			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: requestID, Status: "accepted"})
-		}
-		e.emit("chat:peer-updated", e.Peers())
-		return nil
 	}
-	return fmt.Errorf("好友申请不存在")
+	if target == nil {
+		return fmt.Errorf("好友申请不存在")
+	}
+	if err := SetPeerRelation(ctx, target.DeviceID, PeerRelation); err != nil {
+		return err
+	}
+	e.updatePeerRelation(target.DeviceID, PeerRelation)
+	acceptedAt := earliestAcceptedAt(requests, target.DeviceID)
+	if acceptedAt == "" {
+		acceptedAt = nowString()
+	}
+	if err := UpdateFriendRequestsForDevice(ctx, target.DeviceID, "accepted", acceptedAt); err != nil {
+		return err
+	}
+	if peer, peerErr := e.peer(target.DeviceID); peerErr == nil {
+		seen := make(map[string]struct{})
+		for _, request := range requests {
+			if request.DeviceID != target.DeviceID || request.Status != "pending" || request.Direction == "sent" {
+				continue
+			}
+			if _, exists := seen[request.RequestID]; exists {
+				continue
+			}
+			seen[request.RequestID] = struct{}{}
+			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "accepted", AcceptedAt: acceptedAt})
+		}
+	}
+	e.emitFriendRequestUpdate(target.DeviceID)
+	e.emit("chat:peer-updated", e.Peers())
+	return nil
 }
 
 func (e *Engine) RejectFriendRequest(ctx context.Context, requestID string) error {
-	requests, err := ListFriendRequests(ctx, "pending")
+	requests, err := listFriendRequestRows(ctx, "")
 	if err != nil {
 		return err
 	}
-	for _, request := range requests {
-		if request.RequestID != requestID {
-			continue
+	var target *FriendRequest
+	for index := range requests {
+		if requests[index].RequestID == requestID {
+			target = &requests[index]
+			break
 		}
-		_ = UpdateFriendRequest(ctx, requestID, "rejected")
-		if peer, peerErr := e.peer(request.DeviceID); peerErr == nil {
-			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: requestID, Status: "rejected"})
-		}
-		return nil
 	}
-	return fmt.Errorf("好友申请不存在")
+	if target == nil {
+		return fmt.Errorf("好友申请不存在")
+	}
+	if err := UpdateFriendRequestsForDevice(ctx, target.DeviceID, "rejected", ""); err != nil {
+		return err
+	}
+	if peer, peerErr := e.peer(target.DeviceID); peerErr == nil {
+		seen := make(map[string]struct{})
+		for _, request := range requests {
+			if request.DeviceID != target.DeviceID || request.Status != "pending" || request.Direction == "sent" {
+				continue
+			}
+			if _, exists := seen[request.RequestID]; exists {
+				continue
+			}
+			seen[request.RequestID] = struct{}{}
+			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "rejected"})
+		}
+	}
+	e.emitFriendRequestUpdate(target.DeviceID)
+	return nil
 }
 
 func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Message, error) {

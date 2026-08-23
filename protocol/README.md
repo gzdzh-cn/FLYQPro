@@ -51,6 +51,7 @@ The following fields are optional and may be ignored by older clients:
 - `capabilities`: supported message kinds such as `text`, `image`, and `file`.
 - `messageIds`: message IDs carried by `read_receipt`.
 - `syncSince`, `syncUntil`, `syncToken`, `readAt`: optional message synchronization and read-state hints.
+- `acceptedAt`: optional first-approval timestamp carried by `friend_request_response`; older clients may ignore it and use their local receipt time.
 - `targetDeviceId`, `sourceDeviceId`, `sourcePublicKey`, `restoreVersion`, `restoreSignature`: optional signed friendship restoration fields. The signature covers `POPChat/friend-restore/v1`, the source device ID, target device ID, and source public key. The receiver must validate the TLS peer, public-key-derived source ID, target ID, and signature before marking the peer as a friend. Older clients may ignore this frame.
 - `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`, and `payload`: encrypted attachment transfer metadata and chunks.
 

@@ -250,7 +250,7 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 func SaveFriendRequest(ctx context.Context, request FriendRequest) error {
 	return exec(ctx, `INSERT INTO friend_requests(request_id, device_id, nickname, message, status, direction, created_at, accepted_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(request_id) DO UPDATE SET nickname=excluded.nickname, message=excluded.message, status=excluded.status, direction=CASE WHEN excluded.direction != '' THEN excluded.direction ELSE friend_requests.direction END, accepted_at=CASE WHEN excluded.accepted_at != '' THEN excluded.accepted_at ELSE friend_requests.accepted_at END, updated_at=excluded.updated_at`,
+		ON CONFLICT(request_id) DO UPDATE SET nickname=excluded.nickname, message=excluded.message, status=CASE WHEN friend_requests.status IN ('accepted', 'rejected') THEN friend_requests.status ELSE excluded.status END, direction=CASE WHEN excluded.direction != '' THEN excluded.direction ELSE friend_requests.direction END, accepted_at=CASE WHEN excluded.accepted_at != '' THEN excluded.accepted_at ELSE friend_requests.accepted_at END, updated_at=excluded.updated_at`,
 		request.RequestID, request.DeviceID, request.Nickname, request.Message, request.Status, request.Direction, request.CreatedAt, request.AcceptedAt, nowString())
 }
 
@@ -262,7 +262,18 @@ func UpdateFriendRequest(ctx context.Context, requestID, status string) error {
 	return exec(ctx, `UPDATE friend_requests SET status=?, updated_at=? WHERE request_id=?`, status, now, requestID)
 }
 
-func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, error) {
+func UpdateFriendRequestsForDevice(ctx context.Context, deviceID, status, acceptedAt string) error {
+	now := nowString()
+	if status == "accepted" {
+		if acceptedAt == "" {
+			acceptedAt = now
+		}
+		return exec(ctx, `UPDATE friend_requests SET status=?, accepted_at=CASE WHEN accepted_at='' THEN ? ELSE accepted_at END, updated_at=? WHERE device_id=? AND status IN ('pending', 'sent', 'queued')`, status, acceptedAt, now, deviceID)
+	}
+	return exec(ctx, `UPDATE friend_requests SET status=?, updated_at=? WHERE device_id=? AND status IN ('pending', 'sent', 'queued')`, status, now, deviceID)
+}
+
+func listFriendRequestRows(ctx context.Context, status string) ([]FriendRequest, error) {
 	sql := `SELECT request_id, device_id, nickname, message, status, direction, created_at, accepted_at, updated_at FROM friend_requests`
 	args := []any{}
 	if status != "" {
@@ -283,6 +294,144 @@ func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, er
 		resultRows = append(resultRows, FriendRequest{RequestID: row.RequestID, DeviceID: row.DeviceID, Nickname: row.Nickname, Message: row.Message, Status: row.Status, Direction: row.Direction, CreatedAt: row.CreatedAt, AcceptedAt: row.AcceptedAt, UpdatedAt: row.UpdatedAt})
 	}
 	return resultRows, nil
+}
+
+func requestTimeBefore(left, right string) bool {
+	if left == "" {
+		return false
+	}
+	if right == "" {
+		return true
+	}
+	return parseTime(left).Before(parseTime(right))
+}
+
+func requestTimeAfter(left, right string) bool {
+	if left == "" {
+		return false
+	}
+	if right == "" {
+		return true
+	}
+	return parseTime(left).After(parseTime(right))
+}
+
+func requestStatusPriority(status string) int {
+	switch status {
+	case "accepted":
+		return 4
+	case "pending":
+		return 3
+	case "sent":
+		return 2
+	case "queued":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func aggregateFriendRequestRows(rows []FriendRequest) []FriendRequest {
+	if len(rows) == 0 {
+		return []FriendRequest{}
+	}
+	type aggregate struct {
+		request       FriendRequest
+		hasSent       bool
+		hasReceived   bool
+		statusRank    int
+		canonicalRank int
+	}
+	grouped := make(map[string]*aggregate, len(rows))
+	for _, row := range rows {
+		item := grouped[row.DeviceID]
+		if item == nil {
+			item = &aggregate{request: row, statusRank: -1, canonicalRank: 99}
+			grouped[row.DeviceID] = item
+		}
+		if row.Direction == "sent" {
+			item.hasSent = true
+		}
+		if row.Direction == "received" {
+			item.hasReceived = true
+		}
+		if row.Nickname != "" && (item.request.Nickname == "" || requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt)) {
+			item.request.Nickname = row.Nickname
+		}
+		if row.Message != "" && (item.request.Message == "" || requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt)) {
+			item.request.Message = row.Message
+		}
+		if requestTimeBefore(row.CreatedAt, item.request.CreatedAt) {
+			item.request.CreatedAt = row.CreatedAt
+		}
+		if requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt) {
+			item.request.UpdatedAt = row.UpdatedAt
+		}
+		if row.AcceptedAt != "" && requestTimeBefore(row.AcceptedAt, item.request.AcceptedAt) {
+			item.request.AcceptedAt = row.AcceptedAt
+		}
+		if row.AcceptedAt != "" && item.request.AcceptedAt == "" {
+			item.request.AcceptedAt = row.AcceptedAt
+		}
+
+		statusRank := requestStatusPriority(row.Status)
+		if statusRank > item.statusRank {
+			item.statusRank = statusRank
+			item.request.Status = row.Status
+		}
+		canonicalRank := 3
+		if row.Status == "pending" {
+			canonicalRank = 0
+		} else if row.Status == "sent" || row.Status == "queued" {
+			canonicalRank = 1
+		} else if row.Status == "accepted" {
+			canonicalRank = 2
+		}
+		if canonicalRank < item.canonicalRank || (canonicalRank == item.canonicalRank && row.Direction == "received" && item.request.Direction != "received") {
+			item.request.RequestID = row.RequestID
+			item.canonicalRank = canonicalRank
+		}
+	}
+
+	result := make([]FriendRequest, 0, len(grouped))
+	for _, item := range grouped {
+		if item.hasSent && item.hasReceived {
+			item.request.Direction = "mutual"
+		} else if item.hasSent {
+			item.request.Direction = "sent"
+		} else if item.hasReceived {
+			item.request.Direction = "received"
+		}
+		result = append(result, item.request)
+	}
+	// Keep the same newest-first ordering as the raw history, but use the
+	// merged record's last activity so a newly completed request rises once.
+	for index := 0; index < len(result); index++ {
+		for next := index + 1; next < len(result); next++ {
+			if requestTimeAfter(result[next].UpdatedAt, result[index].UpdatedAt) {
+				result[index], result[next] = result[next], result[index]
+			}
+		}
+	}
+	return result
+}
+
+func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, error) {
+	rows, err := listFriendRequestRows(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	resultRows := aggregateFriendRequestRows(rows)
+	if status == "" {
+		return resultRows, nil
+	}
+	filtered := make([]FriendRequest, 0, len(resultRows))
+	for _, request := range resultRows {
+		if request.Status == status {
+			filtered = append(filtered, request)
+		}
+	}
+	return filtered, nil
 }
 
 func EnsureConversation(ctx context.Context, peerDeviceID string) (string, error) {
