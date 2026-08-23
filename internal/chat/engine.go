@@ -106,7 +106,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	listener, err := tls.Listen("tcp", ":0", &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12})
+	listener, err := tls.Listen("tcp", ":0", &tls.Config{Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return fmt.Errorf("启动聊天端口失败: %w", err)
 	}
@@ -233,11 +233,17 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	if err := e.upsertWirePeer(hello); err != nil {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: err.Error()})
 		return
 	}
 	e.emit("chat:peer-updated", e.Peers())
 	peer, peerErr := e.peer(hello.DeviceID)
-	if peerErr != nil || verifyPeerCertificate(conn, peer) != nil {
+	if peerErr != nil {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: peerErr.Error()})
+		return
+	}
+	if verifyErr := verifyPeerCertificate(conn, peer); verifyErr != nil {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: verifyErr.Error()})
 		return
 	}
 	e.touchPeer(hello.DeviceID)
@@ -904,7 +910,11 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 	if err != nil {
 		return fail(err)
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	clientTLS, err := e.clientTLSConfig()
+	if err != nil {
+		return fail(err)
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
 	if err != nil {
 		return fail(err)
 	}
@@ -917,7 +927,13 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return fail(err)
 	}
 	var response wireMessage
-	if err := decoder.Decode(&response); err != nil || response.Type != "hello_ack" {
+	if err := decoder.Decode(&response); err != nil {
+		return fail(fmt.Errorf("对方握手失败"))
+	}
+	if response.Type == "error" {
+		return fail(fmt.Errorf("对方握手失败: %s", response.Status))
+	}
+	if response.Type != "hello_ack" {
 		return fail(fmt.Errorf("对方握手失败"))
 	}
 	e.touchPeer(peer.DeviceID)
@@ -955,7 +971,11 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	if peer.IP == "" || peer.Port == 0 {
 		return fmt.Errorf("好友地址不可用")
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	clientTLS, err := e.clientTLSConfig()
+	if err != nil {
+		return err
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
 	if err != nil {
 		return err
 	}
@@ -968,7 +988,13 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	}
 	decoder := json.NewDecoder(conn)
 	var response wireMessage
-	if err := decoder.Decode(&response); err != nil || response.Type != "hello_ack" {
+	if err := decoder.Decode(&response); err != nil {
+		return fmt.Errorf("对方握手失败")
+	}
+	if response.Type == "error" {
+		return fmt.Errorf("对方握手失败: %s", response.Status)
+	}
+	if response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
 	e.touchPeer(peer.DeviceID)
@@ -1011,6 +1037,17 @@ func (e *Engine) touchPeer(deviceID string) {
 		e.peers[deviceID] = peer
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) clientTLSConfig() (*tls.Config, error) {
+	e.mu.RLock()
+	identity := e.identity
+	e.mu.RUnlock()
+	certificate, err := identity.TLSCertificate()
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, nil
 }
 
 func cachedAvatarMatches(peer Peer) bool {
