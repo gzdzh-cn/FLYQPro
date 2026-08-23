@@ -15,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"helpfly/internal/chat"
 	"helpfly/internal/platform/startup"
+	"helpfly/internal/version"
 )
 
 type ChatService struct{ engine *chat.Engine }
@@ -246,6 +247,7 @@ func (s *ChatService) SetLaunchAtStartup(value bool) (chat.Profile, error) {
 }
 
 func (s *ChatService) GetDeviceInfo() chat.DeviceInfo { return s.engine.DeviceInfo() }
+func (s *ChatService) GetAppVersion() string          { return version.AppVersion }
 func (s *ChatService) ListPeers() []chat.Peer         { return s.engine.Peers() }
 func (s *ChatService) ScanPeers()                     { s.engine.Scan() }
 func (s *ChatService) ListFriends() []chat.Peer       { return s.engine.PeersByRelation(chat.PeerRelation) }

@@ -4,6 +4,7 @@ import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message,
 export const useChatStore = defineStore('chat', {
   state: () => ({
     profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false } as Profile,
+    deviceId: '',
     peers: [] as Peer[],
     conversations: [] as Conversation[],
     requests: [] as FriendRequest[],
@@ -53,18 +54,19 @@ export const useChatStore = defineStore('chat', {
         if (index < 0) {
           this.messages[value.conversationId] = [...list, value]
           const peerDeviceId = value.conversationId.startsWith('conv-') ? value.conversationId.slice(5) : ''
+          const incoming = value.senderDeviceId !== this.deviceId
           const conversation = this.conversations.find((item) => item.conversationId === value.conversationId || item.peerDeviceId === peerDeviceId)
           if (conversation) {
             conversation.lastMessage = value.content || value.attachmentName || ''
             conversation.lastMessageAt = value.createdAt || conversation.lastMessageAt
-            conversation.unreadCount = this.activePeerId === peerDeviceId ? 0 : (conversation.unreadCount || 0) + 1
+            if (incoming) conversation.unreadCount = (conversation.unreadCount || 0) + 1
           } else if (peerDeviceId) {
             this.conversations = [...this.conversations, {
               conversationId: value.conversationId,
               peerDeviceId,
               lastMessage: value.content || value.attachmentName || '',
               lastMessageAt: value.createdAt || '',
-              unreadCount: this.activePeerId === peerDeviceId ? 0 : 1,
+              unreadCount: incoming ? 1 : 0,
               pinned: false,
             }]
           }
@@ -77,6 +79,7 @@ export const useChatStore = defineStore('chat', {
       }
     },
     selectPeer(deviceId: string) { this.activePeerId = deviceId },
+    setDeviceId(deviceId: string) { this.deviceId = deviceId },
     clearConversationUnread(deviceId: string) {
       const conversation = this.conversations.find((item) => item.peerDeviceId === deviceId)
       if (conversation) conversation.unreadCount = 0

@@ -31,6 +31,10 @@ export function EnsureConversation(deviceID: string): $CancellablePromise<string
     return $Call.ByID(2831782417, deviceID);
 }
 
+export function GetAppVersion(): $CancellablePromise<string> {
+    return $Call.ByID(1906837341);
+}
+
 export function GetAttachmentPreview(attachmentID: string): $CancellablePromise<string> {
     return $Call.ByID(3911787527, attachmentID);
 }

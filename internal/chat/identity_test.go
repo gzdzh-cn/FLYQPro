@@ -152,22 +152,49 @@ func TestConversationUnreadAndOutboxPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conversationB, err := EnsureConversation(ctx, "peer-unread-b")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveMessage(ctx, Message{MessageID: "unread-message", ConversationID: conversationID, SenderDeviceID: "peer-unread", Kind: "text", Content: "hello", Status: "sent", CreatedAt: nowString()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := IncrementConversationUnread(ctx, conversationID); err != nil {
 		t.Fatal(err)
 	}
+	if err := SaveMessage(ctx, Message{MessageID: "unread-message-b", ConversationID: conversationB, SenderDeviceID: "peer-unread-b", Kind: "text", Content: "world", Status: "sent", CreatedAt: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := IncrementConversationUnread(ctx, conversationB); err != nil {
+		t.Fatal(err)
+	}
+	if err := IncrementConversationUnread(ctx, conversationB); err != nil {
+		t.Fatal(err)
+	}
 	conversations, err := ListConversations(ctx)
-	if err != nil || len(conversations) != 1 || conversations[0].UnreadCount != 1 {
+	if err != nil || len(conversations) != 2 {
 		t.Fatalf("未读数未持久化: %v, %+v", err, conversations)
+	}
+	counts := map[string]int{}
+	for _, conversation := range conversations {
+		counts[conversation.PeerDeviceID] = conversation.UnreadCount
+	}
+	if counts["peer-unread"] != 1 || counts["peer-unread-b"] != 2 {
+		t.Fatalf("多会话未读数错误: %+v", counts)
 	}
 	if err := ClearConversationUnread(ctx, conversationID); err != nil {
 		t.Fatal(err)
 	}
 	conversations, err = ListConversations(ctx)
-	if err != nil || len(conversations) != 1 || conversations[0].UnreadCount != 0 {
+	if err != nil || len(conversations) != 2 {
 		t.Fatalf("未读数未清理: %v, %+v", err, conversations)
+	}
+	counts = map[string]int{}
+	for _, conversation := range conversations {
+		counts[conversation.PeerDeviceID] = conversation.UnreadCount
+	}
+	if counts["peer-unread"] != 0 || counts["peer-unread-b"] != 2 {
+		t.Fatalf("清理一个会话影响了其他会话: %+v", counts)
 	}
 	if err := SaveOutbox(ctx, "outbox-message", "peer-unread", "message", `{"type":"message","messageId":"unread-message"}`); err != nil {
 		t.Fatal(err)
