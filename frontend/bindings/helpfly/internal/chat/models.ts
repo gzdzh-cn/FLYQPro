@@ -153,6 +153,7 @@ export class DeviceInfo {
     "certificateFingerprint": string;
     "ip": string;
     "port": number;
+    "identityStatus"?: string;
 
     /** Creates a new DeviceInfo instance. */
     constructor($$source: Partial<DeviceInfo> = {}) {

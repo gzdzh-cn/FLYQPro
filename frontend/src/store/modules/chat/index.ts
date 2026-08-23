@@ -18,6 +18,7 @@ export const useChatStore = defineStore('chat', {
   getters: {
     friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
     discovered: (state) => state.peers.filter((peer) => peer.relation !== 'friend' && peer.online),
+    pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },
   actions: {
@@ -26,7 +27,10 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:network-status') this.network = value
       if (name === 'chat:peer-updated') this.peers = value || []
       if (name === 'chat:friend-request') this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId)]
-      if (name === 'chat:friend-request-updated') this.requests = this.requests.filter((item) => item.requestId !== value.requestId)
+      if (name === 'chat:friend-request-updated') {
+        const request = this.requests.find((item) => item.requestId === value?.requestId)
+        if (request && value?.status) request.status = value.status
+      }
       if (name === 'chat:message-status') {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))
         return

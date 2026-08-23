@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -56,7 +57,20 @@ func EnsureDataDirs() error {
 
 func LoadOrCreateIdentity(ctx context.Context) (Identity, error) {
 	if row, err := GetIdentity(ctx); err == nil {
-		return Identity{DeviceInfo: DeviceInfo{DeviceID: row.DeviceID, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint}, PrivateKeyPEM: row.PrivateKeyPEM, CertificatePEM: row.CertificatePEM}, nil
+		identity := Identity{DeviceInfo: DeviceInfo{DeviceID: row.DeviceID, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, IdentityStatus: "existing"}, PrivateKeyPEM: row.PrivateKeyPEM, CertificatePEM: row.CertificatePEM}
+		if err := validateIdentity(identity); err == nil {
+			_ = saveSecureIdentity(identity)
+			return identity, nil
+		}
+	}
+	restoredIdentity, secureErr := loadSecureIdentity()
+	if secureErr == nil {
+		identity := restoredIdentity
+		if err := SaveIdentity(ctx, identity.DeviceInfo, identity.PrivateKeyPEM, identity.CertificatePEM); err != nil {
+			return Identity{}, fmt.Errorf("恢复设备身份失败: %w", err)
+		}
+		identity.IdentityStatus = "restored"
+		return identity, nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -82,9 +96,16 @@ func LoadOrCreateIdentity(ctx context.Context) (Identity, error) {
 	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privateDER}))
 	publicPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}))
 	certificatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}))
-	identity := Identity{DeviceInfo: DeviceInfo{DeviceID: deviceID, PublicKeyPEM: publicPEM, CertificateFingerprint: sha256Hex(certificateDER)}, PrivateKeyPEM: privatePEM, CertificatePEM: certificatePEM}
+	identityStatus := "generated"
+	if secureErr != nil && !errors.Is(secureErr, errSecureIdentityNotFound) {
+		identityStatus = "hardware_identity_unavailable"
+	}
+	identity := Identity{DeviceInfo: DeviceInfo{DeviceID: deviceID, PublicKeyPEM: publicPEM, CertificateFingerprint: sha256Hex(certificateDER), IdentityStatus: identityStatus}, PrivateKeyPEM: privatePEM, CertificatePEM: certificatePEM}
 	if err := SaveIdentity(ctx, identity.DeviceInfo, identity.PrivateKeyPEM, identity.CertificatePEM); err != nil {
 		return Identity{}, fmt.Errorf("保存设备身份失败: %w", err)
+	}
+	if err := saveSecureIdentity(identity); err != nil {
+		identity.IdentityStatus = "hardware_identity_unavailable"
 	}
 	return identity, nil
 }

@@ -33,6 +33,7 @@ type DeviceInfo struct {
 	CertificateFingerprint string `json:"certificateFingerprint"`
 	IP                     string `json:"ip"`
 	Port                   int    `json:"port"`
+	IdentityStatus         string `json:"identityStatus,omitempty"`
 }
 
 type Peer struct {
@@ -154,41 +155,46 @@ type DiagnosticResult struct {
 }
 
 type wireMessage struct {
-	Magic         string   `json:"magic,omitempty"`
-	Type          string   `json:"type"`
-	Protocol      string   `json:"protocol,omitempty"`
-	Major         int      `json:"major,omitempty"`
-	Minor         int      `json:"minor,omitempty"`
-	MinMajor      int      `json:"minMajor,omitempty"`
-	MinMinor      int      `json:"minMinor,omitempty"`
-	RequestID     string   `json:"requestId,omitempty"`
-	MessageID     string   `json:"messageId,omitempty"`
-	DeviceID      string   `json:"deviceId,omitempty"`
-	Nickname      string   `json:"nickname,omitempty"`
-	AvatarHash    string   `json:"avatarHash,omitempty"`
-	AvatarVersion int64    `json:"avatarVersion,omitempty"`
-	AvatarData    string   `json:"avatarData,omitempty"`
-	AvatarMime    string   `json:"avatarMime,omitempty"`
-	Platform      string   `json:"platform,omitempty"`
-	OSVersion     string   `json:"osVersion,omitempty"`
-	IP            string   `json:"ip,omitempty"`
-	Port          int      `json:"port,omitempty"`
-	PublicKey     string   `json:"publicKey,omitempty"`
-	CertFP        string   `json:"certificateFingerprint,omitempty"`
-	Content       string   `json:"content,omitempty"`
-	Kind          string   `json:"kind,omitempty"`
-	Status        string   `json:"status,omitempty"`
-	FileName      string   `json:"fileName,omitempty"`
-	MimeType      string   `json:"mimeType,omitempty"`
-	FileSize      int64    `json:"fileSize,omitempty"`
-	SHA256        string   `json:"sha256,omitempty"`
-	AttachmentID  string   `json:"attachmentId,omitempty"`
-	MessageIDs    []string `json:"messageIds,omitempty"`
-	ChunkIndex    int      `json:"chunkIndex,omitempty"`
-	Payload       string   `json:"payload,omitempty"`
-	Capabilities  []string `json:"capabilities,omitempty"`
-	SyncSince     string   `json:"syncSince,omitempty"`
-	SyncUntil     string   `json:"syncUntil,omitempty"`
-	SyncToken     string   `json:"syncToken,omitempty"`
-	ReadAt        string   `json:"readAt,omitempty"`
+	Magic            string   `json:"magic,omitempty"`
+	Type             string   `json:"type"`
+	Protocol         string   `json:"protocol,omitempty"`
+	Major            int      `json:"major,omitempty"`
+	Minor            int      `json:"minor,omitempty"`
+	MinMajor         int      `json:"minMajor,omitempty"`
+	MinMinor         int      `json:"minMinor,omitempty"`
+	RequestID        string   `json:"requestId,omitempty"`
+	MessageID        string   `json:"messageId,omitempty"`
+	DeviceID         string   `json:"deviceId,omitempty"`
+	Nickname         string   `json:"nickname,omitempty"`
+	AvatarHash       string   `json:"avatarHash,omitempty"`
+	AvatarVersion    int64    `json:"avatarVersion,omitempty"`
+	AvatarData       string   `json:"avatarData,omitempty"`
+	AvatarMime       string   `json:"avatarMime,omitempty"`
+	Platform         string   `json:"platform,omitempty"`
+	OSVersion        string   `json:"osVersion,omitempty"`
+	IP               string   `json:"ip,omitempty"`
+	Port             int      `json:"port,omitempty"`
+	PublicKey        string   `json:"publicKey,omitempty"`
+	CertFP           string   `json:"certificateFingerprint,omitempty"`
+	Content          string   `json:"content,omitempty"`
+	Kind             string   `json:"kind,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	FileName         string   `json:"fileName,omitempty"`
+	MimeType         string   `json:"mimeType,omitempty"`
+	FileSize         int64    `json:"fileSize,omitempty"`
+	SHA256           string   `json:"sha256,omitempty"`
+	AttachmentID     string   `json:"attachmentId,omitempty"`
+	MessageIDs       []string `json:"messageIds,omitempty"`
+	ChunkIndex       int      `json:"chunkIndex,omitempty"`
+	Payload          string   `json:"payload,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	SyncSince        string   `json:"syncSince,omitempty"`
+	SyncUntil        string   `json:"syncUntil,omitempty"`
+	SyncToken        string   `json:"syncToken,omitempty"`
+	ReadAt           string   `json:"readAt,omitempty"`
+	TargetDeviceID   string   `json:"targetDeviceId,omitempty"`
+	SourceDeviceID   string   `json:"sourceDeviceId,omitempty"`
+	SourcePublicKey  string   `json:"sourcePublicKey,omitempty"`
+	RestoreVersion   int      `json:"restoreVersion,omitempty"`
+	RestoreSignature string   `json:"restoreSignature,omitempty"`
 }

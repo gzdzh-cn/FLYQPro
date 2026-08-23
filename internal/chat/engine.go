@@ -39,6 +39,7 @@ type Engine struct {
 	started             bool
 	serviceStopped      bool
 	attachmentMigration bool
+	friendRestoreAt     map[string]time.Time
 }
 
 func (e *Engine) SetAttachmentMigrationActive(active bool) {
@@ -65,7 +66,7 @@ type incomingFile struct {
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), friendRestoreAt: make(map[string]time.Time)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -280,6 +281,23 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
 		e.emit("chat:friend-request-updated", map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID})
 		e.emit("chat:peer-updated", e.Peers())
+	case "friend_restore":
+		e.mu.RLock()
+		localDeviceID := e.identity.DeviceID
+		e.mu.RUnlock()
+		if err := verifyFriendRestore(message, hello, localDeviceID); err != nil {
+			_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", Status: "rejected"})
+			return
+		}
+		if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err != nil {
+			_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", Status: "rejected"})
+			return
+		}
+		e.updatePeerRelation(hello.DeviceID, PeerRelation)
+		e.emit("chat:peer-updated", e.Peers())
+		_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", SourceDeviceID: localDeviceID, TargetDeviceID: hello.DeviceID, RestoreVersion: friendRestoreVersion, Status: "accepted"})
+	case "friend_restore_ack":
+		// Control message only; it has no UI or message side effects.
 	case "message":
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
@@ -674,9 +692,14 @@ func (e *Engine) upsertWirePeer(message wireMessage) error {
 		return fmt.Errorf("设备身份为空")
 	}
 	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, Relation: DiscoveredState, LastSeen: nowString()}
+	wasFriend := false
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
-		if existing.CertificateFingerprint != "" && message.CertFP != "" && !strings.EqualFold(existing.CertificateFingerprint, message.CertFP) {
-			return fmt.Errorf("CERTIFICATE_CHANGED")
+		wasFriend = existing.Relation == PeerRelation
+		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
+			return fmt.Errorf("DEVICE_KEY_CHANGED")
+		}
+		if existing.CertificateFingerprint != "" && message.CertFP == "" {
+			message.CertFP = existing.CertificateFingerprint
 		}
 		if peer.CertificateFingerprint == "" {
 			peer.CertificateFingerprint = existing.CertificateFingerprint
@@ -701,7 +724,28 @@ func (e *Engine) upsertWirePeer(message wireMessage) error {
 	e.peers[peer.DeviceID] = peer
 	e.mu.Unlock()
 	go e.retryOutbox(peer)
+	if wasFriend {
+		e.maybeSendFriendRestore(peer)
+	}
 	return nil
+}
+
+func (e *Engine) maybeSendFriendRestore(peer Peer) {
+	e.mu.Lock()
+	last := e.friendRestoreAt[peer.DeviceID]
+	if !last.IsZero() && time.Since(last) < 30*time.Second {
+		e.mu.Unlock()
+		return
+	}
+	e.friendRestoreAt[peer.DeviceID] = time.Now()
+	e.mu.Unlock()
+	go func() {
+		message, err := e.friendRestoreMessage(peer.DeviceID)
+		if err != nil {
+			return
+		}
+		_ = e.sendToPeer(peer, message)
+	}()
 }
 
 func validDevicePublicKey(deviceID, publicKeyPEM string) bool {
@@ -1087,10 +1131,7 @@ func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
 	}
 	certificate := state.PeerCertificates[0]
 	actual := sha256Hex(certificate.Raw)
-	if peer.CertificateFingerprint != "" && !strings.EqualFold(actual, peer.CertificateFingerprint) {
-		return fmt.Errorf("CERTIFICATE_CHANGED")
-	}
-	if peer.CertificateFingerprint == "" && peer.PublicKeyPEM != "" {
+	if peer.PublicKeyPEM != "" {
 		block, _ := pem.Decode([]byte(peer.PublicKeyPEM))
 		if block == nil {
 			return fmt.Errorf("设备公钥无效")
@@ -1107,6 +1148,10 @@ func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
 		if err != nil || !strings.EqualFold(hex.EncodeToString(actualDER), hex.EncodeToString(expectedDER)) {
 			return fmt.Errorf("设备身份不匹配")
 		}
+		return nil
+	}
+	if peer.CertificateFingerprint != "" && !strings.EqualFold(actual, peer.CertificateFingerprint) {
+		return fmt.Errorf("CERTIFICATE_CHANGED")
 	}
 	return nil
 }

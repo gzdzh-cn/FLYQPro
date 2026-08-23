@@ -252,7 +252,10 @@ func (s *ChatService) ListPeers() []chat.Peer         { return s.engine.Peers() 
 func (s *ChatService) ScanPeers()                     { s.engine.Scan() }
 func (s *ChatService) ListFriends() []chat.Peer       { return s.engine.PeersByRelation(chat.PeerRelation) }
 func (s *ChatService) ListFriendRequests() []chat.FriendRequest {
-	requests, _ := chat.ListFriendRequests(gctx.New(), "pending")
+	// Return the full local request history. The frontend derives the pending
+	// count separately so accepted/rejected requests remain visible without
+	// being treated as actionable notifications.
+	requests, _ := chat.ListFriendRequests(gctx.New(), "")
 	return requests
 }
 func (s *ChatService) ListConversations() []chat.Conversation {
