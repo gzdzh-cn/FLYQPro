@@ -12,6 +12,8 @@ export class Attachment {
     "mimeType": string;
     "fileSize": number;
     "sha256": string;
+    "thumbnailData"?: string;
+    "thumbnailMime"?: string;
     "localPath": string;
     "status": string;
 
@@ -360,6 +362,8 @@ export class Message {
     "attachmentName"?: string;
     "attachmentSize"?: number;
     "attachmentMime"?: string;
+    "attachmentThumbnail"?: string;
+    "attachmentThumbnailMime"?: string;
     "attachmentStatus"?: string;
     "attachmentPath"?: string;
 

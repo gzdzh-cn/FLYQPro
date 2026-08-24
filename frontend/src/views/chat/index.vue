@@ -53,13 +53,14 @@
                   <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message) || attachmentNeedsDecision(message)" @click="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
-                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span></div>
+                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
                   </button>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
                     <a-button size="mini" type="primary" @click.stop="acceptAttachment(message)">接收</a-button>
                     <a-button size="mini" @click.stop="saveAttachmentAs(message)">另存</a-button>
                     <a-button size="mini" status="danger" @click.stop="rejectAttachment(message)">拒绝</a-button>
                   </div>
+                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
                 </template>
                 <template v-else>
                   <strong><icon-file /> {{ message.attachmentName || message.content }}</strong>
@@ -69,8 +70,9 @@
                     <a-button size="mini" @click="saveAttachmentAs(message)">另存</a-button>
                     <a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button>
                   </div>
+                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
+                <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
               </template>
               <template v-else>{{ message.content }}</template>
               <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small>
@@ -229,7 +231,7 @@ function avatarStyle(value: string, image?: string) { if (image) return { backgr
 function isImageMessage(message: any) { if (message?.attachmentMime) return message.attachmentMime.startsWith('image/'); return /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(message?.attachmentName || message?.content || '') }
 function formatTime(value: string) { if (!value) return ''; const date = new Date(value); const now = new Date(); const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); const diff = Math.round((today.getTime() - day.getTime()) / 86400000); const time = date.toLocaleTimeString('zh-CN', { hour: 'numeric', minute: '2-digit', hour12: true }); if (diff === 0) return `今天 ${time}`; if (diff === 1) return `昨天 ${time}`; if (diff === 2) return `前天 ${time}`; return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${time}` }
 function formatLastSeen(value: string) { return value ? formatTime(value) : '未知' }
-function messageStatusText(status: string, kind = 'text') { if (status === 'sent') return kind === 'file' ? '发送成功' : '已发送'; return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status }
+function messageStatusText(status: string, kind = 'text') { if (status === 'sent') return kind === 'file' ? '发送成功' : '已发送'; return ({ sending: '发送中', pending: '等待接收', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败', rejected: '对方拒绝', canceled: '已取消' } as Record<string, string>)[status] || status }
 function unreadCount(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId)?.unreadCount || 0 }
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
 function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
@@ -442,7 +444,6 @@ async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && 
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
-  if (attachmentNeedsDecision(message)) return
   const progress = transferProgressFor(message)
   if (message.attachmentStatus === 'receiving' || (progress && progress.direction === 'receive' && progress.phase !== 'completed' && progress.phase !== 'failed')) return
   if (messagePreviews[message.messageId]) return
@@ -562,10 +563,12 @@ async function retryMessage(message: any) {
     delete retryingMessages[message.messageId]
   }
 }
-async function acceptAttachment(message: any) { try { const attachment = await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('文件已保存') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
-async function saveAttachmentAs(message: any) { try { const attachment = await ChatService.SaveAttachmentAs(message.attachmentId); if (attachment.status !== 'saved') return; message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('附件已保存') } catch (error: any) { Message.error(error?.message || '另存附件失败') } }
-async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
+async function acceptAttachment(message: any) { try { const attachment = await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('已开始接收文件') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
+async function saveAttachmentAs(message: any) { try { const attachment = await ChatService.SaveAttachmentAs(message.attachmentId); if (attachment.status !== 'receiving' && attachment.status !== 'saved') return; message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('已开始接收文件') } catch (error: any) { Message.error(error?.message || '另存附件失败') } }
+async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected'; message.status = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
+async function cancelAttachment(message: any) { try { await ChatService.CancelAttachment(message.attachmentId); message.attachmentStatus = 'canceled'; message.status = 'canceled'; delete store.transferProgress[message.attachmentId] } catch (error: any) { Message.error(error?.message || '取消传输失败') } }
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
+function attachmentAwaitingAcceptance(message: any): boolean { return message?.senderDeviceId === deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 function transferProgressFor(message: any): any { return message?.attachmentId ? store.transferProgress[message.attachmentId] : undefined }
 function transferProgressTransferred(message: any): number {
@@ -585,13 +588,15 @@ function transferProgressLabel(message: any): string {
   const progress = transferProgressFor(message)
   if (!progress) return ''
   if (progress.phase === 'failed') return '传输失败'
+  if (progress.phase === 'canceled') return '已取消'
+  if (progress.phase === 'awaiting_acceptance') return '等待对方接收'
   if (progress.phase === 'completed') return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方已接收' : '接收完成'
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived !== undefined ? '对方接收中' : '发送中'
   return '接收中'
 }
 function imageTransferActive(message: any): boolean {
   const progress = transferProgressFor(message)
-  return Boolean(progress && progress.phase !== 'completed' && progress.phase !== 'failed')
+  return Boolean(progress && !['completed', 'canceled', 'failed'].includes(progress.phase))
 }
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
@@ -688,7 +693,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
  .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
- .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
+.attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
+.attachment-pending { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }
 
 .chat-app.theme-dark { background: #101827; color: #e5e7eb; }
 .chat-app.theme-dark .conversation-head,
@@ -1207,7 +1213,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .image-message:disabled { opacity: 1; }
 .image-pending-placeholder { display: flex; min-height: 110px; align-items: center; justify-content: center; padding: 0 18px; color: var(--muted); font-size: 12px; }
 .image-message img { display: block; width: auto; max-width: 100%; height: auto; max-height: 220px; object-fit: contain; margin: 0 auto; }
-.image-transfer-mask { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(9, 14, 24, .58); color: #fff; font-size: 12px; letter-spacing: .02em; pointer-events: none; }
+.image-transfer-mask { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(9, 14, 24, .58); color: #fff; font-size: 12px; letter-spacing: .02em; pointer-events: auto; }
 .image-progress-ring { position: relative; --progress: 0%; display: inline-flex; width: 62px; height: 62px; align-items: center; justify-content: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--progress), rgba(255, 255, 255, .28) var(--progress)); box-shadow: 0 4px 18px rgba(0, 0, 0, .22); }
 .image-progress-ring::after { content: ''; position: absolute; width: 50px; height: 50px; border-radius: 50%; background: rgba(13, 20, 34, .9); }
 .image-progress-ring strong { position: relative; z-index: 1; font-size: 13px; font-weight: 700; }

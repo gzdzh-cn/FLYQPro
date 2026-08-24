@@ -38,7 +38,7 @@ Example announcement:
   "port": 42000,
   "publicKey": "base64-or-pem-public-key",
   "certificateFingerprint": "sha256-of-x509-der",
-  "capabilities": ["text", "image", "file", "file-progress-v1"]
+  "capabilities": ["text", "image", "file", "file-progress-v1", "attachment-demand-v1"]
 }
 ```
 
@@ -54,7 +54,7 @@ The first frame is `hello`; the peer answers with `hello_ack` using the same
 negotiated dialect. Friend requests and messages are rejected until the local
 database marks the device as a friend. Unknown optional frames and fields may be ignored by other dzhgo/v2 clients, while text, image, and ordinary file behavior remains stable.
 
-The capabilities `avatar-sync-v1`, `file-progress-v1`, `offline-v1`, and `friend-restore-v2` are optional dzhgo/v2 features and are used when advertised by both sides.
+The capabilities `avatar-sync-v1`, `file-progress-v1`, `attachment-demand-v1`, `offline-v1`, and `friend-restore-v2` are optional dzhgo/v2 features and are used when advertised by both sides. With `attachment-demand-v1`, a `file_offer` carries metadata and an optional sender-generated thumbnail first; the original file is sent only after `file_accept`. Older peers continue using the direct-transfer behavior.
 
 When a FlyQPro service stops normally, it may broadcast an optional `offline`
 discovery frame. Receivers keep friends in the list and mark them offline;
@@ -85,8 +85,17 @@ The following fields are optional and may be ignored by other dzhgo/v2 clients:
   `restoreSignature`.
 - `offline` discovery presence events and `probe` hello flags.
 - `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`,
-  and `payload` for encrypted attachment transfer.
+  `thumbnailData`, `thumbnailMime`, `chunkIndex`, and `payload` for encrypted
+  attachment transfer.
 - `file_progress` frames and the `file-progress-v1` capability.
+
+Demand-based attachment control frames are `file_accept`, `file_reject`, and
+`file_cancel`. A pending offer must not create a receiver `.part` file or emit
+progress. The receiver may accept to the default attachment directory, choose
+another path, or reject the offer. Either side may cancel while waiting or
+transferring; the unfinished temporary file is then removed. A thumbnail is
+base64 encoded, limited to about 128 KiB, and is intended for image previews
+only; ordinary files use their name, size, and file icon.
 
 Message status values are `sending`, `sent`, `read`, and `failed`. A receiver
 must acknowledge a duplicate `messageId`, but must not persist or display it

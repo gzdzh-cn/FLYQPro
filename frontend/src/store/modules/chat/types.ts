@@ -72,6 +72,8 @@ export interface Message {
   attachmentName?: string
   attachmentSize?: number
   attachmentMime?: string
+  attachmentThumbnail?: string
+  attachmentThumbnailMime?: string
   attachmentStatus?: string
   attachmentPath?: string
 }
@@ -87,7 +89,7 @@ export interface TransferProgress {
   received?: number
   remoteReceived?: number
   direction: 'send' | 'receive' | 'remote-receive'
-  phase: 'transferring' | 'receiving' | 'completed' | 'failed' | string
+  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'failed' | string
 }
 
 export interface NetworkStatus {

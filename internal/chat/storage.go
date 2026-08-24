@@ -87,14 +87,16 @@ type messageRow struct {
 }
 
 type attachmentRow struct {
-	AttachmentID string `orm:"attachment_id"`
-	MessageID    string `orm:"message_id"`
-	FileName     string `orm:"file_name"`
-	MimeType     string `orm:"mime_type"`
-	FileSize     int64  `orm:"file_size"`
-	SHA256       string `orm:"sha256"`
-	LocalPath    string `orm:"local_path"`
-	Status       string `orm:"status"`
+	AttachmentID  string `orm:"attachment_id"`
+	MessageID     string `orm:"message_id"`
+	FileName      string `orm:"file_name"`
+	MimeType      string `orm:"mime_type"`
+	FileSize      int64  `orm:"file_size"`
+	SHA256        string `orm:"sha256"`
+	ThumbnailData string `orm:"thumbnail_data"`
+	ThumbnailMime string `orm:"thumbnail_mime"`
+	LocalPath     string `orm:"local_path"`
+	Status        string `orm:"status"`
 }
 
 type attachmentMigrationRow struct {
@@ -517,9 +519,10 @@ func ListMessages(ctx context.Context, conversationID string) ([]Message, error)
 		message := Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt}
 		if row.Kind == "file" {
 			var attachments []attachmentRow
-			if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
+			if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
 				attachment := attachments[0]
 				message.AttachmentID, message.AttachmentName, message.AttachmentSize, message.AttachmentMime, message.AttachmentStatus, message.AttachmentPath = attachment.AttachmentID, attachment.FileName, attachment.FileSize, attachment.MimeType, attachment.Status, attachment.LocalPath
+				message.AttachmentThumbnail, message.AttachmentThumbnailMime = attachment.ThumbnailData, attachment.ThumbnailMime
 			}
 		}
 		messages = append(messages, message)
@@ -535,11 +538,13 @@ func ListConversationAttachments(ctx context.Context, peerDeviceID string) ([]Co
 		MimeType       string `orm:"mime_type"`
 		FileSize       int64  `orm:"file_size"`
 		SHA256         string `orm:"sha256"`
+		ThumbnailData  string `orm:"thumbnail_data"`
+		ThumbnailMime  string `orm:"thumbnail_mime"`
 		LocalPath      string `orm:"local_path"`
 		Status         string `orm:"status"`
 		SenderDeviceID string `orm:"sender_device_id"`
 	}
-	result, err := query(ctx, `SELECT a.attachment_id, a.message_id, a.file_name, a.mime_type, a.file_size, a.sha256, a.local_path, a.status, m.sender_device_id
+	result, err := query(ctx, `SELECT a.attachment_id, a.message_id, a.file_name, a.mime_type, a.file_size, a.sha256, a.thumbnail_data, a.thumbnail_mime, a.local_path, a.status, m.sender_device_id
 		FROM attachments a JOIN messages m ON m.message_id=a.message_id JOIN conversations c ON c.conversation_id=m.conversation_id
 		WHERE c.peer_device_id=? ORDER BY a.created_at, a.attachment_id`, peerDeviceID)
 	if err != nil {
@@ -551,7 +556,7 @@ func ListConversationAttachments(ctx context.Context, peerDeviceID string) ([]Co
 	attachments := make([]ConversationAttachment, 0, len(rows))
 	for _, row := range rows {
 		attachments = append(attachments, ConversationAttachment{
-			Attachment:     Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, LocalPath: row.LocalPath, Status: row.Status},
+			Attachment:     Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, ThumbnailData: row.ThumbnailData, ThumbnailMime: row.ThumbnailMime, LocalPath: row.LocalPath, Status: row.Status},
 			SenderDeviceID: row.SenderDeviceID,
 		})
 	}
@@ -621,9 +626,10 @@ func GetMessage(ctx context.Context, messageID string) (Message, error) {
 	message := Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt}
 	if row.Kind == "file" {
 		var attachments []attachmentRow
-		if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
+		if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
 			attachment := attachments[0]
 			message.AttachmentID, message.AttachmentName, message.AttachmentSize, message.AttachmentMime, message.AttachmentStatus, message.AttachmentPath = attachment.AttachmentID, attachment.FileName, attachment.FileSize, attachment.MimeType, attachment.Status, attachment.LocalPath
+			message.AttachmentThumbnail, message.AttachmentThumbnailMime = attachment.ThumbnailData, attachment.ThumbnailMime
 		}
 	}
 	return message, nil
@@ -672,7 +678,7 @@ func MessageExists(ctx context.Context, messageID string) (bool, error) {
 }
 
 func SaveAttachment(ctx context.Context, attachment Attachment) error {
-	return exec(ctx, `INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.LocalPath, attachment.Status, nowString())
+	return exec(ctx, `INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET thumbnail_data=CASE WHEN excluded.thumbnail_data != '' THEN excluded.thumbnail_data ELSE attachments.thumbnail_data END, thumbnail_mime=CASE WHEN excluded.thumbnail_mime != '' THEN excluded.thumbnail_mime ELSE attachments.thumbnail_mime END, local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.ThumbnailData, attachment.ThumbnailMime, attachment.LocalPath, attachment.Status, nowString())
 }
 
 func ListAttachmentMigrationRows(ctx context.Context) ([]attachmentMigrationRow, error) {
@@ -711,7 +717,7 @@ func AttachmentPeerDeviceID(ctx context.Context, attachmentID string) (string, e
 
 func GetAttachment(ctx context.Context, id string) (Attachment, error) {
 	var rows []attachmentRow
-	result, err := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, local_path, status FROM attachments WHERE attachment_id=?`, id)
+	result, err := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status FROM attachments WHERE attachment_id=?`, id)
 	if err != nil {
 		return Attachment{}, err
 	}
@@ -722,7 +728,7 @@ func GetAttachment(ctx context.Context, id string) (Attachment, error) {
 		return Attachment{}, fmt.Errorf("attachment_not_found")
 	}
 	row := rows[0]
-	return Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, LocalPath: row.LocalPath, Status: row.Status}, nil
+	return Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, ThumbnailData: row.ThumbnailData, ThumbnailMime: row.ThumbnailMime, LocalPath: row.LocalPath, Status: row.Status}, nil
 }
 
 func parseTime(value string) time.Time { t, _ := time.Parse(time.RFC3339Nano, value); return t }

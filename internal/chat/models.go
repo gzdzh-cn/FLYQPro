@@ -94,30 +94,34 @@ type Conversation struct {
 }
 
 type Message struct {
-	MessageID        string `json:"messageId"`
-	ConversationID   string `json:"conversationId"`
-	SenderDeviceID   string `json:"senderDeviceId"`
-	Kind             string `json:"kind"`
-	Content          string `json:"content"`
-	Status           string `json:"status"`
-	CreatedAt        string `json:"createdAt"`
-	AttachmentID     string `json:"attachmentId,omitempty"`
-	AttachmentName   string `json:"attachmentName,omitempty"`
-	AttachmentSize   int64  `json:"attachmentSize,omitempty"`
-	AttachmentMime   string `json:"attachmentMime,omitempty"`
-	AttachmentStatus string `json:"attachmentStatus,omitempty"`
-	AttachmentPath   string `json:"attachmentPath,omitempty"`
+	MessageID               string `json:"messageId"`
+	ConversationID          string `json:"conversationId"`
+	SenderDeviceID          string `json:"senderDeviceId"`
+	Kind                    string `json:"kind"`
+	Content                 string `json:"content"`
+	Status                  string `json:"status"`
+	CreatedAt               string `json:"createdAt"`
+	AttachmentID            string `json:"attachmentId,omitempty"`
+	AttachmentName          string `json:"attachmentName,omitempty"`
+	AttachmentSize          int64  `json:"attachmentSize,omitempty"`
+	AttachmentMime          string `json:"attachmentMime,omitempty"`
+	AttachmentThumbnail     string `json:"attachmentThumbnail,omitempty"`
+	AttachmentThumbnailMime string `json:"attachmentThumbnailMime,omitempty"`
+	AttachmentStatus        string `json:"attachmentStatus,omitempty"`
+	AttachmentPath          string `json:"attachmentPath,omitempty"`
 }
 
 type Attachment struct {
-	AttachmentID string `json:"attachmentId"`
-	MessageID    string `json:"messageId"`
-	FileName     string `json:"fileName"`
-	MimeType     string `json:"mimeType"`
-	FileSize     int64  `json:"fileSize"`
-	SHA256       string `json:"sha256"`
-	LocalPath    string `json:"localPath"`
-	Status       string `json:"status"`
+	AttachmentID  string `json:"attachmentId"`
+	MessageID     string `json:"messageId"`
+	FileName      string `json:"fileName"`
+	MimeType      string `json:"mimeType"`
+	FileSize      int64  `json:"fileSize"`
+	SHA256        string `json:"sha256"`
+	ThumbnailData string `json:"thumbnailData,omitempty"`
+	ThumbnailMime string `json:"thumbnailMime,omitempty"`
+	LocalPath     string `json:"localPath"`
+	Status        string `json:"status"`
 }
 
 type ClearConversationResult struct {
@@ -206,6 +210,8 @@ type wireMessage struct {
 	Status           string   `json:"status,omitempty"`
 	FileName         string   `json:"fileName,omitempty"`
 	MimeType         string   `json:"mimeType,omitempty"`
+	ThumbnailData    string   `json:"thumbnailData,omitempty"`
+	ThumbnailMime    string   `json:"thumbnailMime,omitempty"`
 	FileSize         int64    `json:"fileSize,omitempty"`
 	SHA256           string   `json:"sha256,omitempty"`
 	AttachmentID     string   `json:"attachmentId,omitempty"`

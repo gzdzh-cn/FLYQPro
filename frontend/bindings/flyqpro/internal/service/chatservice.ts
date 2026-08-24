@@ -19,6 +19,10 @@ export function AcceptFriendRequest(requestID: string): $CancellablePromise<void
     return $Call.ByID(2475943332, requestID);
 }
 
+export function CancelAttachment(attachmentID: string): $CancellablePromise<void> {
+    return $Call.ByID(3051208600, attachmentID);
+}
+
 export function ClearApplicationData(): $CancellablePromise<void> {
     return $Call.ByID(3831967442);
 }

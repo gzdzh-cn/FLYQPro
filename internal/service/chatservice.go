@@ -327,7 +327,13 @@ func (s *ChatService) SendImage(deviceID, dataURL string) (chat.Message, error) 
 
 func (s *ChatService) GetAttachmentPreview(attachmentID string) (string, error) {
 	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
-	if err != nil || attachment.LocalPath == "" {
+	if err != nil {
+		return "", fmt.Errorf("图片预览不可用")
+	}
+	if attachment.LocalPath == "" && attachment.ThumbnailData != "" && attachment.ThumbnailMime != "" {
+		return "data:" + attachment.ThumbnailMime + ";base64," + attachment.ThumbnailData, nil
+	}
+	if attachment.LocalPath == "" {
 		return "", fmt.Errorf("图片预览不可用")
 	}
 	data, err := os.ReadFile(attachment.LocalPath)
@@ -369,7 +375,7 @@ func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, er
 	if err != nil {
 		return attachment, err
 	}
-	return s.saveAttachmentToPath(attachment, target)
+	return s.engine.AcceptIncomingAttachment(gctx.New(), attachmentID, target)
 }
 
 // SaveAttachmentAs lets a user choose the final path for a pending attachment.
@@ -385,7 +391,7 @@ func (s *ChatService) SaveAttachmentAs(attachmentID string) (chat.Attachment, er
 	if attachment.Status == "saved" {
 		return attachment, nil
 	}
-	if attachment.Status != "pending" || strings.TrimSpace(attachment.LocalPath) == "" {
+	if attachment.Status != "pending" {
 		return attachment, fmt.Errorf("附件当前不可保存")
 	}
 	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择附件保存位置").SetFilename(attachment.FileName).PromptForSingleSelection()
@@ -395,44 +401,18 @@ func (s *ChatService) SaveAttachmentAs(attachmentID string) (chat.Attachment, er
 	if strings.TrimSpace(result) == "" {
 		return attachment, nil
 	}
-	return s.saveAttachmentToPath(attachment, filepath.Clean(result))
-}
-
-func (s *ChatService) saveAttachmentToPath(attachment chat.Attachment, target string) (chat.Attachment, error) {
-	oldPath := attachment.LocalPath
-	if strings.TrimSpace(oldPath) == "" {
-		return attachment, fmt.Errorf("附件暂存文件不存在")
-	}
-	if strings.TrimSpace(target) == "" {
-		return attachment, fmt.Errorf("附件保存路径不能为空")
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return attachment, err
-	}
-	if err := os.Rename(oldPath, target); err != nil {
-		return attachment, err
-	}
-	attachment.LocalPath, attachment.Status = target, "saved"
-	if err := chat.SaveAttachment(gctx.New(), attachment); err != nil {
-		_ = os.Rename(target, oldPath)
-		return attachment, err
-	}
-	return attachment, nil
+	return s.engine.AcceptIncomingAttachment(gctx.New(), attachmentID, filepath.Clean(result))
 }
 
 func (s *ChatService) RejectAttachment(attachmentID string) error {
+	return s.engine.RejectIncomingAttachment(attachmentID)
+}
+
+func (s *ChatService) CancelAttachment(attachmentID string) error {
 	if s.engine.IsAttachmentMigrationActive() {
 		return fmt.Errorf("附件迁移正在进行")
 	}
-	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
-	if err != nil {
-		return err
-	}
-	if attachment.LocalPath != "" {
-		_ = os.Remove(attachment.LocalPath)
-	}
-	attachment.Status = "rejected"
-	return chat.SaveAttachment(gctx.New(), attachment)
+	return s.engine.CancelAttachment(attachmentID)
 }
 func (s *ChatService) SetPeerRemark(deviceID, remark string) error {
 	return chat.SetPeerRemark(gctx.New(), deviceID, remark)

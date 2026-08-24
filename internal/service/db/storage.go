@@ -155,6 +155,8 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"attachments", "mime_type", "TEXT NOT NULL DEFAULT 'application/octet-stream'"},
 		{"attachments", "file_size", "INTEGER NOT NULL DEFAULT 0"},
 		{"attachments", "sha256", "TEXT NOT NULL DEFAULT ''"},
+		{"attachments", "thumbnail_data", "TEXT NOT NULL DEFAULT ''"},
+		{"attachments", "thumbnail_mime", "TEXT NOT NULL DEFAULT ''"},
 		{"attachments", "local_path", "TEXT NOT NULL DEFAULT ''"},
 		{"attachments", "status", "TEXT NOT NULL DEFAULT 'pending'"},
 		{"attachments", "created_at", "TEXT NOT NULL DEFAULT ''"},

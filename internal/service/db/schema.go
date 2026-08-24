@@ -96,6 +96,8 @@ var schemaStatements = []string{
 		mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
 		file_size INTEGER NOT NULL DEFAULT 0,
 		sha256 TEXT NOT NULL DEFAULT '',
+		thumbnail_data TEXT NOT NULL DEFAULT '',
+		thumbnail_mime TEXT NOT NULL DEFAULT '',
 		local_path TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'pending',
 		created_at TEXT NOT NULL,
