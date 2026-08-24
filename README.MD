@@ -4,6 +4,13 @@ FlyQPro 是一款面向桌面端的局域网点对点聊天工具。它不依赖
 
 项目仓库：[gzdzh-cn/FLYQPro](https://github.com/gzdzh-cn/FlyQPro)
 
+## 下载安装
+
+请前往 [GitHub Releases](https://github.com/gzdzh-cn/FLYQPro/releases/latest) 下载最新版本。
+
+- [Apple Silicon ARM64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/FlyQPro-macos-arm64.dmg)
+- [Intel x86_64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/FlyQPro-macos-x86_64.dmg)
+
 ## 技术栈概览
 
 - **桌面应用**：Wails 3，将 Go 后端与系统 WebView 结合为原生桌面程序。
