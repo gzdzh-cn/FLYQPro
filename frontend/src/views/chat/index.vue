@@ -46,7 +46,7 @@
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
-            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="isImageMessage(message)" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="isImageMessage(message)" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template><div v-if="transferProgressFor(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
@@ -369,6 +369,28 @@ async function retryMessage(message: any) {
 async function acceptAttachment(message: any) { try { await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = 'saved'; await loadMessagePreview(message); Message.success('文件已保存') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+function transferProgressFor(message: any): any { return message?.attachmentId ? store.transferProgress[message.attachmentId] : undefined }
+function transferProgressTransferred(message: any): number {
+  const progress = transferProgressFor(message)
+  if (!progress) return 0
+  if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived ?? progress.sent ?? progress.transferred ?? 0
+  return progress.received ?? progress.transferred ?? 0
+}
+function transferProgressPercent(message: any): number {
+  const progress = transferProgressFor(message)
+  if (!progress) return 0
+  if (progress.phase === 'completed') return 100
+  const total = progress.total || message.attachmentSize || 0
+  return total ? Math.min(100, Math.round(transferProgressTransferred(message) / total * 100)) : (progress.percent || 0)
+}
+function transferProgressLabel(message: any): string {
+  const progress = transferProgressFor(message)
+  if (!progress) return ''
+  if (progress.phase === 'failed') return '传输失败'
+  if (progress.phase === 'completed') return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方已接收' : '接收完成'
+  if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived !== undefined ? '对方接收中' : '发送中'
+  return '接收中'
+}
 function closePeerInfo() { showPeerInfo.value = false }
 function handleMessageAreaClick() { closePeerInfo(); markActiveRead() }
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
@@ -938,6 +960,12 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .message-line { align-items: center; gap: 8px; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .message-status { display: inline-flex; width: 52px; height: 17px; margin-left: 6px; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255, 255, 255, .2); font-size: 10px; vertical-align: middle; }
+.transfer-progress { width: min(260px, 100%); margin-top: 8px; padding-top: 7px; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
+.transfer-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; opacity: .82; }
+.transfer-progress-head strong { font-size: 11px; font-weight: 700; }
+.transfer-progress-track { height: 5px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
+.transfer-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .18s ease; }
+.transfer-progress small { display: block; margin-top: 4px; font-size: 10px; opacity: .62; }
 .vertical-resizer { width: 5px; flex: 0 0 5px; margin-left: -3px; margin-right: -2px; cursor: col-resize; position: relative; z-index: 6; }
 .vertical-resizer:hover::after, .vertical-resizer:active::after { content: ''; position: absolute; inset: 0 1px; background: var(--accent); }
 .horizontal-resizer { height: 5px; flex: 0 0 5px; margin-top: -3px; cursor: row-resize; position: relative; z-index: 5; }

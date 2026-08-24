@@ -58,6 +58,7 @@ The following fields are optional and may be ignored by older clients:
 - `offline`: optional discovery presence event indicating that the sender's service stopped normally. It does not change the friendship relation and may be ignored by older clients.
 - `probe`: optional `hello` flag used for a liveness check. A probe completes authentication without triggering outbox retries or business-message side effects.
 - `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`, and `payload`: encrypted attachment transfer metadata and chunks.
+- `file-progress-v1` capability and optional `file_progress` frames: the receiver reports the number of verified bytes written after each chunk, allowing the sender to show the other side's receive progress. The `transferred` field is the cumulative byte count and `status` is `receiving`, `completed`, or `failed`. Clients without this capability continue to transfer files without remote progress feedback.
 
 Message status values exposed by the application are `sending`, `sent`, `read`, and `failed`. A receiver must acknowledge a duplicate `messageId`, but must not persist or display it again.
 

@@ -72,6 +72,20 @@ export interface Message {
   attachmentPath?: string
 }
 
+export interface TransferProgress {
+  messageId?: string
+  attachmentId: string
+  peerDeviceId?: string
+  transferred: number
+  total: number
+  percent: number
+  sent?: number
+  received?: number
+  remoteReceived?: number
+  direction: 'send' | 'receive' | 'remote-receive'
+  phase: 'transferring' | 'receiving' | 'completed' | 'failed' | string
+}
+
 export interface NetworkStatus {
   status: string
   interfaces: string[]

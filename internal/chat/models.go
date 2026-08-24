@@ -188,6 +188,7 @@ type wireMessage struct {
 	AttachmentID     string   `json:"attachmentId,omitempty"`
 	MessageIDs       []string `json:"messageIds,omitempty"`
 	ChunkIndex       int      `json:"chunkIndex,omitempty"`
+	Transferred      int64    `json:"transferred,omitempty"`
 	Payload          string   `json:"payload,omitempty"`
 	Capabilities     []string `json:"capabilities,omitempty"`
 	SyncSince        string   `json:"syncSince,omitempty"`

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile } from './types'
+import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress } from './types'
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
@@ -13,6 +13,7 @@ export const useChatStore = defineStore('chat', {
     activeSection: 'friends',
     activePeerId: '',
     lastMessageEvent: null as Message | null,
+    transferProgress: {} as Record<string, TransferProgress>,
     attachmentMigration: { active: false, phase: '', sourceRoot: '', targetRoot: '', current: 0, total: 0, fileName: '', peerDeviceId: '', migrated: 0, skipped: 0, failed: 0, unclassified: 0, errorMessage: '' } as AttachmentMigrationProgress & { active: boolean },
   }),
   getters: {
@@ -37,6 +38,16 @@ export const useChatStore = defineStore('chat', {
       }
       if (name === 'chat:message-status') {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))
+        return
+      }
+      if (name === 'chat:transfer-progress') {
+        const progress = value as TransferProgress
+        if (progress?.attachmentId) {
+          this.transferProgress[progress.attachmentId] = {
+            ...this.transferProgress[progress.attachmentId],
+            ...progress,
+          }
+        }
         return
       }
       if (name === 'chat:attachment' && !value?.conversationId) {

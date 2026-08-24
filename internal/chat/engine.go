@@ -55,15 +55,16 @@ func (e *Engine) IsAttachmentMigrationActive() bool {
 }
 
 type incomingFile struct {
-	file      *os.File
-	tempPath  string
-	messageID string
-	senderID  string
-	fileName  string
-	mimeType  string
-	expected  int64
-	received  int64
-	sha256    string
+	file         *os.File
+	tempPath     string
+	messageID    string
+	senderID     string
+	fileName     string
+	mimeType     string
+	expected     int64
+	received     int64
+	lastProgress int64
+	sha256       string
 }
 
 func NewEngine() *Engine {
@@ -473,6 +474,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		e.mu.Unlock()
 		e.emit("chat:message", messageRecord)
 		e.emit("chat:attachment", messageRecord)
+		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving")
 	case "file_chunk":
 		e.mu.RLock()
 		transfer := e.incoming[message.AttachmentID]
@@ -488,24 +490,40 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		transfer.received += int64(len(data))
-		e.emit("chat:transfer-progress", map[string]any{"attachmentId": message.AttachmentID, "received": transfer.received, "total": transfer.expected})
+		if transfer.received-transfer.lastProgress >= 256*1024 || (transfer.expected > 0 && transfer.received >= transfer.expected) {
+			e.emitTransferProgress(transfer.messageID, message.AttachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring")
+			transfer.lastProgress = transfer.received
+		}
+		// New clients acknowledge every chunk so the sender can show the
+		// receiver's actual progress. Older clients ignore this optional frame.
+		_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "receiving"})
 	case "file_complete":
-		e.finishIncomingFile(message.AttachmentID)
+		e.mu.RLock()
+		transfer := e.incoming[message.AttachmentID]
+		messageID, total := message.MessageID, message.FileSize
+		if transfer != nil {
+			messageID, total = transfer.messageID, transfer.expected
+		}
+		e.mu.RUnlock()
+		status := e.finishIncomingFile(message.AttachmentID)
+		// finishIncomingFile removes the transfer, so use the message metadata
+		// supplied by the sender for the final optional acknowledgement.
+		_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: messageID, AttachmentID: message.AttachmentID, Transferred: total, FileSize: total, Status: status})
 	}
 }
 
-func (e *Engine) finishIncomingFile(attachmentID string) {
+func (e *Engine) finishIncomingFile(attachmentID string) string {
 	e.mu.Lock()
 	transfer := e.incoming[attachmentID]
 	delete(e.incoming, attachmentID)
 	e.mu.Unlock()
 	if transfer == nil {
-		return
+		return "failed"
 	}
 	_ = transfer.file.Close()
 	data, err := os.ReadFile(transfer.tempPath)
 	if err != nil {
-		return
+		return "failed"
 	}
 	valid := sha256Hex(data) == transfer.sha256
 	status := "pending"
@@ -542,6 +560,43 @@ func (e *Engine) finishIncomingFile(attachmentID string) {
 	}
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", map[bool]string{true: "completed", false: "failed"}[valid])
+	if valid {
+		return "completed"
+	}
+	return "failed"
+}
+
+func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string) {
+	if transferred < 0 {
+		transferred = 0
+	}
+	if total > 0 && transferred > total {
+		transferred = total
+	}
+	percent := 0
+	if total > 0 {
+		percent = int(transferred * 100 / total)
+	}
+	value := map[string]any{
+		"messageId":    messageID,
+		"attachmentId": attachmentID,
+		"peerDeviceId": peerDeviceID,
+		"transferred":  transferred,
+		"total":        total,
+		"percent":      percent,
+		"direction":    direction,
+		"phase":        phase,
+	}
+	switch direction {
+	case "send":
+		value["sent"] = transferred
+	case "receive":
+		value["received"] = transferred
+	case "remote-receive":
+		value["remoteReceived"] = transferred
+	}
+	e.emit("chat:transfer-progress", value)
 }
 
 // ArchivePendingAttachments moves files that arrived during a storage
@@ -754,7 +809,7 @@ func (e *Engine) helloMessage(kind string) wireMessage {
 	identity := e.identity
 	e.mu.RUnlock()
 	profile := e.Profile()
-	return wireMessage{Magic: DiscoveryMagic, Type: kind, Protocol: ProtocolName, Major: ProtocolMajor, Minor: ProtocolMinor, MinMajor: ProtocolMajor, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: []string{"text", "image", "file"}}
+	return wireMessage{Magic: DiscoveryMagic, Type: kind, Protocol: ProtocolName, Major: ProtocolMajor, Minor: ProtocolMinor, MinMajor: ProtocolMajor, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: []string{"text", "image", "file", "file-progress-v1"}}
 }
 
 func (e *Engine) upsertWirePeer(message wireMessage) error {
@@ -1259,6 +1314,7 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	if response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
+	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1")
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
 		e.emit("chat:peer-updated", e.Peers())
@@ -1269,8 +1325,10 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum}); err != nil {
 		return err
 	}
+	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring")
 	buffer := make([]byte, 32*1024)
 	index := 0
+	var sent, lastProgress int64
 	for {
 		n, readErr := file.Read(buffer)
 		if n > 0 {
@@ -1278,6 +1336,25 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 				return err
 			}
 			index++
+			sent += int64(n)
+			if sent-lastProgress >= 256*1024 || sent == message.AttachmentSize {
+				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring")
+				lastProgress = sent
+			}
+			if supportsProgress {
+				progress, err := readFileProgress(decoder, message.AttachmentID)
+				if err != nil {
+					return err
+				}
+				phase := "receiving"
+				if progress.Status == "failed" {
+					phase = "failed"
+				}
+				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase)
+				if progress.Status == "failed" {
+					return fmt.Errorf("对方接收文件失败")
+				}
+			}
 		}
 		if readErr == io.EOF {
 			break
@@ -1286,7 +1363,52 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 			return readErr
 		}
 	}
-	return writeWire(conn, wireMessage{Type: "file_complete", AttachmentID: message.AttachmentID})
+	if err := writeWire(conn, wireMessage{Type: "file_complete", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileSize: message.AttachmentSize}); err != nil {
+		return err
+	}
+	if supportsProgress {
+		progress, err := readFileProgress(decoder, message.AttachmentID)
+		if err != nil {
+			return err
+		}
+		phase := "completed"
+		if progress.Status == "failed" {
+			phase = "failed"
+		}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase)
+		if progress.Status == "failed" {
+			return fmt.Errorf("对方接收文件失败")
+		}
+	}
+	return nil
+}
+
+func hasCapability(capabilities []string, expected string) bool {
+	for _, capability := range capabilities {
+		if capability == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func readFileProgress(decoder *json.Decoder, attachmentID string) (wireMessage, error) {
+	for {
+		var progress wireMessage
+		if err := decoder.Decode(&progress); err != nil {
+			return wireMessage{}, err
+		}
+		// A friend restore acknowledgement may be queued before the first file
+		// progress frame. It is a separate optional control message and should
+		// not interrupt the attachment transfer.
+		if progress.Type == "friend_restore_ack" {
+			continue
+		}
+		if progress.Type != "file_progress" || progress.AttachmentID != attachmentID {
+			return wireMessage{}, fmt.Errorf("文件进度回执无效")
+		}
+		return progress, nil
+	}
 }
 
 func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string) Message {
