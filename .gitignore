@@ -20,5 +20,5 @@ frontend/bindings/*
 
 # macOS Finder metadata
 **/.DS_Store
-docs
+docs/vitepress
 *.exe
