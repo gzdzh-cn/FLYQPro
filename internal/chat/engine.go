@@ -583,8 +583,20 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if attachmentMime == "" {
 			attachmentMime = "application/octet-stream"
 		}
-		if exists, existsErr := MessageExists(context.Background(), message.MessageID); existsErr != nil || exists {
+		messageAlreadyExists, existsErr := MessageExists(context.Background(), message.MessageID)
+		if existsErr != nil {
 			return
+		}
+		if messageAlreadyExists {
+			existing, existingErr := GetMessage(context.Background(), message.MessageID)
+			if existingErr != nil {
+				return
+			}
+			switch existing.AttachmentStatus {
+			case "canceled", "rejected", "failed":
+			default:
+				return
+			}
 		}
 		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
 		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "sent", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentThumbnail: thumbnailData, AttachmentThumbnailMime: thumbnailMime, AttachmentStatus: "pending"}
@@ -594,7 +606,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			if err := SaveMessage(context.Background(), messageRecord); err != nil {
 				return
 			}
-			_ = IncrementConversationUnread(context.Background(), conversationID)
+			if err := UpdateMessageStatus(context.Background(), messageRecord.MessageID, messageRecord.Status); err != nil {
+				return
+			}
+			if !messageAlreadyExists {
+				_ = IncrementConversationUnread(context.Background(), conversationID)
+			}
 			if err := SaveAttachment(context.Background(), attachment); err != nil {
 				return
 			}

@@ -105,7 +105,7 @@
     <section v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
+        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div><a-button v-if="request.status === 'accepted' && isFriend(request.deviceId)" class="request-chat-button" size="mini" type="primary" @click.stop="openFriendChat(request.deviceId)">聊天</a-button></button></div>
         <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
@@ -423,6 +423,18 @@ function selectRequest(request: FriendRequest) {
   selectedRequest.value = request
   selectedDiscovery.value = undefined
 }
+function isFriend(deviceId: string): boolean { return store.friends.some((peer) => peer.deviceId === deviceId) }
+function openFriendChat(deviceId: string) {
+  const peer = store.friends.find((item) => item.deviceId === deviceId)
+  if (!peer) {
+    Message.warning('好友信息尚未同步，请稍后重试')
+    return
+  }
+  selectedRequest.value = undefined
+  selectedDiscovery.value = undefined
+  section.value = 'friends'
+  void loadConversation(peer, true, false, true)
+}
 function selectDiscovery(peer: Peer) {
   if (selectedDiscovery.value?.deviceId === peer.deviceId) {
     clearDiscoverySelection()
@@ -568,7 +580,12 @@ async function saveAttachmentAs(message: any) { try { const attachment = await C
 async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected'; message.status = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
 async function cancelAttachment(message: any) { try { await ChatService.CancelAttachment(message.attachmentId); message.attachmentStatus = 'canceled'; message.status = 'canceled'; delete store.transferProgress[message.attachmentId] } catch (error: any) { Message.error(error?.message || '取消传输失败') } }
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
-function attachmentAwaitingAcceptance(message: any): boolean { return message?.senderDeviceId === deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
+function attachmentAwaitingAcceptance(message: any): boolean {
+  if (message?.senderDeviceId !== deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
+  const progress = transferProgressFor(message)
+  if (isImageMessage(message)) return !progress
+  return !progress || progress.phase === 'awaiting_acceptance'
+}
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 function transferProgressFor(message: any): any { return message?.attachmentId ? store.transferProgress[message.attachmentId] : undefined }
 function transferProgressTransferred(message: any): number {
@@ -694,6 +711,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
  .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
+.request-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.request-chat-button { flex: 0 0 auto; margin-left: auto; }
 .attachment-pending { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }
 
 .chat-app.theme-dark { background: #101827; color: #e5e7eb; }
