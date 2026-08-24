@@ -143,6 +143,16 @@ export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticRes
     });
 }
 
+/**
+ * SaveAttachmentAs lets a user choose the final path for a pending attachment.
+ * The temporary download is moved only after the user confirms the destination.
+ */
+export function SaveAttachmentAs(attachmentID: string): $CancellablePromise<chat$0.Attachment> {
+    return $Call.ByID(2973575367, attachmentID).then(($result: any) => {
+        return $$createType0($result);
+    });
+}
+
 export function ScanPeers(): $CancellablePromise<void> {
     return $Call.ByID(786209235);
 }

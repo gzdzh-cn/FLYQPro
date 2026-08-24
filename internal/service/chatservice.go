@@ -369,7 +369,46 @@ func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, er
 	if err != nil {
 		return attachment, err
 	}
+	return s.saveAttachmentToPath(attachment, target)
+}
+
+// SaveAttachmentAs lets a user choose the final path for a pending attachment.
+// The temporary download is moved only after the user confirms the destination.
+func (s *ChatService) SaveAttachmentAs(attachmentID string) (chat.Attachment, error) {
+	if s.engine.IsAttachmentMigrationActive() {
+		return chat.Attachment{}, fmt.Errorf("附件迁移正在进行")
+	}
+	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
+	if err != nil {
+		return attachment, err
+	}
+	if attachment.Status == "saved" {
+		return attachment, nil
+	}
+	if attachment.Status != "pending" || strings.TrimSpace(attachment.LocalPath) == "" {
+		return attachment, fmt.Errorf("附件当前不可保存")
+	}
+	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择附件保存位置").SetFilename(attachment.FileName).PromptForSingleSelection()
+	if err != nil {
+		return attachment, err
+	}
+	if strings.TrimSpace(result) == "" {
+		return attachment, nil
+	}
+	return s.saveAttachmentToPath(attachment, filepath.Clean(result))
+}
+
+func (s *ChatService) saveAttachmentToPath(attachment chat.Attachment, target string) (chat.Attachment, error) {
 	oldPath := attachment.LocalPath
+	if strings.TrimSpace(oldPath) == "" {
+		return attachment, fmt.Errorf("附件暂存文件不存在")
+	}
+	if strings.TrimSpace(target) == "" {
+		return attachment, fmt.Errorf("附件保存路径不能为空")
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return attachment, err
+	}
 	if err := os.Rename(oldPath, target); err != nil {
 		return attachment, err
 	}
@@ -380,6 +419,7 @@ func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, er
 	}
 	return attachment, nil
 }
+
 func (s *ChatService) RejectAttachment(attachmentID string) error {
 	if s.engine.IsAttachmentMigrationActive() {
 		return fmt.Errorf("附件迁移正在进行")
