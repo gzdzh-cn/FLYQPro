@@ -98,6 +98,9 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := RecoverSendingMessages(ctx, identity.DeviceID); err != nil {
+		return err
+	}
 	platform, osVersion := platformInfo()
 	identity.Platform = platform
 	identity.OSVersion = osVersion
@@ -135,15 +138,11 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	e.stop, e.done, e.started = make(chan struct{}), make(chan struct{}), true
 	e.mu.Unlock()
-	for _, peer := range e.Peers() {
-		if peer.Relation == PeerRelation {
-			go e.retryOutbox(peer)
-		}
-	}
 	go e.acceptLoop()
 	go e.discoveryTCPLoop()
 	go e.discoveryLoop()
 	go e.scanLoop()
+	go e.livenessLoop()
 	go e.scanNetwork(true)
 	e.emit("chat:network-status", e.NetworkStatus())
 	return nil
@@ -155,18 +154,28 @@ func (e *Engine) Stop() {
 		e.mu.Unlock()
 		return
 	}
-	close(e.stop)
-	_ = e.listener.Close()
-	_ = e.discoveryTCP.Close()
-	_ = e.udp.Close()
+	stop, listener, discoveryTCP, udp := e.stop, e.listener, e.discoveryTCP, e.udp
+	e.started = false
+	e.serviceStopped = true
+	e.mu.Unlock()
+
+	// Notify peers while the discovery socket is still available. This is an
+	// immediate best-effort signal; the liveness probe remains the fallback for
+	// crashes, force quits, and network failures.
+	e.broadcastPresence("offline")
+	close(stop)
+	_ = listener.Close()
+	_ = discoveryTCP.Close()
+	_ = udp.Close()
+
+	e.mu.Lock()
 	for attachmentID, transfer := range e.incoming {
 		_ = transfer.file.Close()
 		delete(e.incoming, attachmentID)
 	}
 	done := e.done
-	e.started = false
-	e.serviceStopped = true
 	e.mu.Unlock()
+	e.emit("chat:peer-updated", e.Peers())
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -233,11 +242,17 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.DeviceID == e.identity.DeviceID {
 		return
 	}
-	if err := e.upsertWirePeer(hello); err != nil {
+	wasOnline := false
+	if existing, existingErr := e.peer(hello.DeviceID); existingErr == nil {
+		wasOnline = existing.Online
+	}
+	if err := e.upsertWirePeerWithOptions(hello); err != nil {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: err.Error()})
 		return
 	}
-	e.emit("chat:peer-updated", e.Peers())
+	if !hello.Probe || !wasOnline {
+		e.emit("chat:peer-updated", e.Peers())
+	}
 	peer, peerErr := e.peer(hello.DeviceID)
 	if peerErr != nil {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: peerErr.Error()})
@@ -575,11 +590,11 @@ func (e *Engine) discoveryLoop() {
 			}
 		case "announce":
 			message.IP = addr.IP.String()
-			if err := e.upsertWirePeer(message); err == nil {
-				e.emit("chat:peer-updated", e.Peers())
-			}
+			e.handleAnnounce(message)
 		case "withdraw":
 			e.forgetDiscoveredPeer(message.DeviceID)
+		case "offline":
+			e.handleOffline(message.DeviceID)
 		}
 	}
 }
@@ -687,14 +702,12 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 			if response.IP == "" {
 				response.IP = target.IP.String()
 			}
-			if err := e.upsertWirePeer(response); err != nil {
+			if err := e.handleAnnounce(response); err != nil {
 				errMu.Lock()
 				if firstErr == nil {
 					firstErr = err
 				}
 				errMu.Unlock()
-			} else {
-				e.emit("chat:peer-updated", e.Peers())
 			}
 		}()
 	}
@@ -726,6 +739,10 @@ func (e *Engine) helloMessage(kind string) wireMessage {
 }
 
 func (e *Engine) upsertWirePeer(message wireMessage) error {
+	return e.upsertWirePeerWithOptions(message)
+}
+
+func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 	if message.PublicKey != "" && !validDevicePublicKey(message.DeviceID, message.PublicKey) {
 		return fmt.Errorf("设备身份校验失败")
 	}
@@ -733,9 +750,7 @@ func (e *Engine) upsertWirePeer(message wireMessage) error {
 		return fmt.Errorf("设备身份为空")
 	}
 	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, Relation: DiscoveredState, LastSeen: nowString()}
-	wasFriend := false
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
-		wasFriend = existing.Relation == PeerRelation
 		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
 			return fmt.Errorf("DEVICE_KEY_CHANGED")
 		}
@@ -764,9 +779,25 @@ func (e *Engine) upsertWirePeer(message wireMessage) error {
 	peer.Online = true
 	e.peers[peer.DeviceID] = peer
 	e.mu.Unlock()
-	go e.retryOutbox(peer)
+	return nil
+}
+
+// handleAnnounce is the only discovery path that may initiate the optional
+// friend restoration handshake. TLS health probes use upsertWirePeer directly
+// and therefore remain side-effect free.
+func (e *Engine) handleAnnounce(message wireMessage) error {
+	wasFriend := false
+	if existing, err := e.peer(message.DeviceID); err == nil {
+		wasFriend = existing.Relation == PeerRelation
+	}
+	if err := e.upsertWirePeer(message); err != nil {
+		return err
+	}
+	e.emit("chat:peer-updated", e.Peers())
 	if wasFriend {
-		e.maybeSendFriendRestore(peer)
+		if peer, err := e.peer(message.DeviceID); err == nil {
+			e.maybeSendFriendRestore(peer)
+		}
 	}
 	return nil
 }
@@ -970,19 +1001,19 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: content}
 	peer, err := e.peer(deviceID)
 	if err != nil {
-		message.Status = "failed"
+		message.Status = "sent"
 		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
-		if payload, marshalErr := json.Marshal(wire); marshalErr == nil {
-			_ = SaveOutbox(ctx, message.MessageID, deviceID, "message", string(payload))
-		}
+		e.emit("chat:message", message)
+		return message, nil
+	}
+	if !peer.Online {
+		message.Status = "sent"
+		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
 		e.emit("chat:message", message)
 		return message, nil
 	}
 	if err := e.sendToPeer(peer, wire); err != nil {
-		message.Status = "failed"
-		if payload, marshalErr := json.Marshal(wire); marshalErr == nil {
-			_ = SaveOutbox(ctx, message.MessageID, deviceID, "message", string(payload))
-		}
+		message.Status = "sent"
 	} else {
 		message.Status = "sent"
 	}
@@ -1035,33 +1066,17 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return Message{}, fmt.Errorf("不是好友")
 	}
 	path = filepath.Clean(path)
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return Message{}, fmt.Errorf("文件不存在")
-	}
-	if info.Size() > 100*1024*1024 {
-		return Message{}, fmt.Errorf("文件不能超过 100 MB")
-	}
-	fileName := safeFileName(filepath.Base(path))
-	file, err := os.Open(path)
+	info, sum, err := inspectTransferFile(path)
 	if err != nil {
 		return Message{}, err
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return Message{}, err
-	}
-	sum := hex.EncodeToString(hash.Sum(nil))
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return Message{}, err
-	}
+	fileName := safeFileName(filepath.Base(path))
 	conversationID, err := EnsureConversation(ctx, deviceID)
 	if err != nil {
 		return Message{}, err
 	}
 	messageID, attachmentID := newID(), newID()
-	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: "sending", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: mime.TypeByExtension(filepath.Ext(fileName)), AttachmentStatus: "sending"}
+	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: "sending", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: mime.TypeByExtension(filepath.Ext(fileName)), AttachmentStatus: "sending", AttachmentPath: path}
 	if message.AttachmentMime == "" {
 		message.AttachmentMime = "application/octet-stream"
 	}
@@ -1072,54 +1087,138 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return Message{}, err
 	}
 	e.emit("chat:message", message)
-	fail := func(sendErr error) (Message, error) {
-		message.Status, message.AttachmentStatus = "failed", "failed"
-		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
-		_ = SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "failed"})
-		e.emit("chat:message-status", map[string]any{"messageId": message.MessageID, "status": message.Status})
-		return message, sendErr
+	if err := e.transferFile(ctx, deviceID, message, path, sum); err != nil {
+		return e.finishAttachmentSend(ctx, message, "failed"), err
 	}
+	return e.finishAttachmentSend(ctx, message, "sent"), nil
+}
+
+func (e *Engine) RetryAttachment(ctx context.Context, messageID string) (Message, error) {
+	if e.IsAttachmentMigrationActive() {
+		return Message{}, fmt.Errorf("附件迁移正在进行")
+	}
+	message, err := GetMessage(ctx, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	e.mu.RLock()
+	localDeviceID := e.identity.DeviceID
+	e.mu.RUnlock()
+	if message.SenderDeviceID != localDeviceID || message.Kind != "file" || message.AttachmentID == "" {
+		return Message{}, fmt.Errorf("该消息不支持重发")
+	}
+	if message.Status == "sent" {
+		return message, nil
+	}
+	if message.Status == "sending" {
+		return Message{}, fmt.Errorf("文件正在发送")
+	}
+	if !e.isFriend(strings.TrimPrefix(message.ConversationID, "conv-")) {
+		return Message{}, fmt.Errorf("不是好友")
+	}
+	info, sum, err := inspectTransferFile(message.AttachmentPath)
+	if err != nil {
+		return Message{}, err
+	}
+	attachment, attachmentErr := GetAttachment(ctx, message.AttachmentID)
+	if attachmentErr != nil {
+		return Message{}, attachmentErr
+	}
+	// The original checksum and size are authoritative. A changed source file
+	// must be selected again instead of sending different bytes under the same ID.
+	if info.Size() != message.AttachmentSize || (attachment.SHA256 != "" && attachment.SHA256 != sum) {
+		return Message{}, fmt.Errorf("原文件内容已变化，请重新选择文件")
+	}
+	message.Status, message.AttachmentStatus = "sending", "sending"
+	if err := UpdateMessageStatus(ctx, message.MessageID, message.Status); err != nil {
+		return Message{}, err
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum, LocalPath: message.AttachmentPath, Status: "sending"}); err != nil {
+		return Message{}, err
+	}
+	e.emit("chat:message", message)
+	if err := e.transferFile(ctx, strings.TrimPrefix(message.ConversationID, "conv-"), message, message.AttachmentPath, sum); err != nil {
+		return e.finishAttachmentSend(ctx, message, "failed"), err
+	}
+	return e.finishAttachmentSend(ctx, message, "sent"), nil
+}
+
+func inspectTransferFile(path string) (os.FileInfo, string, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, "", fmt.Errorf("文件路径为空")
+	}
+	info, err := os.Stat(filepath.Clean(path))
+	if err != nil || info.IsDir() {
+		return nil, "", fmt.Errorf("文件不存在")
+	}
+	if info.Size() > 100*1024*1024 {
+		return nil, "", fmt.Errorf("文件不能超过 100 MB")
+	}
+	file, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return nil, "", err
+	}
+	return info, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (e *Engine) transferFile(ctx context.Context, deviceID string, message Message, path, sum string) error {
 	peer, err := e.peer(deviceID)
 	if err != nil {
-		return fail(err)
+		return err
 	}
+	if !peer.Online {
+		return fmt.Errorf("对方当前不在线")
+	}
+	file, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 	clientTLS, err := e.clientTLSConfig()
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	defer conn.Close()
 	if err := verifyPeerCertificate(conn, peer); err != nil {
-		return fail(err)
+		return err
 	}
 	decoder := json.NewDecoder(conn)
 	if err := writeWire(conn, e.helloMessage("hello")); err != nil {
-		return fail(err)
+		return err
 	}
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil {
-		return fail(fmt.Errorf("对方握手失败"))
+		return fmt.Errorf("对方握手失败")
 	}
 	if response.Type == "error" {
-		return fail(fmt.Errorf("对方握手失败: %s", response.Status))
+		return fmt.Errorf("对方握手失败: %s", response.Status)
 	}
 	if response.Type != "hello_ack" {
-		return fail(fmt.Errorf("对方握手失败"))
+		return fmt.Errorf("对方握手失败")
 	}
 	e.touchPeer(peer.DeviceID)
-	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: messageID, AttachmentID: attachmentID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum}); err != nil {
-		return fail(err)
+	if err := e.writeFriendRestoreIfNeeded(conn, peer); err != nil {
+		return err
+	}
+	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum}); err != nil {
+		return err
 	}
 	buffer := make([]byte, 32*1024)
 	index := 0
 	for {
 		n, readErr := file.Read(buffer)
 		if n > 0 {
-			if err := writeWire(conn, wireMessage{Type: "file_chunk", AttachmentID: attachmentID, ChunkIndex: index, Payload: base64.StdEncoding.EncodeToString(buffer[:n])}); err != nil {
-				return fail(err)
+			if err := writeWire(conn, wireMessage{Type: "file_chunk", AttachmentID: message.AttachmentID, ChunkIndex: index, Payload: base64.StdEncoding.EncodeToString(buffer[:n])}); err != nil {
+				return err
 			}
 			index++
 		}
@@ -1127,17 +1226,29 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 			break
 		}
 		if readErr != nil {
-			return fail(readErr)
+			return readErr
 		}
 	}
-	if err := writeWire(conn, wireMessage{Type: "file_complete", AttachmentID: attachmentID}); err != nil {
-		return fail(err)
-	}
-	message.Status, message.AttachmentStatus = "sent", "sent"
-	_ = exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, message.Status, message.MessageID)
-	_ = SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "sent"})
+	return writeWire(conn, wireMessage{Type: "file_complete", AttachmentID: message.AttachmentID})
+}
+
+func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string) Message {
+	message.Status, message.AttachmentStatus = status, status
+	_ = UpdateMessageStatus(ctx, message.MessageID, status)
+	_ = SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: messageAttachmentSHA(ctx, message), LocalPath: message.AttachmentPath, Status: status})
 	e.emit("chat:message", message)
-	return message, nil
+	return message
+}
+
+func messageAttachmentSHA(ctx context.Context, message Message) string {
+	if message.AttachmentID == "" {
+		return ""
+	}
+	attachment, err := GetAttachment(ctx, message.AttachmentID)
+	if err != nil {
+		return ""
+	}
+	return attachment.SHA256
 }
 
 func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
@@ -1171,6 +1282,14 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 		return fmt.Errorf("对方握手失败")
 	}
 	e.touchPeer(peer.DeviceID)
+	// A known friend may have reinstalled POPChat and lost its local database.
+	// Restore the relationship over this already authenticated connection before
+	// sending the message. Older clients ignore this optional control message.
+	if message.Type != "friend_restore" {
+		if err := e.writeFriendRestoreIfNeeded(conn, peer); err != nil {
+			return err
+		}
+	}
 	if peer.Relation == PeerRelation && peer.AvatarHash != "" && !cachedAvatarMatches(peer) {
 		_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
 		if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err == nil {
@@ -1186,18 +1305,39 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	}
 	if message.Type == "message" {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		var ack wireMessage
-		if err := decoder.Decode(&ack); err != nil {
-			return err
-		}
-		if ack.Type == "error" {
-			return fmt.Errorf("%s", ack.Status)
-		}
-		if ack.Type != "ack" || ack.MessageID != message.MessageID || ack.Status != "sent" {
-			return fmt.Errorf("消息确认无效")
+		for {
+			var ack wireMessage
+			if err := decoder.Decode(&ack); err != nil {
+				return err
+			}
+			if ack.Type == "friend_restore_ack" {
+				continue
+			}
+			if ack.Type == "error" {
+				return fmt.Errorf("%s", ack.Status)
+			}
+			if ack.Type != "ack" || ack.MessageID != message.MessageID || ack.Status != "sent" {
+				return fmt.Errorf("消息确认无效")
+			}
+			break
 		}
 	}
 	return nil
+}
+
+// writeFriendRestoreIfNeeded keeps the relationship recoverable after the
+// remote app was reinstalled. Signing may be unavailable on a device whose
+// secure key has been reset; in that case the normal message path still gets
+// a chance to report the real transport result.
+func (e *Engine) writeFriendRestoreIfNeeded(conn net.Conn, peer Peer) error {
+	if peer.Relation != PeerRelation {
+		return nil
+	}
+	restore, err := e.friendRestoreMessage(peer.DeviceID)
+	if err != nil {
+		return nil
+	}
+	return writeWire(conn, restore)
 }
 
 func (e *Engine) touchPeer(deviceID string) {
@@ -1210,6 +1350,109 @@ func (e *Engine) touchPeer(deviceID string) {
 		e.peers[deviceID] = peer
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) setPeerOnline(deviceID string, online bool) bool {
+	e.mu.Lock()
+	peer, ok := e.peers[deviceID]
+	if !ok || peer.Online == online {
+		e.mu.Unlock()
+		return false
+	}
+	peer.Online = online
+	e.peers[deviceID] = peer
+	e.mu.Unlock()
+	return true
+}
+
+func (e *Engine) handleOffline(deviceID string) {
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return
+	}
+	if peer.Relation != PeerRelation {
+		e.forgetDiscoveredPeer(deviceID)
+		return
+	}
+	if e.setPeerOnline(deviceID, false) {
+		e.emit("chat:peer-updated", e.Peers())
+	}
+}
+
+func (e *Engine) probePeer(peer Peer) error {
+	if peer.IP == "" || peer.Port == 0 {
+		return fmt.Errorf("好友地址不可用")
+	}
+	clientTLS, err := e.clientTLSConfig()
+	if err != nil {
+		return err
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if err := verifyPeerCertificate(conn, peer); err != nil {
+		return err
+	}
+	hello := e.helloMessage("hello")
+	hello.Probe = true
+	if err := writeWire(conn, hello); err != nil {
+		return err
+	}
+	var response wireMessage
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return err
+	}
+	if response.Type == "error" {
+		return fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "hello_ack" {
+		return fmt.Errorf("对方握手失败")
+	}
+	e.touchPeer(peer.DeviceID)
+	return nil
+}
+
+func (e *Engine) livenessLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			peers := e.Peers()
+			changed := false
+			var changedMu sync.Mutex
+			var wait sync.WaitGroup
+			for _, peer := range peers {
+				peer := peer
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					if err := e.probePeer(peer); err != nil {
+						if e.setPeerOnline(peer.DeviceID, false) {
+							changedMu.Lock()
+							changed = true
+							changedMu.Unlock()
+						}
+						return
+					}
+					if !peer.Online {
+						changedMu.Lock()
+						changed = true
+						changedMu.Unlock()
+					}
+				}()
+			}
+			wait.Wait()
+			if changed {
+				e.emit("chat:peer-updated", e.Peers())
+			}
+		case <-e.stop:
+			return
+		}
+	}
 }
 
 func (e *Engine) clientTLSConfig() (*tls.Config, error) {
@@ -1229,27 +1472,6 @@ func cachedAvatarMatches(peer Peer) bool {
 	}
 	data, err := os.ReadFile(peer.AvatarPath)
 	return err == nil && sha256Hex(data) == peer.AvatarHash
-}
-
-func (e *Engine) retryOutbox(peer Peer) {
-	items, err := ListOutbox(context.Background(), peer.DeviceID)
-	if err != nil {
-		return
-	}
-	for _, item := range items {
-		var message wireMessage
-		if json.Unmarshal([]byte(item.Payload), &message) != nil {
-			_ = DeleteOutbox(context.Background(), item.ItemID)
-			continue
-		}
-		if err := e.sendToPeer(peer, message); err != nil {
-			_ = MarkOutboxRetry(context.Background(), item.ItemID, item.Attempts)
-			continue
-		}
-		_ = DeleteOutbox(context.Background(), item.ItemID)
-		_ = exec(context.Background(), `UPDATE messages SET status='sent' WHERE message_id=?`, message.MessageID)
-		e.emit("chat:message-status", map[string]any{"messageId": message.MessageID, "status": "sent"})
-	}
 }
 
 func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
@@ -1338,7 +1560,11 @@ func (e *Engine) UpdateProfile(profile Profile) {
 }
 
 func (e *Engine) broadcastWithdrawal() {
-	message := e.helloMessage("withdraw")
+	e.broadcastPresence("withdraw")
+}
+
+func (e *Engine) broadcastPresence(kind string) {
+	message := e.helloMessage(kind)
 	targets := broadcastAddresses()
 	targets = append(targets, localSubnetTargets()...)
 	for index := range targets {
@@ -1365,10 +1591,18 @@ func (e *Engine) Peers() []Peer {
 	peers, _ := ListPeers(context.Background(), "")
 	e.mu.RLock()
 	serviceStopped := e.serviceStopped
+	onlineStates := make(map[string]bool, len(e.peers))
+	for deviceID, peer := range e.peers {
+		onlineStates[deviceID] = peer.Online
+	}
 	e.mu.RUnlock()
 	for index := range peers {
 		if serviceStopped {
 			peers[index].Online = false
+		} else if online, ok := onlineStates[peers[index].DeviceID]; ok {
+			// Immediate online/offline transitions live in memory; lastSeen
+			// remains persisted for restart recovery and display.
+			peers[index].Online = online
 		}
 		if peers[index].AvatarPath == "" {
 			continue

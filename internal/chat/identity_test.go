@@ -210,3 +210,51 @@ func TestConversationUnreadAndOutboxPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRecoverSendingMessagesMarksOnlyLocalTransfersFailed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := EnsureDefaults(ctx, filepath.Join(root, "attachments")); err != nil {
+		t.Fatal(err)
+	}
+	localConversation, err := EnsureConversation(ctx, "peer-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteConversation, err := EnsureConversation(ctx, "peer-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveMessage(ctx, Message{MessageID: "local-sending", ConversationID: localConversation, SenderDeviceID: "local-device", Kind: "file", Content: "a.txt", Status: "sending", CreatedAt: nowString(), AttachmentID: "attachment-local", AttachmentName: "a.txt", AttachmentSize: 3, AttachmentMime: "text/plain", AttachmentStatus: "sending", AttachmentPath: filepath.Join(root, "a.txt")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveMessage(ctx, Message{MessageID: "local-text-sending", ConversationID: localConversation, SenderDeviceID: "local-device", Kind: "text", Content: "hello", Status: "sending", CreatedAt: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: "attachment-local", MessageID: "local-sending", FileName: "a.txt", MimeType: "text/plain", FileSize: 3, SHA256: "hash", LocalPath: filepath.Join(root, "a.txt"), Status: "sending"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveMessage(ctx, Message{MessageID: "remote-sending", ConversationID: remoteConversation, SenderDeviceID: "peer-remote", Kind: "file", Content: "b.txt", Status: "sending", CreatedAt: nowString(), AttachmentID: "attachment-remote", AttachmentName: "b.txt", AttachmentSize: 3, AttachmentMime: "text/plain", AttachmentStatus: "sending"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverSendingMessages(ctx, "local-device"); err != nil {
+		t.Fatal(err)
+	}
+	local, err := GetMessage(ctx, "local-sending")
+	if err != nil || local.Status != "failed" || local.AttachmentStatus != "failed" {
+		t.Fatalf("本机发送中的消息未恢复为失败: %v, %+v", err, local)
+	}
+	localText, err := GetMessage(ctx, "local-text-sending")
+	if err != nil || localText.Status != "sent" {
+		t.Fatalf("本机文字消息未恢复为已发送: %v, %+v", err, localText)
+	}
+	remote, err := GetMessage(ctx, "remote-sending")
+	if err != nil || remote.Status != "sending" {
+		t.Fatalf("对方消息被错误修改: %v, %+v", err, remote)
+	}
+}

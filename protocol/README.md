@@ -43,6 +43,8 @@ Example announcement:
 
 The first frame is `hello`; the peer answers with `hello_ack`. Friend requests and messages are rejected until the local database marks the device as a friend. A peer that already has the authenticated device marked as a friend may then send an optional `friend_restore` frame so a fresh installation with the same device identity can restore the relationship without another request.
 
+When a POPChat service stops normally, it may broadcast an optional `offline` discovery frame. Receivers should mark the matching peer offline immediately; an unknown or unsupported frame must not affect normal communication. Unexpected exits and network failures are detected by periodic authenticated TLS `hello`/`hello_ack` health probes.
+
 After a friend handshake, a client may send `avatar_request`. The friend may answer with an optional `avatar_response` containing `avatarHash`, `avatarVersion`, `avatarMime`, and base64 `avatarData`. Avatar bytes are never sent through discovery announcements and are accepted only after the certificate-verified TLS handshake and friendship check.
 
 The following fields are optional and may be ignored by older clients:
@@ -53,6 +55,8 @@ The following fields are optional and may be ignored by older clients:
 - `syncSince`, `syncUntil`, `syncToken`, `readAt`: optional message synchronization and read-state hints.
 - `acceptedAt`: optional first-approval timestamp carried by `friend_request_response`; older clients may ignore it and use their local receipt time.
 - `targetDeviceId`, `sourceDeviceId`, `sourcePublicKey`, `restoreVersion`, `restoreSignature`: optional signed friendship restoration fields. The signature covers `POPChat/friend-restore/v1`, the source device ID, target device ID, and source public key. The receiver must validate the TLS peer, public-key-derived source ID, target ID, and signature before marking the peer as a friend. Older clients may ignore this frame.
+- `offline`: optional discovery presence event indicating that the sender's service stopped normally. It does not change the friendship relation and may be ignored by older clients.
+- `probe`: optional `hello` flag used for a liveness check. A probe completes authentication without triggering outbox retries or business-message side effects.
 - `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`, and `payload`: encrypted attachment transfer metadata and chunks.
 
 Message status values exposed by the application are `sending`, `sent`, `read`, and `failed`. A receiver must acknowledge a duplicate `messageId`, but must not persist or display it again.

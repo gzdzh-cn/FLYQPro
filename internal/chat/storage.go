@@ -483,6 +483,30 @@ func ListMessages(ctx context.Context, conversationID string) ([]Message, error)
 	return messages, nil
 }
 
+func GetMessage(ctx context.Context, messageID string) (Message, error) {
+	var rows []messageRow
+	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at FROM messages WHERE message_id=? LIMIT 1`, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return Message{}, err
+	}
+	if len(rows) == 0 {
+		return Message{}, fmt.Errorf("message_not_found")
+	}
+	row := rows[0]
+	message := Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt}
+	if row.Kind == "file" {
+		var attachments []attachmentRow
+		if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
+			attachment := attachments[0]
+			message.AttachmentID, message.AttachmentName, message.AttachmentSize, message.AttachmentMime, message.AttachmentStatus, message.AttachmentPath = attachment.AttachmentID, attachment.FileName, attachment.FileSize, attachment.MimeType, attachment.Status, attachment.LocalPath
+		}
+	}
+	return message, nil
+}
+
 func SaveMessage(ctx context.Context, message Message) error {
 	if err := exec(ctx, `INSERT INTO messages(message_id, conversation_id, sender_device_id, kind, content, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO NOTHING`, message.MessageID, message.ConversationID, message.SenderDeviceID, message.Kind, message.Content, message.Status, message.CreatedAt); err != nil {
 		return err
@@ -500,6 +524,16 @@ func ClearConversationUnread(ctx context.Context, conversationID string) error {
 
 func UpdateMessageStatus(ctx context.Context, messageID, status string) error {
 	return exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, status, messageID)
+}
+
+func RecoverSendingMessages(ctx context.Context, senderDeviceID string) error {
+	// Text is already durably stored and has no automatic retry path, so keep
+	// its user-facing state as sent. Attachments remain failed and can be
+	// retried manually from the conversation.
+	if err := exec(ctx, `UPDATE messages SET status=CASE WHEN kind='file' THEN 'failed' ELSE 'sent' END WHERE sender_device_id=? AND status='sending'`, senderDeviceID); err != nil {
+		return err
+	}
+	return exec(ctx, `UPDATE attachments SET status='failed' WHERE status='sending' AND message_id IN (SELECT message_id FROM messages WHERE sender_device_id=?)`, senderDeviceID)
 }
 
 func MessageExists(ctx context.Context, messageID string) (bool, error) {

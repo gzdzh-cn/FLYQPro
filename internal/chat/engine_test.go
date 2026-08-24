@@ -74,6 +74,35 @@ func TestUpdatePeerRelationRefreshesCachedPeer(t *testing.T) {
 	}
 }
 
+func TestHandleOfflineKeepsFriendAndMarksItOffline(t *testing.T) {
+	engine := NewEngine()
+	engine.peers["friend-1"] = Peer{DeviceID: "friend-1", Relation: PeerRelation, Online: true}
+
+	engine.handleOffline("friend-1")
+
+	peer, ok := engine.peers["friend-1"]
+	if !ok {
+		t.Fatal("friend must remain in the peer cache")
+	}
+	if peer.Relation != PeerRelation {
+		t.Fatalf("relation = %q, want %q", peer.Relation, PeerRelation)
+	}
+	if peer.Online {
+		t.Fatal("friend must be marked offline")
+	}
+}
+
+func TestHandleOfflineRemovesDiscoveredPeer(t *testing.T) {
+	engine := NewEngine()
+	engine.peers["discovered-1"] = Peer{DeviceID: "discovered-1", Relation: DiscoveredState, Online: true}
+
+	engine.handleOffline("discovered-1")
+
+	if _, ok := engine.peers["discovered-1"]; ok {
+		t.Fatal("non-friend must be removed after an offline event")
+	}
+}
+
 func containsIP(values []net.IP, want string) bool {
 	for _, value := range values {
 		if value.String() == want {

@@ -194,6 +194,7 @@ type wireMessage struct {
 	SyncUntil        string   `json:"syncUntil,omitempty"`
 	SyncToken        string   `json:"syncToken,omitempty"`
 	ReadAt           string   `json:"readAt,omitempty"`
+	Probe            bool     `json:"probe,omitempty"`
 	AcceptedAt       string   `json:"acceptedAt,omitempty"`
 	TargetDeviceID   string   `json:"targetDeviceId,omitempty"`
 	SourceDeviceID   string   `json:"sourceDeviceId,omitempty"`

@@ -119,6 +119,12 @@ export function ResetAvatar(): $CancellablePromise<chat$0.Profile> {
     });
 }
 
+export function RetryAttachment(messageID: string): $CancellablePromise<chat$0.Message> {
+    return $Call.ByID(3087156268, messageID).then(($result: any) => {
+        return $$createType9($result);
+    });
+}
+
 export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticResult> {
     return $Call.ByID(3205563623).then(($result: any) => {
         return $$createType13($result);

@@ -286,6 +286,10 @@ func (s *ChatService) SendFile(deviceID, path string) (chat.Message, error) {
 	return s.engine.SendFile(gctx.New(), deviceID, path)
 }
 
+func (s *ChatService) RetryAttachment(messageID string) (chat.Message, error) {
+	return s.engine.RetryAttachment(gctx.New(), messageID)
+}
+
 func (s *ChatService) SendImage(deviceID, dataURL string) (chat.Message, error) {
 	if !strings.HasPrefix(dataURL, "data:image/") {
 		return chat.Message{}, fmt.Errorf("图片数据无效")
