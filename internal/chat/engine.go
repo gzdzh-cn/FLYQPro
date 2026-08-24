@@ -1025,12 +1025,6 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 		e.emit("chat:message", message)
 		return message, nil
 	}
-	if !peer.Online {
-		message.Status = "failed"
-		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
-		e.emit("chat:message", message)
-		return message, nil
-	}
 	if err := e.sendToPeer(peer, wire); err != nil {
 		message.Status = "failed"
 	} else {
@@ -1071,9 +1065,6 @@ func (e *Engine) RetryMessage(ctx context.Context, messageID string) (Message, e
 	peer, err := e.peer(deviceID)
 	if err != nil {
 		return e.finishTextRetry(ctx, message, "failed"), err
-	}
-	if !peer.Online {
-		return e.finishTextRetry(ctx, message, "failed"), fmt.Errorf("对方当前不在线")
 	}
 	if err := e.sendToPeer(peer, wire); err != nil {
 		return e.finishTextRetry(ctx, message, "failed"), err
@@ -1237,9 +1228,6 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	if err != nil {
 		return err
 	}
-	if !peer.Online {
-		return fmt.Errorf("对方当前不在线")
-	}
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return err
@@ -1272,6 +1260,9 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 		return fmt.Errorf("对方握手失败")
 	}
 	e.touchPeer(peer.DeviceID)
+	if !peer.Online {
+		e.emit("chat:peer-updated", e.Peers())
+	}
 	if err := e.writeFriendRestoreIfNeeded(conn, peer); err != nil {
 		return err
 	}
@@ -1348,6 +1339,9 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 		return fmt.Errorf("对方握手失败")
 	}
 	e.touchPeer(peer.DeviceID)
+	if !peer.Online {
+		e.emit("chat:peer-updated", e.Peers())
+	}
 	// A known friend may have reinstalled POPChat and lost its local database.
 	// Restore the relationship over this already authenticated connection before
 	// sending the message. Older clients ignore this optional control message.
@@ -1505,7 +1499,13 @@ func (e *Engine) probeKnownPeers() {
 		go func() {
 			defer wait.Done()
 			online := e.probePeer(peer) == nil
-			if e.setPeerOnline(peer.DeviceID, online) {
+			// probePeer updates lastSeen (and may optimistically mark the in-memory
+			// peer online) before returning. Compare with the snapshot used for the
+			// probe so an offline peer loaded from SQLite still produces the online
+			// event that the frontend needs after a successful probe.
+			stateChanged := peer.Online != online
+			e.setPeerOnline(peer.DeviceID, online)
+			if stateChanged {
 				changedMu.Lock()
 				changed = true
 				changedMu.Unlock()
