@@ -22,7 +22,7 @@ func (e *Engine) friendRestoreMessage(targetDeviceID string) (wireMessage, error
 	return e.friendRestoreMessageForDialect(targetDeviceID, protocolDialects[0])
 }
 
-func (e *Engine) friendRestoreMessageForDialect(targetDeviceID string, dialect ProtocolDialect) (wireMessage, error) {
+func (e *Engine) friendRestoreMessageForDialect(targetDeviceID string, _ ProtocolDialect) (wireMessage, error) {
 	e.mu.RLock()
 	identity := e.identity
 	e.mu.RUnlock()
@@ -30,24 +30,12 @@ func (e *Engine) friendRestoreMessageForDialect(targetDeviceID string, dialect P
 	if err != nil {
 		return wireMessage{}, err
 	}
-	legacyDomain := "FlyQPro"
-	if dialect.Name == "POPChat" {
-		legacyDomain = "POPChat"
-	}
-	digest := sha256.Sum256(friendRestorePayload(legacyDomain, identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
+	digest := sha256.Sum256(friendRestorePayload(ProtocolName, identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
 	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
 	if err != nil {
 		return wireMessage{}, err
 	}
 	message := wireMessage{Type: "friend_restore", SourceDeviceID: identity.DeviceID, TargetDeviceID: targetDeviceID, SourcePublicKey: identity.PublicKeyPEM, RestoreVersion: friendRestoreVersion, RestoreSignature: base64.StdEncoding.EncodeToString(signature)}
-	if dialect.Name == ProtocolName {
-		v2Digest := sha256.Sum256(friendRestorePayload(ProtocolName, identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
-		v2Signature, signErr := ecdsa.SignASN1(rand.Reader, privateKey, v2Digest[:])
-		if signErr != nil {
-			return wireMessage{}, signErr
-		}
-		message.RestoreSignatureV2 = base64.StdEncoding.EncodeToString(v2Signature)
-	}
 	return message, nil
 }
 
@@ -92,13 +80,7 @@ func verifyFriendRestore(message wireMessage, hello wireMessage, localDeviceID s
 		}
 		return false
 	}
-	if message.RestoreSignatureV2 != "" && !verify(message.RestoreSignatureV2, ProtocolName) {
-		return errors.New("好友恢复新版签名校验失败")
-	}
-	if message.RestoreSignature != "" && !verify(message.RestoreSignature, hello.Protocol, "FlyQPro", "POPChat") {
-		return errors.New("好友恢复签名校验失败")
-	}
-	if message.RestoreSignature == "" && message.RestoreSignatureV2 == "" {
+	if message.RestoreSignature == "" || hello.Protocol != ProtocolName || !verify(message.RestoreSignature, ProtocolName) {
 		return errors.New("好友恢复签名校验失败")
 	}
 	return nil

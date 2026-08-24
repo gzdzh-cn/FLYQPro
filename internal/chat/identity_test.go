@@ -116,7 +116,7 @@ func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close(context.Background())
-	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, ProtocolName: "POPChat", ProtocolMajor: 1, DiscoveryMagic: "POPCHAT_DISCOVERY_V1", Capabilities: []string{"text", "image", "file"}, LastSeen: nowString()}); err != nil {
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, ProtocolName: ProtocolName, ProtocolMajor: ProtocolMajor, DiscoveryMagic: DiscoveryMagic, Capabilities: []string{"text", "image", "file"}, LastSeen: nowString()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetPeerRelation(context.Background(), "peer-1", PeerRelation); err != nil {
@@ -135,7 +135,7 @@ func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
 	if peers[0].Relation != PeerRelation || peers[0].Remark != "我的备注" {
 		t.Fatalf("好友关系被发现更新覆盖: %+v", peers[0])
 	}
-	if peers[0].ProtocolName != "POPChat" || peers[0].ProtocolMajor != 1 || peers[0].DiscoveryMagic != "POPCHAT_DISCOVERY_V1" || len(peers[0].Capabilities) != 3 {
+	if peers[0].ProtocolName != ProtocolName || peers[0].ProtocolMajor != ProtocolMajor || peers[0].DiscoveryMagic != DiscoveryMagic || len(peers[0].Capabilities) != 3 {
 		t.Fatalf("好友协议方言未持久化: %+v", peers[0])
 	}
 }

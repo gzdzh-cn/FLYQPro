@@ -3,25 +3,13 @@
 FlyQPro uses a language-neutral JSON protocol. The application brand remains
 FlyQPro; `dzhgo` is the canonical communication protocol name.
 
-## Protocol dialects
+## Protocol identity
 
-The protocol major version remains `2`. A receiver accepts these dialects:
+`dzhgo` is the only supported protocol dialect. The protocol major version is `2`, and discovery uses `DZHGO_DISCOVERY_V1`.
 
-| Name | Discovery magic | Major | Role |
-| --- | --- | ---: | --- |
-| `dzhgo` | `DZHGO_DISCOVERY_V1` | 2 | canonical |
-| `FlyQPro` | `FLYQPRO_DISCOVERY_V1` | 2 | legacy |
-| `POPChat` | `POPCHAT_DISCOVERY_V1` | 1 | legacy |
+Every discovery request, announcement, TLS hello, and response must use the exact tuple `dzhgo` / `DZHGO_DISCOVERY_V1` / `2`. An unknown protocol name, magic value, major version, or unmet `minMajor` is rejected. There is no protocol-name fallback.
 
-Discovery requests are sent with each supported dialect so existing paired
-devices can still find the application. A response uses the dialect from the
-request. The receiver validates the complete tuple of magic, protocol name,
-major version and `minMajor`; an unknown or mismatched tuple is rejected.
-
-Peers persist the negotiated `protocolName`, `protocolMajor`,
-`discoveryMagic`, and `capabilities`. A known friend reuses that dialect on
-the next connection. A peer without saved dialect information is tried in the
-order `dzhgo`, `FlyQPro`, `POPChat`.
+Peers persist the negotiated `protocolName`, `protocolMajor`, `discoveryMagic`, and `capabilities`; valid peers are always recorded as the canonical dzhgo/v2 dialect.
 
 ## Discovery
 
@@ -64,13 +52,9 @@ Example announcement:
 
 The first frame is `hello`; the peer answers with `hello_ack` using the same
 negotiated dialect. Friend requests and messages are rejected until the local
-database marks the device as a friend. Unknown optional frames and fields must
-be ignored, so old clients remain usable for text, images and ordinary files.
+database marks the device as a friend. Unknown optional frames and fields may be ignored by other dzhgo/v2 clients, while text, image, and ordinary file behavior remains stable.
 
-The v2 capabilities `avatar-sync-v1`, `file-progress-v1`, `offline-v1`, and
-`friend-restore-v2` are only used when advertised by both sides. POPChat/v1
-connections use the common text, image and file behavior and do not require
-these capabilities.
+The capabilities `avatar-sync-v1`, `file-progress-v1`, `offline-v1`, and `friend-restore-v2` are optional dzhgo/v2 features and are used when advertised by both sides.
 
 When a FlyQPro service stops normally, it may broadcast an optional `offline`
 discovery frame. Receivers keep friends in the list and mark them offline;
@@ -79,20 +63,7 @@ network failures are detected by authenticated TLS health probes.
 
 ## Friend restore signatures
 
-A friend that still has the original authenticated device key may send an
-optional `friend_restore` frame after TLS authentication. The legacy
-`restoreSignature` field remains available for old devices. Its signature
-domain is selected from the negotiated legacy dialect:
-
-```text
-FlyQPro/friend-restore/v1
-sourceDeviceId
-targetDeviceId
-sourcePublicKey
-```
-
-For POPChat peers the legacy domain is `POPChat/friend-restore/v1`. New dzhgo
-peers additionally send `restoreSignatureV2`, signed over:
+A friend that still has the original authenticated device key may send an optional `friend_restore` frame after TLS authentication. The signature domain is fixed to:
 
 ```text
 dzhgo/friend-restore/v1
@@ -101,20 +72,17 @@ targetDeviceId
 sourcePublicKey
 ```
 
-The receiver validates the TLS peer, target ID, public-key-derived source ID,
-and every signature field that is present. No friend request, notification,
-message, or unread count is created by restoration. Older clients ignore the
-new optional signature field.
+The receiver validates the TLS peer, target ID, public-key-derived source ID, and the dzhgo signature. No friend request, notification, message, or unread count is created by restoration.
 
 ## Optional fields and message behavior
 
-The following fields are optional and may be ignored by older clients:
+The following fields are optional and may be ignored by other dzhgo/v2 clients:
 
 - `avatarHash`, `avatarVersion`, `avatarMime`, `avatarData`.
 - `capabilities`, `messageIds`, `syncSince`, `syncUntil`, `syncToken`, `readAt`.
 - `acceptedAt` on `friend_request_response`.
 - `targetDeviceId`, `sourceDeviceId`, `sourcePublicKey`, `restoreVersion`,
-  `restoreSignature`, and `restoreSignatureV2`.
+  `restoreSignature`.
 - `offline` discovery presence events and `probe` hello flags.
 - `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`,
   and `payload` for encrypted attachment transfer.
@@ -126,9 +94,7 @@ again.
 
 ## Versioning and errors
 
-Future protocol renames add a dialect alias and magic without replacing the
-existing values. Breaking wire changes increment `major` and return
-`VERSION_TOO_OLD` or `PROTOCOL_UNSUPPORTED`.
+The dzhgo protocol name and discovery magic are fixed. Breaking wire changes increment `major` and return `VERSION_TOO_OLD` or `PROTOCOL_UNSUPPORTED`.
 
 Error codes include `PROTOCOL_UNSUPPORTED`, `VERSION_TOO_OLD`,
 `CERTIFICATE_CHANGED`, `DEVICE_KEY_CHANGED`, `DEVICE_NOT_TRUSTED`, and

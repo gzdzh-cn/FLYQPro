@@ -6,19 +6,17 @@ import (
 	"testing"
 )
 
-func TestProtocolDialectsAcceptSupportedTuples(t *testing.T) {
-	for _, dialect := range protocolDialects {
-		message := wireMessage{Protocol: dialect.Name, Major: dialect.Major, MinMajor: dialect.Major, Magic: dialect.Magic}
-		got, ok := protocolDialectForMessage(message)
-		if !ok || got != dialect {
-			t.Fatalf("dialect %+v was not accepted: %+v, %v", dialect, got, ok)
-		}
+func TestProtocolDialectAcceptsCanonicalTuple(t *testing.T) {
+	message := wireMessage{Protocol: ProtocolName, Major: ProtocolMajor, MinMajor: ProtocolMajor, Magic: DiscoveryMagic}
+	got, ok := protocolDialectForMessage(message)
+	if !ok || got.Name != ProtocolName || got.Major != ProtocolMajor || got.Magic != DiscoveryMagic {
+		t.Fatalf("canonical dialect was not accepted: %+v, %v", got, ok)
 	}
 	for _, message := range []wireMessage{
 		{Protocol: "unknown", Major: 2, Magic: DiscoveryMagic},
-		{Protocol: "dzhgo", Major: 2, Magic: "WRONG_MAGIC"},
-		{Protocol: "POPChat", Major: 2, Magic: "POPCHAT_DISCOVERY_V1"},
-		{Protocol: "POPChat", Major: 1, MinMajor: 2, Magic: "POPCHAT_DISCOVERY_V1"},
+		{Protocol: "FlyQPro", Major: 2, Magic: "FLYQPRO_DISCOVERY_V1"},
+		{Protocol: "POPChat", Major: 1, Magic: "POPCHAT_DISCOVERY_V1"},
+		{Protocol: ProtocolName, Major: ProtocolMajor, Magic: "WRONG_MAGIC"},
 	} {
 		if _, ok := protocolDialectForMessage(message); ok {
 			t.Fatalf("unsupported dialect tuple was accepted: %+v", message)
@@ -26,28 +24,29 @@ func TestProtocolDialectsAcceptSupportedTuples(t *testing.T) {
 	}
 }
 
-func TestProtocolDialectsForPeerReuseStoredDialect(t *testing.T) {
-	got := protocolDialectsForPeer(Peer{ProtocolName: "POPChat", ProtocolMajor: 1, DiscoveryMagic: "POPCHAT_DISCOVERY_V1"})
-	if len(got) != 1 || got[0].Name != "POPChat" {
-		t.Fatalf("stored peer dialect was not reused: %+v", got)
-	}
-	if got := protocolDialectsForPeer(Peer{}); len(got) != len(protocolDialects) {
-		t.Fatalf("unknown peer should use all fallback dialects: %+v", got)
+func TestProtocolPeerWithUnknownDialectUsesCanonical(t *testing.T) {
+	for _, peer := range []Peer{
+		{ProtocolName: "FlyQPro", ProtocolMajor: 2, DiscoveryMagic: "FLYQPRO_DISCOVERY_V1"},
+		{ProtocolName: "POPChat", ProtocolMajor: 1, DiscoveryMagic: "POPCHAT_DISCOVERY_V1"},
+		{},
+	} {
+		got := protocolDialectsForPeer(peer)
+		if len(got) != 1 || got[0].Name != ProtocolName {
+			t.Fatalf("peer should use canonical dialect: %+v", got)
+		}
 	}
 }
 
-func TestHelloMessageForDialectUsesCompatibleCapabilities(t *testing.T) {
+func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	engine := NewEngine()
-	for _, dialect := range protocolDialects {
-		message := engine.helloMessageForDialect("hello", dialect)
-		if message.Protocol != dialect.Name || message.Major != dialect.Major || message.Magic != dialect.Magic {
-			t.Fatalf("hello did not use dialect %+v: %+v", dialect, message)
-		}
-		if !hasCapability(message.Capabilities, "text") || !hasCapability(message.Capabilities, "image") || !hasCapability(message.Capabilities, "file") {
-			t.Fatalf("common capabilities missing for %+v: %v", dialect, message.Capabilities)
-		}
-		if dialect.Major == 1 && hasCapability(message.Capabilities, "file-progress-v1") {
-			t.Fatalf("POPChat/v1 should not advertise v2 capabilities: %v", message.Capabilities)
+	dialect := protocolDialects[0]
+	message := engine.helloMessageForDialect("hello", dialect)
+	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
+		t.Fatalf("hello did not use canonical dialect: %+v", message)
+	}
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+		if !hasCapability(message.Capabilities, capability) {
+			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}
 	}
 }

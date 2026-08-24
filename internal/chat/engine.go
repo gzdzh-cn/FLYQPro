@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"mime"
 	"net"
@@ -83,6 +84,7 @@ type incomingFile struct {
 	received     int64
 	lastProgress int64
 	sha256       string
+	digest       hash.Hash
 }
 
 func NewEngine() *Engine {
@@ -468,6 +470,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
 			return
 		}
+		if message.FileSize < 0 {
+			if hasCapability(hello.Capabilities, "storage-preflight-v1") {
+				_ = writeWire(conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: message.AttachmentID, Status: "rejected", Reason: "INVALID_FILE_SIZE"})
+			}
+			return
+		}
 		conversationID, err := EnsureConversation(context.Background(), hello.DeviceID)
 		if err != nil {
 			return
@@ -489,10 +497,36 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if exists, existsErr := MessageExists(context.Background(), message.MessageID); existsErr != nil || exists {
 			return
 		}
-		tempPath := filepath.Join(AppDataDir(), "temp", attachmentID+".part")
+		tempDir := filepath.Join(AppDataDir(), "temp")
+		preflight := hasCapability(hello.Capabilities, "storage-preflight-v1")
+		if preflight {
+			available, availableErr := availableDiskBytes(tempDir)
+			required := requiredAttachmentBytes(message.FileSize)
+			if availableErr != nil {
+				_ = writeWire(conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "rejected", Reason: "STORAGE_UNAVAILABLE"})
+				e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": message.MessageID, "fileName": message.FileName, "status": "rejected", "reason": "STORAGE_UNAVAILABLE"})
+				return
+			}
+			if available < required {
+				_ = writeWire(conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "rejected", Reason: "INSUFFICIENT_STORAGE", AvailableBytes: available, RequiredBytes: required})
+				e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": message.MessageID, "fileName": message.FileName, "status": "rejected", "reason": "INSUFFICIENT_STORAGE", "availableBytes": available, "requiredBytes": required})
+				return
+			}
+		}
+		tempPath := filepath.Join(tempDir, attachmentID+".part")
 		file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
+			if preflight {
+				_ = writeWire(conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "rejected", Reason: "STORAGE_UNAVAILABLE"})
+			}
 			return
+		}
+		if preflight {
+			if err := writeWire(conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted"}); err != nil {
+				_ = file.Close()
+				_ = os.Remove(tempPath)
+				return
+			}
 		}
 		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "receiving", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentStatus: "receiving"}
 		if err := SaveMessage(context.Background(), messageRecord); err != nil {
@@ -502,7 +536,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = IncrementConversationUnread(context.Background(), conversationID)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, LocalPath: tempPath, Status: "receiving"})
 		e.mu.Lock()
-		e.incoming[attachmentID] = &incomingFile{file: file, tempPath: tempPath, messageID: message.MessageID, senderID: hello.DeviceID, fileName: message.FileName, mimeType: attachmentMime, expected: message.FileSize, sha256: message.SHA256}
+		e.incoming[attachmentID] = &incomingFile{file: file, tempPath: tempPath, messageID: message.MessageID, senderID: hello.DeviceID, fileName: message.FileName, mimeType: attachmentMime, expected: message.FileSize, sha256: message.SHA256, digest: sha256.New()}
 		e.mu.Unlock()
 		e.emit("chat:message", messageRecord)
 		e.emit("chat:attachment", messageRecord)
@@ -519,7 +553,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		if _, err := transfer.file.Write(data); err != nil {
+			e.failIncomingFile(message.AttachmentID, "INSUFFICIENT_STORAGE")
+			_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
 			return
+		}
+		if transfer.digest != nil {
+			_, _ = transfer.digest.Write(data)
 		}
 		transfer.received += int64(len(data))
 		if transfer.received-transfer.lastProgress >= 256*1024 || (transfer.expected > 0 && transfer.received >= transfer.expected) {
@@ -527,7 +566,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			transfer.lastProgress = transfer.received
 		}
 		// New clients acknowledge every chunk so the sender can show the
-		// receiver's actual progress. Older clients ignore this optional frame.
+		// receiver's actual progress. Peers without the optional progress capability ignore this frame.
 		_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "receiving"})
 	case "file_complete":
 		e.mu.RLock()
@@ -544,6 +583,46 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 	}
 }
 
+const attachmentSafetyMargin int64 = 16 * 1024 * 1024
+
+func requiredAttachmentBytes(fileSize int64) int64 {
+	if fileSize < 0 || fileSize > int64(^uint64(0)>>1)-attachmentSafetyMargin {
+		return int64(^uint64(0) >> 1)
+	}
+	return fileSize + attachmentSafetyMargin
+}
+
+func formatBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	if value < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(value)/1024)
+	}
+	if value < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(value)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(value)/(1024*1024*1024))
+}
+
+func (e *Engine) failIncomingFile(attachmentID, reason string) {
+	e.mu.Lock()
+	transfer := e.incoming[attachmentID]
+	delete(e.incoming, attachmentID)
+	e.mu.Unlock()
+	if transfer == nil {
+		return
+	}
+	if transfer.file != nil {
+		_ = transfer.file.Close()
+	}
+	_ = os.Remove(transfer.tempPath)
+	_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, LocalPath: transfer.tempPath, Status: "failed"})
+	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "failed", transfer.messageID)
+	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": "failed", "reason": reason})
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "failed")
+}
+
 func (e *Engine) finishIncomingFile(attachmentID string) string {
 	e.mu.Lock()
 	transfer := e.incoming[attachmentID]
@@ -553,11 +632,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		return "failed"
 	}
 	_ = transfer.file.Close()
-	data, err := os.ReadFile(transfer.tempPath)
-	if err != nil {
-		return "failed"
-	}
-	valid := sha256Hex(data) == transfer.sha256
+	valid := transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && (transfer.expected == 0 || transfer.received == transfer.expected)
 	status := "pending"
 	localPath := transfer.tempPath
 	if valid && e.Profile().AutoSave && !e.IsAttachmentMigrationActive() {
@@ -856,7 +931,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
 	if dialect.Major >= 2 {
-		capabilities = append(capabilities, "file-progress-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2")
+		capabilities = append(capabilities, "file-progress-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
 	}
 	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 }
@@ -1334,9 +1409,6 @@ func inspectTransferFile(path string) (os.FileInfo, string, error) {
 	if err != nil || info.IsDir() {
 		return nil, "", fmt.Errorf("文件不存在")
 	}
-	if info.Size() > 100*1024*1024 {
-		return nil, "", fmt.Errorf("文件不能超过 100 MB")
-	}
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return nil, "", err
@@ -1403,6 +1475,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	}
 	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1") && responseDialect.Major >= 2
+	supportsPreflight := hasCapability(response.Capabilities, "storage-preflight-v1") && responseDialect.Major >= 2
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
 		e.emit("chat:peer-updated", e.Peers())
@@ -1412,6 +1485,18 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	}
 	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum}); err != nil {
 		return err
+	}
+	if supportsPreflight {
+		offerResponse, err := readFileOfferResponse(decoder, message.AttachmentID)
+		if err != nil {
+			return err
+		}
+		if offerResponse.Status != "accepted" {
+			if offerResponse.Reason == "INSUFFICIENT_STORAGE" {
+				return fmt.Errorf("对方设备存储空间不足（可用 %s，需要 %s）", formatBytes(offerResponse.AvailableBytes), formatBytes(offerResponse.RequiredBytes))
+			}
+			return fmt.Errorf("对方拒绝接收文件: %s", offerResponse.Reason)
+		}
 	}
 	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring")
 	buffer := make([]byte, 32*1024)
@@ -1499,6 +1584,22 @@ func readFileProgress(decoder *json.Decoder, attachmentID string) (wireMessage, 
 	}
 }
 
+func readFileOfferResponse(decoder *json.Decoder, attachmentID string) (wireMessage, error) {
+	for {
+		var response wireMessage
+		if err := decoder.Decode(&response); err != nil {
+			return wireMessage{}, err
+		}
+		if response.Type == "friend_restore_ack" {
+			continue
+		}
+		if response.Type != "file_offer_response" || response.AttachmentID != attachmentID {
+			return wireMessage{}, fmt.Errorf("文件接收预检查回执无效")
+		}
+		return response, nil
+	}
+}
+
 func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string) Message {
 	message.Status, message.AttachmentStatus = status, status
 	_ = UpdateMessageStatus(ctx, message.MessageID, status)
@@ -1574,7 +1675,7 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	}
 	// A known friend may have reinstalled FlyQPro and lost its local database.
 	// Restore the relationship over this already authenticated connection before
-	// sending the message. Older clients ignore this optional control message.
+	// sending the message. The optional control message is only sent after the canonical dzhgo/v2 handshake.
 	if message.Type != "friend_restore" {
 		if err := e.writeFriendRestoreIfNeeded(conn, peer, responseDialect); err != nil {
 			return err

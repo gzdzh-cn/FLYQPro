@@ -13,17 +13,13 @@ const (
 )
 
 type ProtocolDialect struct {
-	Name      string
-	Magic     string
-	Major     int
-	Legacy    bool
-	Canonical bool
+	Name  string
+	Magic string
+	Major int
 }
 
 var protocolDialects = []ProtocolDialect{
-	{Name: "dzhgo", Magic: "DZHGO_DISCOVERY_V1", Major: 2, Canonical: true},
-	{Name: "FlyQPro", Magic: "FLYQPRO_DISCOVERY_V1", Major: 2, Legacy: true},
-	{Name: "POPChat", Magic: "POPCHAT_DISCOVERY_V1", Major: 1, Legacy: true},
+	{Name: ProtocolName, Magic: DiscoveryMagic, Major: ProtocolMajor},
 }
 
 type Profile struct {
@@ -184,52 +180,54 @@ type DiagnosticResult struct {
 }
 
 type wireMessage struct {
-	Magic              string   `json:"magic,omitempty"`
-	Type               string   `json:"type"`
-	Protocol           string   `json:"protocol,omitempty"`
-	Major              int      `json:"major,omitempty"`
-	Minor              int      `json:"minor,omitempty"`
-	MinMajor           int      `json:"minMajor,omitempty"`
-	MinMinor           int      `json:"minMinor,omitempty"`
-	RequestID          string   `json:"requestId,omitempty"`
-	MessageID          string   `json:"messageId,omitempty"`
-	DeviceID           string   `json:"deviceId,omitempty"`
-	Nickname           string   `json:"nickname,omitempty"`
-	AvatarHash         string   `json:"avatarHash,omitempty"`
-	AvatarVersion      int64    `json:"avatarVersion,omitempty"`
-	AvatarData         string   `json:"avatarData,omitempty"`
-	AvatarMime         string   `json:"avatarMime,omitempty"`
-	Platform           string   `json:"platform,omitempty"`
-	OSVersion          string   `json:"osVersion,omitempty"`
-	IP                 string   `json:"ip,omitempty"`
-	Port               int      `json:"port,omitempty"`
-	PublicKey          string   `json:"publicKey,omitempty"`
-	CertFP             string   `json:"certificateFingerprint,omitempty"`
-	Content            string   `json:"content,omitempty"`
-	Kind               string   `json:"kind,omitempty"`
-	Status             string   `json:"status,omitempty"`
-	FileName           string   `json:"fileName,omitempty"`
-	MimeType           string   `json:"mimeType,omitempty"`
-	FileSize           int64    `json:"fileSize,omitempty"`
-	SHA256             string   `json:"sha256,omitempty"`
-	AttachmentID       string   `json:"attachmentId,omitempty"`
-	MessageIDs         []string `json:"messageIds,omitempty"`
-	ChunkIndex         int      `json:"chunkIndex,omitempty"`
-	Transferred        int64    `json:"transferred,omitempty"`
-	Payload            string   `json:"payload,omitempty"`
-	Capabilities       []string `json:"capabilities,omitempty"`
-	SyncSince          string   `json:"syncSince,omitempty"`
-	SyncUntil          string   `json:"syncUntil,omitempty"`
-	SyncToken          string   `json:"syncToken,omitempty"`
-	ReadAt             string   `json:"readAt,omitempty"`
-	Probe              bool     `json:"probe,omitempty"`
-	AcceptedAt         string   `json:"acceptedAt,omitempty"`
-	TargetDeviceID     string   `json:"targetDeviceId,omitempty"`
-	SourceDeviceID     string   `json:"sourceDeviceId,omitempty"`
-	SourcePublicKey    string   `json:"sourcePublicKey,omitempty"`
-	RestoreVersion     int      `json:"restoreVersion,omitempty"`
-	RestoreSignature   string   `json:"restoreSignature,omitempty"`
-	RestoreSignatureV2 string   `json:"restoreSignatureV2,omitempty"`
+	Magic            string   `json:"magic,omitempty"`
+	Type             string   `json:"type"`
+	Protocol         string   `json:"protocol,omitempty"`
+	Major            int      `json:"major,omitempty"`
+	Minor            int      `json:"minor,omitempty"`
+	MinMajor         int      `json:"minMajor,omitempty"`
+	MinMinor         int      `json:"minMinor,omitempty"`
+	RequestID        string   `json:"requestId,omitempty"`
+	MessageID        string   `json:"messageId,omitempty"`
+	DeviceID         string   `json:"deviceId,omitempty"`
+	Nickname         string   `json:"nickname,omitempty"`
+	AvatarHash       string   `json:"avatarHash,omitempty"`
+	AvatarVersion    int64    `json:"avatarVersion,omitempty"`
+	AvatarData       string   `json:"avatarData,omitempty"`
+	AvatarMime       string   `json:"avatarMime,omitempty"`
+	Platform         string   `json:"platform,omitempty"`
+	OSVersion        string   `json:"osVersion,omitempty"`
+	IP               string   `json:"ip,omitempty"`
+	Port             int      `json:"port,omitempty"`
+	PublicKey        string   `json:"publicKey,omitempty"`
+	CertFP           string   `json:"certificateFingerprint,omitempty"`
+	Content          string   `json:"content,omitempty"`
+	Kind             string   `json:"kind,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	FileName         string   `json:"fileName,omitempty"`
+	MimeType         string   `json:"mimeType,omitempty"`
+	FileSize         int64    `json:"fileSize,omitempty"`
+	SHA256           string   `json:"sha256,omitempty"`
+	AttachmentID     string   `json:"attachmentId,omitempty"`
+	MessageIDs       []string `json:"messageIds,omitempty"`
+	ChunkIndex       int      `json:"chunkIndex,omitempty"`
+	Transferred      int64    `json:"transferred,omitempty"`
+	Payload          string   `json:"payload,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	SyncSince        string   `json:"syncSince,omitempty"`
+	SyncUntil        string   `json:"syncUntil,omitempty"`
+	SyncToken        string   `json:"syncToken,omitempty"`
+	ReadAt           string   `json:"readAt,omitempty"`
+	Probe            bool     `json:"probe,omitempty"`
+	AcceptedAt       string   `json:"acceptedAt,omitempty"`
+	TargetDeviceID   string   `json:"targetDeviceId,omitempty"`
+	SourceDeviceID   string   `json:"sourceDeviceId,omitempty"`
+	SourcePublicKey  string   `json:"sourcePublicKey,omitempty"`
+	RestoreVersion   int      `json:"restoreVersion,omitempty"`
+	RestoreSignature string   `json:"restoreSignature,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
+	AvailableBytes   int64    `json:"availableBytes,omitempty"`
+	RequiredBytes    int64    `json:"requiredBytes,omitempty"`
 }
 
 func protocolDialectForMessage(message wireMessage) (ProtocolDialect, bool) {
@@ -245,14 +243,7 @@ func protocolDialectForMessage(message wireMessage) (ProtocolDialect, bool) {
 	return ProtocolDialect{}, false
 }
 
-func protocolDialectsForPeer(peer Peer) []ProtocolDialect {
-	if peer.ProtocolName != "" && peer.ProtocolMajor > 0 {
-		for _, dialect := range protocolDialects {
-			if dialect.Name == peer.ProtocolName && dialect.Major == peer.ProtocolMajor && (peer.DiscoveryMagic == "" || dialect.Magic == peer.DiscoveryMagic) {
-				return []ProtocolDialect{dialect}
-			}
-		}
-	}
+func protocolDialectsForPeer(_ Peer) []ProtocolDialect {
 	return append([]ProtocolDialect(nil), protocolDialects...)
 }
 
@@ -260,5 +251,5 @@ func hasProtocolCapability(dialect ProtocolDialect, capabilities []string, capab
 	if hasCapability(capabilities, capability) {
 		return true
 	}
-	return dialect.Major >= 2 && dialect.Canonical && capability == "text"
+	return dialect.Major >= ProtocolMajor && capability == "text"
 }
