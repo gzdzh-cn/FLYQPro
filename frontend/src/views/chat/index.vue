@@ -45,8 +45,8 @@
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
-            <button v-if="message.senderDeviceId === deviceInfo?.deviceId && message.kind === 'file' && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发附件" title="发送失败，点击重发" @click.stop="retryAttachment(message)">!</button>
-            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="message.attachmentMime?.startsWith('image/')" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
+            <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="isImageMessage(message)" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
@@ -171,7 +171,7 @@ const filteredFriends = computed(() => {
 const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}`).join('|'))
-const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && message.attachmentMime?.startsWith('image/') && messagePreviews[message.messageId]))
+const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && isImageMessage(message) && messagePreviews[message.messageId]))
 const imageViewerSource = computed(() => messagePreviews[imageMessages.value[imageViewerIndex.value]?.messageId] || '')
 const imageViewerName = computed(() => imageMessages.value[imageViewerIndex.value]?.attachmentName || '图片预览')
 const migrationPercent = computed(() => store.attachmentMigration.total ? Math.min(100, Math.round(store.attachmentMigration.current / store.attachmentMigration.total * 100)) : 0)
@@ -180,6 +180,7 @@ const defaultAttachmentPath = ref('')
 
 function initials(value: string) { return (value || '?').trim().slice(0, 1).toUpperCase() }
 function avatarStyle(value: string, image?: string) { if (image) return { backgroundImage: `url(${image})`, backgroundSize: 'cover', backgroundPosition: 'center' }; let hash = 0; for (const char of value || '?') hash = (hash * 31 + char.charCodeAt(0)) >>> 0; const hue = hash % 360; return { background: `linear-gradient(135deg, hsl(${hue} 80% 65%), hsl(${(hue + 42) % 360} 75% 45%))` } }
+function isImageMessage(message: any) { if (message?.attachmentMime) return message.attachmentMime.startsWith('image/'); return /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(message?.attachmentName || message?.content || '') }
 function formatTime(value: string) { if (!value) return ''; const date = new Date(value); const now = new Date(); const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); const diff = Math.round((today.getTime() - day.getTime()) / 86400000); const time = date.toLocaleTimeString('zh-CN', { hour: 'numeric', minute: '2-digit', hour12: true }); if (diff === 0) return `今天 ${time}`; if (diff === 1) return `昨天 ${time}`; if (diff === 2) return `前天 ${time}`; return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${time}` }
 function formatLastSeen(value: string) { return value ? formatTime(value) : '未知' }
 function messageStatusText(status: string, kind = 'text') { if (status === 'sent') return kind === 'file' ? '发送成功' : '已发送'; return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status }
@@ -188,20 +189,46 @@ function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) 
 function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('popchat-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('popchat-dark') } }
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
-function chatScrollKey(deviceId: string) { return `popchat.chatScroll.${deviceId}` }
-function saveActiveScrollPosition() { if (activePeer.value && messageScroll.value) localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, messageScroll.value.scrollTop))) }
+function chatScrollKey(deviceId: string) { return `popchat.chatScroll.v2.${deviceId}` }
+function legacyChatScrollKey(deviceId: string) { return `popchat.chatScroll.${deviceId}` }
+function saveActiveScrollPosition() {
+  const peer = activePeer.value
+  const el = messageScroll.value
+  if (!peer || !el) return
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (nearBottom) localStorage.removeItem(chatScrollKey(peer.deviceId))
+  else localStorage.setItem(chatScrollKey(peer.deviceId), String(Math.max(0, el.scrollTop)))
+}
 async function restoreChatScrollPosition(deviceId: string) {
   await nextTick()
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  for (let frame = 0; frame < 2; frame++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   const el = messageScroll.value
   if (!el || activePeer.value?.deviceId !== deviceId) return
-  const saved = Number(localStorage.getItem(chatScrollKey(deviceId)))
-  if (Number.isFinite(saved) && saved >= 0) {
-    el.scrollTop = Math.min(saved, Math.max(0, el.scrollHeight - el.clientHeight))
+  let savedValue = localStorage.getItem(chatScrollKey(deviceId))
+  if (savedValue === null) {
+    const legacyKey = legacyChatScrollKey(deviceId)
+    const legacyValue = localStorage.getItem(legacyKey)
+    if (legacyValue !== null && Number(legacyValue) > 0) {
+      savedValue = legacyValue
+      localStorage.setItem(chatScrollKey(deviceId), legacyValue)
+    }
+    if (legacyValue !== null) localStorage.removeItem(legacyKey)
+  }
+  const saved = Number(savedValue)
+  if (savedValue !== null && Number.isFinite(saved) && saved >= 0) {
+    const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    el.scrollTop = Math.min(saved, maxScrollTop)
     userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (userNearBottom.value) localStorage.removeItem(chatScrollKey(deviceId))
     return
   }
-  scrollToBottom(false, 'instant')
+  // The conversation is mounted again when returning from Discover. Keep
+  // correcting for a few frames so the latest message remains visible even
+  // while Vue is laying out message rows and image previews.
+  for (let frame = 0; frame < 3; frame++) {
+    scrollToBottom(false, 'instant')
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  }
 }
 async function loadConversation(peer: Peer, markRead: boolean) {
   saveActiveScrollPosition()
@@ -223,8 +250,7 @@ function enterFriends() {
   if (store.attachmentMigration.active) return
   section.value = 'friends'
   const selected = activePeer.value && store.friends.some((peer) => peer.deviceId === activePeer.value?.deviceId) ? activePeer.value : store.friends[0]
-  if (selected && selected.deviceId !== store.activePeerId) void loadConversation(selected, false)
-  else if (selected) void restoreChatScrollPosition(selected.deviceId)
+  if (selected) void loadConversation(selected, false)
 }
 function openSettings(tab: string) { if (store.attachmentMigration.active) return; section.value = 'settings'; settingsTab.value = tab }
 async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
@@ -282,7 +308,15 @@ async function appendSentMessage(message: any) {
 }
 async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
-async function loadMessagePreview(message: any) { if (!message?.attachmentId || !message.attachmentMime?.startsWith('image/') || messagePreviews[message.messageId]) return; try { messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId) } catch { /* pending remote image; clicking the image retries */ } }
+async function loadMessagePreview(message: any) {
+  if (!message?.attachmentId || !isImageMessage(message) || messagePreviews[message.messageId]) return
+  try {
+    const peerDeviceId = activePeer.value?.deviceId
+    const shouldFollowBottom = Boolean(peerDeviceId && !localStorage.getItem(chatScrollKey(peerDeviceId)) && userNearBottom.value)
+    messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId)
+    if (shouldFollowBottom && activePeer.value?.deviceId === peerDeviceId) scheduleScrollToBottom(false, 'instant')
+  } catch { /* pending remote image; clicking the image retries */ }
+}
 async function openImage(message: any) { await loadMessagePreview(message); const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId); if (index >= 0) { imageViewerIndex.value = index; imageViewerOpen.value = true } else { Message.warning('图片仍在接收或暂时无法读取') } }
 function moveImage(direction: number) { const count = imageMessages.value.length; if (count) imageViewerIndex.value = (imageViewerIndex.value + direction + count) % count }
 function handleImageViewerKey(event: KeyboardEvent) { if (!imageViewerOpen.value) return; if (event.key === 'ArrowLeft') { event.preventDefault(); moveImage(-1) } if (event.key === 'ArrowRight') { event.preventDefault(); moveImage(1) } if (event.key === 'Escape') imageViewerOpen.value = false }
@@ -313,18 +347,20 @@ function playNotificationTone() {
   } catch { /* browser audio may be unavailable */ }
 }
 async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); Message.success('文件已发送') } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
-async function retryAttachment(message: any) {
+async function retryMessage(message: any) {
   if (!message?.messageId || retryingMessages[message.messageId]) return
   retryingMessages[message.messageId] = true
   message.status = 'sending'
-  message.attachmentStatus = 'sending'
+  if (message.kind === 'file') message.attachmentStatus = 'sending'
   try {
-    const retried = await ChatService.RetryAttachment(message.messageId)
+    const retried = message.kind === 'file'
+      ? await ChatService.RetryAttachment(message.messageId)
+      : await ChatService.RetryMessage(message.messageId)
     store.handleEvent('chat:message', retried)
     Message.success('附件已发送')
   } catch (error: any) {
     message.status = 'failed'
-    message.attachmentStatus = 'failed'
+    if (message.kind === 'file') message.attachmentStatus = 'failed'
     Message.error(error?.message || '附件重发失败')
   } finally {
     delete retryingMessages[message.messageId]
@@ -337,7 +373,7 @@ function closePeerInfo() { showPeerInfo.value = false }
 function handleMessageAreaClick() { closePeerInfo(); markActiveRead() }
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
 function markActiveRead() { if (!conversationVisible.value || !activePeer.value) return; store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) }
-function onMessageScroll() { const el = messageScroll.value; if (!el) return; if (activePeer.value) localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, el.scrollTop))); userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
+function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (activePeer.value) { if (userNearBottom.value) localStorage.removeItem(chatScrollKey(activePeer.value.deviceId)); else localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, el.scrollTop))) } if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false }
 function cancelScrollAnimation() { if (scrollScheduleFrame) { cancelAnimationFrame(scrollScheduleFrame); scrollScheduleFrame = 0 }; if (scrollAnimationFrame) { cancelAnimationFrame(scrollAnimationFrame); scrollAnimationFrame = 0 }; scrollAnimationToken++ }
 function cancelAutoScroll() { cancelScrollAnimation() }

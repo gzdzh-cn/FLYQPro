@@ -250,8 +250,8 @@ func TestRecoverSendingMessagesMarksOnlyLocalTransfersFailed(t *testing.T) {
 		t.Fatalf("本机发送中的消息未恢复为失败: %v, %+v", err, local)
 	}
 	localText, err := GetMessage(ctx, "local-text-sending")
-	if err != nil || localText.Status != "sent" {
-		t.Fatalf("本机文字消息未恢复为已发送: %v, %+v", err, localText)
+	if err != nil || localText.Status != "failed" {
+		t.Fatalf("本机文字消息未恢复为失败: %v, %+v", err, localText)
 	}
 	remote, err := GetMessage(ctx, "remote-sending")
 	if err != nil || remote.Status != "sending" {

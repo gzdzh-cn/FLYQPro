@@ -60,6 +60,7 @@ type incomingFile struct {
 	messageID string
 	senderID  string
 	fileName  string
+	mimeType  string
 	expected  int64
 	received  int64
 	sha256    string
@@ -143,6 +144,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.discoveryLoop()
 	go e.scanLoop()
 	go e.livenessLoop()
+	go e.probeKnownPeers()
 	go e.scanNetwork(true)
 	e.emit("chat:network-status", e.NetworkStatus())
 	return nil
@@ -444,6 +446,13 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if message.MessageID == "" {
 			return
 		}
+		attachmentMime := message.MimeType
+		if attachmentMime == "" {
+			attachmentMime = mime.TypeByExtension(filepath.Ext(message.FileName))
+		}
+		if attachmentMime == "" {
+			attachmentMime = "application/octet-stream"
+		}
 		if exists, existsErr := MessageExists(context.Background(), message.MessageID); existsErr != nil || exists {
 			return
 		}
@@ -452,15 +461,15 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if err != nil {
 			return
 		}
-		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "receiving", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: message.MimeType, AttachmentStatus: "receiving"}
+		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "receiving", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentStatus: "receiving"}
 		if err := SaveMessage(context.Background(), messageRecord); err != nil {
 			_ = file.Close()
 			return
 		}
 		_ = IncrementConversationUnread(context.Background(), conversationID)
-		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: message.MimeType, FileSize: message.FileSize, SHA256: message.SHA256, LocalPath: tempPath, Status: "receiving"})
+		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, LocalPath: tempPath, Status: "receiving"})
 		e.mu.Lock()
-		e.incoming[attachmentID] = &incomingFile{file: file, tempPath: tempPath, messageID: message.MessageID, senderID: hello.DeviceID, fileName: message.FileName, expected: message.FileSize, sha256: message.SHA256}
+		e.incoming[attachmentID] = &incomingFile{file: file, tempPath: tempPath, messageID: message.MessageID, senderID: hello.DeviceID, fileName: message.FileName, mimeType: attachmentMime, expected: message.FileSize, sha256: message.SHA256}
 		e.mu.Unlock()
 		e.emit("chat:message", messageRecord)
 		e.emit("chat:attachment", messageRecord)
@@ -512,7 +521,10 @@ func (e *Engine) finishIncomingFile(attachmentID string) {
 	if !valid {
 		status = "failed"
 	}
-	attachmentMime := mime.TypeByExtension(filepath.Ext(transfer.fileName))
+	attachmentMime := transfer.mimeType
+	if attachmentMime == "" {
+		attachmentMime = mime.TypeByExtension(filepath.Ext(transfer.fileName))
+	}
 	if attachmentMime == "" {
 		attachmentMime = "application/octet-stream"
 	}
@@ -520,6 +532,13 @@ func (e *Engine) finishIncomingFile(attachmentID string) {
 	messageStatus := "sent"
 	if !valid {
 		messageStatus = "failed"
+	}
+	if messageRecord, messageErr := GetMessage(context.Background(), transfer.messageID); messageErr == nil {
+		messageRecord.Status = messageStatus
+		messageRecord.AttachmentMime = attachmentMime
+		messageRecord.AttachmentStatus = status
+		messageRecord.AttachmentPath = localPath
+		e.emit("chat:message", messageRecord)
 	}
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
@@ -1001,25 +1020,72 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: content}
 	peer, err := e.peer(deviceID)
 	if err != nil {
-		message.Status = "sent"
+		message.Status = "failed"
 		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
 		e.emit("chat:message", message)
 		return message, nil
 	}
 	if !peer.Online {
-		message.Status = "sent"
+		message.Status = "failed"
 		_ = UpdateMessageStatus(ctx, message.MessageID, message.Status)
 		e.emit("chat:message", message)
 		return message, nil
 	}
 	if err := e.sendToPeer(peer, wire); err != nil {
-		message.Status = "sent"
+		message.Status = "failed"
 	} else {
 		message.Status = "sent"
 	}
 	_ = exec(ctx, `UPDATE messages SET status=? WHERE message_id=?`, message.Status, message.MessageID)
 	e.emit("chat:message", message)
 	return message, nil
+}
+
+func (e *Engine) RetryMessage(ctx context.Context, messageID string) (Message, error) {
+	message, err := GetMessage(ctx, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	e.mu.RLock()
+	localDeviceID := e.identity.DeviceID
+	e.mu.RUnlock()
+	if message.SenderDeviceID != localDeviceID || message.Kind != "text" {
+		return Message{}, fmt.Errorf("该消息不支持重发")
+	}
+	if message.Status == "sent" {
+		return message, nil
+	}
+	if message.Status == "sending" {
+		return Message{}, fmt.Errorf("消息正在发送")
+	}
+	deviceID := strings.TrimPrefix(message.ConversationID, "conv-")
+	if !e.isFriend(deviceID) {
+		return Message{}, fmt.Errorf("不是好友")
+	}
+	message.Status = "sending"
+	if err := UpdateMessageStatus(ctx, message.MessageID, message.Status); err != nil {
+		return Message{}, err
+	}
+	e.emit("chat:message", message)
+	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: message.Content}
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return e.finishTextRetry(ctx, message, "failed"), err
+	}
+	if !peer.Online {
+		return e.finishTextRetry(ctx, message, "failed"), fmt.Errorf("对方当前不在线")
+	}
+	if err := e.sendToPeer(peer, wire); err != nil {
+		return e.finishTextRetry(ctx, message, "failed"), err
+	}
+	return e.finishTextRetry(ctx, message, "sent"), nil
+}
+
+func (e *Engine) finishTextRetry(ctx context.Context, message Message, status string) Message {
+	message.Status = status
+	_ = UpdateMessageStatus(ctx, message.MessageID, status)
+	e.emit("chat:message", message)
+	return message
 }
 
 func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) error {
@@ -1421,37 +1487,34 @@ func (e *Engine) livenessLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			peers := e.Peers()
-			changed := false
-			var changedMu sync.Mutex
-			var wait sync.WaitGroup
-			for _, peer := range peers {
-				peer := peer
-				wait.Add(1)
-				go func() {
-					defer wait.Done()
-					if err := e.probePeer(peer); err != nil {
-						if e.setPeerOnline(peer.DeviceID, false) {
-							changedMu.Lock()
-							changed = true
-							changedMu.Unlock()
-						}
-						return
-					}
-					if !peer.Online {
-						changedMu.Lock()
-						changed = true
-						changedMu.Unlock()
-					}
-				}()
-			}
-			wait.Wait()
-			if changed {
-				e.emit("chat:peer-updated", e.Peers())
-			}
+			e.probeKnownPeers()
 		case <-e.stop:
 			return
 		}
+	}
+}
+
+func (e *Engine) probeKnownPeers() {
+	peers := e.Peers()
+	changed := false
+	var changedMu sync.Mutex
+	var wait sync.WaitGroup
+	for _, peer := range peers {
+		peer := peer
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			online := e.probePeer(peer) == nil
+			if e.setPeerOnline(peer.DeviceID, online) {
+				changedMu.Lock()
+				changed = true
+				changedMu.Unlock()
+			}
+		}()
+	}
+	wait.Wait()
+	if changed {
+		e.emit("chat:peer-updated", e.Peers())
 	}
 }
 

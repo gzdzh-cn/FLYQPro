@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,6 +281,11 @@ func (s *ChatService) RejectFriendRequest(requestID string) error {
 func (s *ChatService) SendMessage(deviceID, content string) (chat.Message, error) {
 	return s.engine.SendMessage(gctx.New(), deviceID, content)
 }
+
+func (s *ChatService) RetryMessage(messageID string) (chat.Message, error) {
+	return s.engine.RetryMessage(gctx.New(), messageID)
+}
+
 func (s *ChatService) MarkConversationRead(deviceID string) error {
 	return s.engine.MarkConversationRead(gctx.New(), deviceID)
 }
@@ -320,14 +327,24 @@ func (s *ChatService) SendImage(deviceID, dataURL string) (chat.Message, error) 
 
 func (s *ChatService) GetAttachmentPreview(attachmentID string) (string, error) {
 	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
-	if err != nil || !strings.HasPrefix(attachment.MimeType, "image/") || attachment.LocalPath == "" {
+	if err != nil || attachment.LocalPath == "" {
 		return "", fmt.Errorf("图片预览不可用")
 	}
 	data, err := os.ReadFile(attachment.LocalPath)
 	if err != nil || len(data) == 0 || len(data) > 20*1024*1024 {
 		return "", fmt.Errorf("图片预览不可用")
 	}
-	return "data:" + attachment.MimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+	mimeType := attachment.MimeType
+	if !strings.HasPrefix(mimeType, "image/") {
+		mimeType = mime.TypeByExtension(filepath.Ext(attachment.FileName))
+	}
+	if !strings.HasPrefix(mimeType, "image/") {
+		mimeType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(mimeType, "image/") {
+		return "", fmt.Errorf("图片预览不可用")
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 func (s *ChatService) AcceptAttachment(attachmentID string) (chat.Attachment, error) {
 	if s.engine.IsAttachmentMigrationActive() {

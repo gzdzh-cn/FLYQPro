@@ -527,10 +527,9 @@ func UpdateMessageStatus(ctx context.Context, messageID, status string) error {
 }
 
 func RecoverSendingMessages(ctx context.Context, senderDeviceID string) error {
-	// Text is already durably stored and has no automatic retry path, so keep
-	// its user-facing state as sent. Attachments remain failed and can be
-	// retried manually from the conversation.
-	if err := exec(ctx, `UPDATE messages SET status=CASE WHEN kind='file' THEN 'failed' ELSE 'sent' END WHERE sender_device_id=? AND status='sending'`, senderDeviceID); err != nil {
+	// There is no automatic retry path. Keep interrupted local sends visible as
+	// failed so the user can explicitly retry them from the conversation.
+	if err := exec(ctx, `UPDATE messages SET status='failed' WHERE sender_device_id=? AND status='sending'`, senderDeviceID); err != nil {
 		return err
 	}
 	return exec(ctx, `UPDATE attachments SET status='failed' WHERE status='sending' AND message_id IN (SELECT message_id FROM messages WHERE sender_device_id=?)`, senderDeviceID)
