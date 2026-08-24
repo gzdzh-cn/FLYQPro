@@ -41,6 +41,7 @@ type Engine struct {
 	serviceStopped      bool
 	attachmentMigration bool
 	friendRestoreAt     map[string]time.Time
+	presenceMu          sync.Mutex
 }
 
 func (e *Engine) SetAttachmentMigrationActive(active bool) {
@@ -2053,14 +2054,34 @@ func (e *Engine) UpdateProfile(profile Profile) {
 	wasDiscoverable := e.profile.Discoverable
 	e.profile = profile
 	e.mu.Unlock()
-	if wasDiscoverable && !profile.Discoverable {
-		go e.broadcastWithdrawal()
+	if kind := discoverabilityPresenceKind(wasDiscoverable, profile.Discoverable); kind != "" {
+		// Presence packets are asynchronous, but each queued packet verifies that
+		// the profile is still in the state it represents. This prevents a quick
+		// off/on toggle from sending withdraw after announce (or vice versa).
+		e.schedulePresence(kind, profile.Discoverable)
 	}
 	e.emit("chat:profile-updated", profile)
 }
 
-func (e *Engine) broadcastWithdrawal() {
-	e.broadcastPresence("withdraw")
+func discoverabilityPresenceKind(wasDiscoverable, discoverable bool) string {
+	if wasDiscoverable && !discoverable {
+		return "withdraw"
+	}
+	if !wasDiscoverable && discoverable {
+		return "announce"
+	}
+	return ""
+}
+
+func (e *Engine) schedulePresence(kind string, expectedDiscoverable bool) {
+	go func() {
+		e.presenceMu.Lock()
+		defer e.presenceMu.Unlock()
+		if e.Profile().Discoverable != expectedDiscoverable {
+			return
+		}
+		e.broadcastPresence(kind)
+	}()
 }
 
 func (e *Engine) broadcastPresence(kind string) {

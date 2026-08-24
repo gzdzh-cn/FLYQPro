@@ -138,6 +138,27 @@ func TestDiscoveryPermissionAllowsStrangersWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestDiscoverabilityPresenceTransition(t *testing.T) {
+	tests := []struct {
+		name            string
+		wasDiscoverable bool
+		discoverable    bool
+		want            string
+	}{
+		{name: "disabled remains disabled", wasDiscoverable: false, discoverable: false},
+		{name: "enabled remains enabled", wasDiscoverable: true, discoverable: true},
+		{name: "disabled to enabled announces", wasDiscoverable: false, discoverable: true, want: "announce"},
+		{name: "enabled to disabled withdraws", wasDiscoverable: true, discoverable: false, want: "withdraw"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := discoverabilityPresenceKind(test.wasDiscoverable, test.discoverable); got != test.want {
+				t.Fatalf("presence kind = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestUpdatePeerRelationRefreshesCachedPeer(t *testing.T) {
 	engine := NewEngine()
 	engine.peers["peer-1"] = Peer{DeviceID: "peer-1", Relation: DiscoveredState}
