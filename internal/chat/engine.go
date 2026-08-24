@@ -232,7 +232,7 @@ func (e *Engine) handleDiscoveryTCP(conn net.Conn) {
 	if !compatible {
 		return
 	}
-	if e.Profile().Discoverable {
+	if e.canRespondToDiscovery(message.DeviceID) {
 		_ = writeWire(conn, e.helloMessageForDialect("announce", dialect))
 	}
 }
@@ -273,6 +273,14 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	dialect, compatible := protocolDialectForMessage(hello)
 	if !compatible {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "PROTOCOL_UNSUPPORTED"})
+		return
+	}
+	// The chat port is also probed by peers that still have an old discovery
+	// record. Do not let that path make a stranger visible after discovery has
+	// been disabled. Friends and peers with an active friend request still need
+	// a direct connection for messaging and request responses.
+	if !e.canAcceptPeerConnection(hello.DeviceID) {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
 		return
 	}
 	wasOnline := false
@@ -552,6 +560,11 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if err != nil {
 			return
 		}
+		if transfer.expected < 0 || transfer.received > transfer.expected || int64(len(data)) > transfer.expected-transfer.received {
+			e.failIncomingFile(message.AttachmentID, "FILE_SIZE_EXCEEDED")
+			_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "FILE_SIZE_EXCEEDED"})
+			return
+		}
 		if _, err := transfer.file.Write(data); err != nil {
 			e.failIncomingFile(message.AttachmentID, "INSUFFICIENT_STORAGE")
 			_ = writeWire(conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
@@ -632,7 +645,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		return "failed"
 	}
 	_ = transfer.file.Close()
-	valid := transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && (transfer.expected == 0 || transfer.received == transfer.expected)
+	valid := transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
 	status := "pending"
 	localPath := transfer.tempPath
 	if valid && e.Profile().AutoSave && !e.IsAttachmentMigrationActive() {
@@ -645,6 +658,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	}
 	if !valid {
 		status = "failed"
+		_ = os.Remove(transfer.tempPath)
 	}
 	attachmentMime := transfer.mimeType
 	if attachmentMime == "" {
@@ -770,7 +784,7 @@ func (e *Engine) discoveryLoop() {
 		}
 		switch message.Type {
 		case "discover":
-			if e.Profile().Discoverable {
+			if e.canRespondToDiscovery(message.DeviceID) {
 				_ = e.sendDiscovery(addr, e.helloMessageForDialect("announce", dialect))
 			}
 		case "announce":
@@ -820,6 +834,25 @@ func (e *Engine) isStarted() bool {
 }
 
 func (e *Engine) scanNetwork(includeUnicastProbe bool) {
+	// A discovery request contains the sender's identity. It must not be
+	// broadcast while discovery is disabled, because older clients may treat a
+	// request as a visible peer instead of waiting for an announce response.
+	// Known friends are queried directly so their presence can still recover
+	// without exposing this device to strangers.
+	if !e.Profile().Discoverable {
+		firstErr := e.scanKnownFriends()
+		e.mu.Lock()
+		e.lastScan = time.Now()
+		if firstErr != nil {
+			e.lastErr = firstErr.Error()
+		} else {
+			e.lastErr = ""
+		}
+		e.mu.Unlock()
+		e.emit("chat:network-status", e.NetworkStatus())
+		return
+	}
+
 	targets := broadcastAddresses()
 	if len(targets) == 0 {
 		targets = []net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
@@ -857,6 +890,23 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	}
 	e.mu.Unlock()
 	e.emit("chat:network-status", e.NetworkStatus())
+}
+
+func (e *Engine) scanKnownFriends() error {
+	var firstErr error
+	for _, peer := range e.PeersByRelation(PeerRelation) {
+		ip := net.ParseIP(strings.TrimSpace(peer.IP))
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		target := &net.UDPAddr{IP: ip.To4(), Port: DiscoveryPort}
+		for _, dialect := range protocolDialectsForPeer(peer) {
+			if err := e.sendDiscovery(target, e.helloMessageForDialect("discover", dialect)); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) error {
@@ -1952,6 +2002,32 @@ func (e *Engine) peer(deviceID string) (Peer, error) {
 func (e *Engine) isFriend(deviceID string) bool {
 	peer, err := e.peer(deviceID)
 	return err == nil && peer.Relation == PeerRelation
+}
+
+// canRespondToDiscovery is the privacy boundary for the discovery protocol.
+// A friend is addressable even when the local device is not generally
+// discoverable; an unknown device must opt in through the profile setting.
+func (e *Engine) canRespondToDiscovery(deviceID string) bool {
+	return e.Profile().Discoverable || e.isFriend(deviceID)
+}
+
+// canAcceptPeerConnection also permits the direct response to a friend
+// request. This keeps the request/accept flow working when the requester has
+// discovery disabled, without making the requester generally discoverable.
+func (e *Engine) canAcceptPeerConnection(deviceID string) bool {
+	if e.canRespondToDiscovery(deviceID) {
+		return true
+	}
+	requests, err := listFriendRequestRows(context.Background(), "")
+	if err != nil {
+		return false
+	}
+	for _, request := range requests {
+		if request.DeviceID == deviceID && (request.Status == "pending" || request.Status == "sent" || request.Status == "queued") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) updatePeerRelation(deviceID, relation string) {

@@ -110,6 +110,34 @@ func TestHandleDiscoveryTCPRepliesWhenDiscoverable(t *testing.T) {
 	<-done
 }
 
+func TestDiscoveryPermissionAllowsFriendsWhenDisabled(t *testing.T) {
+	engine := NewEngine()
+	engine.profile = Profile{Discoverable: false}
+	engine.peers["friend-1"] = Peer{DeviceID: "friend-1", Relation: PeerRelation}
+
+	if !engine.canRespondToDiscovery("friend-1") {
+		t.Fatal("friends must remain discoverable when general discovery is disabled")
+	}
+	if engine.canRespondToDiscovery("stranger-1") {
+		t.Fatal("strangers must not be discoverable when general discovery is disabled")
+	}
+	if !engine.canAcceptPeerConnection("friend-1") {
+		t.Fatal("friends must remain reachable when general discovery is disabled")
+	}
+}
+
+func TestDiscoveryPermissionAllowsStrangersWhenEnabled(t *testing.T) {
+	engine := NewEngine()
+	engine.profile = Profile{Discoverable: true}
+
+	if !engine.canRespondToDiscovery("stranger-1") {
+		t.Fatal("strangers must be discoverable when general discovery is enabled")
+	}
+	if !engine.canAcceptPeerConnection("stranger-1") {
+		t.Fatal("discoverable devices must accept stranger connections")
+	}
+}
+
 func TestUpdatePeerRelationRefreshesCachedPeer(t *testing.T) {
 	engine := NewEngine()
 	engine.peers["peer-1"] = Peer{DeviceID: "peer-1", Relation: DiscoveredState}

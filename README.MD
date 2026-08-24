@@ -1,274 +1,286 @@
 # FlyQPro
 
-一款基于 **Wails3 + Vue3 + ArcoDesign + GoFrame** 的局域网点对点聊天应用。
+FlyQPro 是一款面向桌面端的局域网点对点聊天工具。它不依赖云端账号和中心服务器，设备在同一个局域网内即可发现彼此、添加好友、发送消息和传输图片/文件。
 
-项目仓库：[gzdzh-cn/helpFly-tool](https://github.com/gzdzh-cn/helpFly-tool)
+项目仓库：[gzdzh-cn/FLYQPro](https://github.com/gzdzh-cn/FlyQPro)
 
-它不只是一个 Demo，而是一套**开箱即用的桌面程序骨架**：内置多个常见业务页面的范例（表单、图标、图表、组件），并附带一个**真正对接数据库、可增删改查的账单模块**。你只需在它的基础上修改，就能快速拥有自己的桌面应用。
+## 技术栈概览
 
----
+- **桌面应用**：Wails 3，将 Go 后端与系统 WebView 结合为原生桌面程序。
+- **界面**：Vue 3、TypeScript、Vite、Arco Design、Pinia。
+- **后端**：Go、GoFrame，负责本地数据、设备发现和聊天服务。
+- **数据存储**：SQLite，聊天记录、好友关系和设备资料保存在本机。
+- **网络通信**：局域网 UDP/TCP 发现，好友连接使用 TLS 加密和设备身份校验。
+
+## 适合什么场景
+
+FlyQPro 适合在以下场景中使用：
+
+- 同一家庭、办公室或实验室内的设备聊天。
+- 不希望经过第三方服务器的临时局域网沟通。
+- 在局域网内直接发送图片、文件和短消息。
+- 需要保留本地聊天记录，同时对设备可见性进行控制。
+
+> FlyQPro 当前定位是局域网通信工具。双方需要处于可互通的局域网环境，并允许应用通过系统防火墙接收连接。
 
 ## 界面预览
 
-### 亮色主题
+### 好友与发现
 
-首屏预览：
+没有好友时，可以从好友页面进入发现流程：
 
-<a href="docs/images/亮色-1.jpg" target="_blank"><img src="docs/images/亮色-1.jpg" alt="首页-亮色" style="display:block;width:100%;max-width:1400px;height:auto"></a>
+![好友空状态](docs/images/亮色-1.webp)
 
-其余页面：
+发现设备、发送申请并等待对方处理：
 
-| 账单列表 | 表单演示 | 图标专栏 | 图表分析 |
-| --- | --- | --- | --- |
-| <a href="docs/images/亮色-2.jpg" target="_blank"><img src="docs/images/亮色-2.jpg" alt="账单列表-亮色" style="width:100%"></a> | <a href="docs/images/亮色-3.jpg" target="_blank"><img src="docs/images/亮色-3.jpg" alt="表单演示-亮色" style="width:100%"></a> | <a href="docs/images/亮色-4.jpg" target="_blank"><img src="docs/images/亮色-4.jpg" alt="图标专栏-亮色" style="width:100%"></a> | <a href="docs/images/亮色-5.jpg" target="_blank"><img src="docs/images/亮色-5.jpg" alt="图表分析-亮色" style="width:100%"></a> |
+![发现设备](docs/images/亮色-2.webp)
 
-| 通用组件 | 参数设置 | 设置页 |
-| --- | --- | --- |
-| <a href="docs/images/亮色-6.jpg" target="_blank"><img src="docs/images/亮色-6.jpg" alt="通用组件-亮色" style="width:100%"></a> | <a href="docs/images/亮色-7.jpg" target="_blank"><img src="docs/images/亮色-7.jpg" alt="参数设置-亮色" style="width:100%"></a> | <a href="docs/images/亮色-8.jpg" target="_blank"><img src="docs/images/亮色-8.jpg" alt="设置页-亮色" style="width:100%"></a> |
+![好友申请](docs/images/亮色-3.webp)
 
-### 暗色主题
+### 聊天
 
-首屏预览：
+支持文字、图片和表情消息：
 
-<a href="docs/images/暗色-1.jpg" target="_blank"><img src="docs/images/暗色-1.jpg" alt="首页-暗色" style="display:block;width:100%;max-width:1400px;height:auto"></a>
+![聊天窗口](docs/images/亮色-4.webp)
 
-其余页面：
+![消息发送](docs/images/亮色-5.webp)
 
-| 账单列表 | 表单演示 | 图标专栏 | 图表分析 |
-| --- | --- | --- | --- |
-| <a href="docs/images/暗色-2.jpg" target="_blank"><img src="docs/images/暗色-2.jpg" alt="账单列表-暗色" style="width:100%"></a> | <a href="docs/images/暗色-3.jpg" target="_blank"><img src="docs/images/暗色-3.jpg" alt="表单演示-暗色" style="width:100%"></a> | <a href="docs/images/暗色-4.jpg" target="_blank"><img src="docs/images/暗色-4.jpg" alt="图标专栏-暗色" style="width:100%"></a> | <a href="docs/images/暗色-5.jpg" target="_blank"><img src="docs/images/暗色-5.jpg" alt="图表分析-暗色" style="width:100%"></a> |
+### 亮色与暗色主题
 
-| 通用组件 | 参数设置 | 设置页 |
-| --- | --- | --- |
-| <a href="docs/images/暗色-6.jpg" target="_blank"><img src="docs/images/暗色-6.jpg" alt="通用组件-暗色" style="width:100%"></a> | <a href="docs/images/暗色-7.jpg" target="_blank"><img src="docs/images/暗色-7.jpg" alt="参数设置-暗色" style="width:100%"></a> | <a href="docs/images/暗色-8.jpg" target="_blank"><img src="docs/images/暗色-8.jpg" alt="设置页-暗色" style="width:100%"></a> |
+FlyQPro 支持亮色、暗色和跟随系统三种主题模式：
 
-> 点击首屏大图或其他缩略图可打开高清原图。
+![亮色主题设置](docs/images/亮色-6.webp)
 
-# 快速开始
+![暗色主题聊天](docs/images/暗色-7.webp)
 
-## 1. 环境准备
-- 安装 [Go](https://go.dev/)（建议较新版本）
-- 安装 [Node.js](https://nodejs.org/)（含 npm / npx）
-- 安装 Wails3 命令行工具（`npm` 或 `go install` 方式均可，本项目使用 Wails3）
+![暗色主题好友申请](docs/images/暗色-8.webp)
 
-## 2. 常用命令
+![暗色主题设置](docs/images/暗色-9.webp)
+
+## 功能一览
+
+### 1. 局域网发现与好友管理
+
+- 自动扫描同一局域网内已允许被发现的设备。
+- 在“发现”页面查看设备名称、平台和在线状态。
+- 发送、接收、同意或拒绝好友申请。
+- 支持双方互相申请时合并显示申请状态。
+- 好友与陌生设备分开管理，陌生设备不能直接查看完整设备指纹。
+- 好友建立后，即使关闭“允许被发现”，双方仍可以直接连接和发送消息。
+
+### 2. 点对点聊天
+
+- 支持文字、表情和图片消息。
+- 显示在线/离线状态、未读数量和消息发送状态。
+- 支持已读状态和失败消息重发。
+- 可点击好友头像查看好友资料、设备信息和最近在线时间。
+- 可以为好友设置备注。
+
+### 3. 文件与附件传输
+
+- 从聊天输入区选择文件发送。
+- 图片可直接在聊天窗口预览，也可以打开图片查看器浏览多张图片。
+- 大文件传输显示实时进度。
+- 接收文件时可以手动“接收”或“拒绝”。
+- 开启“自动保存附件”后，收到的图片和文件会自动保存到附件目录。
+- 支持自定义附件保存路径，并在更换路径时自动迁移已有附件。
+
+### 4. 隐私与安全
+
+- 默认不要求注册账号，也不会把聊天记录上传到云端。
+- “允许被发现”控制陌生设备是否能在发现列表看到本机。
+- 已有好友不受该开关影响，可以继续保持好友直连和消息通信。
+- 关闭发现后不会向全网广播本机的发现请求，仅尝试与已知好友恢复连接。
+- 聊天连接使用 TLS，设备通过本地生成的设备身份、公钥和证书指纹进行校验。
+- 本机身份信息、好友关系、聊天记录和附件均保存在本地。
+
+### 5. 个性化设置
+
+- 修改昵称。
+- 上传、替换或删除头像；没有自定义头像时会根据设备身份生成稳定头像。
+- 亮色、暗色或跟随系统主题。
+- 设置是否开机启动。
+- 设置是否允许被发现。
+- 设置是否自动保存附件及附件保存路径。
+
+## 使用指南
+
+### 第一步：启动并完善个人资料
+
+启动 FlyQPro 后，点击左侧头像或“设置”，在“通用”页面修改昵称、头像和主题。
+
+昵称会显示在好友发现、好友申请和聊天页面中。建议每台设备使用容易区分的昵称，例如“会议室电脑”或“张三的 Mac”。
+
+### 第二步：让设备出现在发现列表
+
+如果希望陌生设备发现本机：
+
+1. 打开“设置”→“通用”。
+2. 打开“允许被发现”。
+3. 确认双方连接到同一个局域网。
+4. 进入“发现”页面，点击“重新扫描”。
+5. 点击设备查看详情，然后选择“发送好友申请”。
+
+对方关闭“允许被发现”时，不会出现在陌生设备的发现列表中。已经成为好友的设备不受此开关影响，仍可以直接通信。
+
+### 第三步：处理好友申请
+
+收到申请后，进入“发现”页面的“新的朋友”区域，选择申请并点击“同意”或“拒绝”。
+
+同意后，对方会移动到“好友”列表，之后可以直接打开聊天。双方都发送过申请时，页面会显示“双方已申请”。
+
+### 第四步：发送消息和图片
+
+在“好友”页面选择好友即可开始聊天：
+
+- 在输入框输入文字，按 **Enter** 发送。
+- 按 **Shift + Enter** 换行。
+- 点击表情按钮插入表情。
+- 点击文件夹按钮选择文件。
+- 直接粘贴图片，或从文件选择器发送图片。
+
+聊天窗口底部会显示消息通过局域网加密传输。图片发送后可以直接预览；普通文件会显示文件大小、传输进度和接收状态。
+
+### 第五步：管理好友资料和聊天记录
+
+打开聊天窗口右上角的“更多”按钮，可以查看：
+
+- 好友昵称和备注。
+- 在线状态、设备类型和操作系统。
+- 通讯协议、IP 地址、设备 ID 和证书指纹。
+- 最近在线时间。
+
+在好友资料面板中点击“清除聊天记录”，只会清除本机保存的消息和附件，不会删除好友关系，也不会影响对方设备上的记录。
+
+## 设置说明
+
+### 允许被发现
+
+控制陌生设备是否能在局域网发现列表看到本机。
+
+- **开启**：陌生设备可以发现本机并发送好友申请。
+- **关闭**：陌生设备不能通过发现列表看到本机；已建立的好友关系仍可直接通信。
+
+### 自动保存附件
+
+- **开启**：收到文件或图片后自动保存到附件目录。
+- **关闭**：收到普通文件后，需要在消息中手动点击“接收”。
+
+### 附件保存路径
+
+可以选择新的本地目录。更换路径时，FlyQPro 会显示迁移进度，并在迁移期间暂时锁定其他页面，避免文件迁移过程中产生冲突。
+
+### 网络
+
+“设置”→“网络”页面可以查看：
+
+- 当前网络状态和局域网 IP。
+- UDP/TCP 发现端口。
+- TCP/TLS 聊天端口。
+- 已发现设备数量和在线设备数量。
+- 网络诊断结果。
+
+如果发现不到设备，请优先确认双方处于同一局域网，并检查系统防火墙、路由器 AP 隔离和网络权限。
+
+### 设备信息
+
+设备信息页面显示本机平台、操作系统、设备 ID、协议版本和证书指纹。这些信息用于设备识别和安全连接，正常情况下不需要手动修改。
+
+## 数据和隐私
+
+FlyQPro 不提供云端同步服务，数据默认保存在本机应用目录：
+
+- **SQLite 数据库**：保存个人资料、设备信息、好友关系、好友申请、会话和消息记录。
+- **附件目录**：保存接收的图片和文件，默认位于 FlyQPro 数据目录下的 `attachments` 文件夹。
+- **设备身份**：用于验证好友连接，保存在本机。
+
+可以通过环境变量 `FLYQPRO_DATA_DIR` 指定应用数据目录；也可以通过 `GOFLY_DB_PATH` 指定 SQLite 数据库文件路径。请在迁移或备份前退出 FlyQPro，避免数据库正在写入。
+
+## 从源码运行
+
+### 环境要求
+
+- Go 1.25 或更高版本。
+- Node.js 14 或更高版本，包含 npm。
+- Wails 3 beta 版本及其对应的平台依赖。
+
+### 启动开发模式
+
+在 `FlyQPro-wails3` 目录执行：
 
 ```bash
-wails3 dev      # 启动开发模式：前端热更新 + 后端自动重编译，改完立即生效
-wails3 build    # 打包为可分发的桌面程序
-cd frontend && npx vite build   # 仅构建/校验前端
+npm --prefix frontend install
+wails3 dev
 ```
 
-应用窗口默认大小为 `1280 × 800`，可在 `main.go` 的窗口配置中调整。
+开发模式会启动前端开发服务，并编译 Go 后端。修改前端或后端代码后，可按 Wails 的开发模式行为重新加载。
 
-## 3. 打包与分发
-
-`wails3 package` 在各平台都会产出可直接运行的程序包（macOS 为 `.app`，Windows 为 `.exe` 或安装包，Linux 为可执行文件或 `.deb`/`.AppImage`）。
-
-### 3.1 各平台打包命令
-
-Wails3 的打包任务是平台相关的，**在哪个平台上运行，就打出哪个平台的包**。Go 也支持交叉编译，但打包成桌面安装包（`.app` / `.msi` / `.dmg`）通常必须在目标系统上执行，因为它们依赖各自平台的签名、图标与安装器工具链。
-
-| 目标平台 | 执行环境 | 一键打包命令 | 产出 |
-| --- | --- | --- | --- |
-| macOS | 在 macOS 上 | `wails3 package` | `bin/FlyQPro.app` |
-| macOS（带可拖拽安装窗口的 DMG） | 在 macOS 上 | `wails3 task darwin:package:macdmg` | `bin/FlyQPro.dmg`（含 Applications 链接） |
-| macOS 通用二进制（Intel + Apple 芯片） | 在 macOS 上 | `wails3 task darwin:package:universal` | 通用 `bin/FlyQPro.app` |
-| Windows | 在 Windows 上 | `wails3 task windows:package:installer` | `bin/FlyQPro-installer.exe`（NSIS 安装包，含 WebView2 引导器） |
-| Linux | 在 Linux 上 | `wails3 package` | 可执行文件 / `.deb` / `.AppImage` 等 |
-
-> 注意：跨平台只能做到「交叉编译出二进制」，完整安装包（含图标、签名、注册表/桌面集成）必须在目标系统上执行对应命令。CI 中可用 GitHub Actions 矩阵分别在各平台 runner 上执行对应命令。
-> Windows 的 NSIS 安装包依赖 `makensis` 与 WebView2 bootstrapper，**只能在 Windows 上打包**；macOS 的 DMG 同理只能在 macOS 上打包。
-
-### 3.2 打包 macOS DMG（带「拖入应用程序」安装窗口）
-
-`hails3 package` 只产出 `.app`，不会生成 DMG。要想挂载后出现「把 app 拖到 Applications 文件夹」的安装窗口，需要在镜像里放入一个指向 `/Applications` 的**符号链接**，再封成 DMG。
-
-#### 推荐：一条命令搞定（零依赖）
-
-本项目已在 `build/darwin/Taskfile.yml` 中封装好 `package:macdmg` 任务，它会依次完成「编译 → 打包 `.app` → 加 Applications 符号链接 → 生成 DMG」，全程仅用 macOS 自带的 `hdiutil`，无需安装任何第三方工具：
+### 构建前端
 
 ```bash
-# 在 macOS 上执行，一步产出 bin/FlyQPro.dmg（带可拖拽安装窗口）
-wails3 task darwin:package:macdmg
+cd frontend
+npm install
+npm run build
 ```
 
-完成后 `bin/FlyQPro.dmg` 即为可分发的安装镜像：双击挂载后，窗口里同时显示 `FlyQPro.app` 和 `Applications` 文件夹图标，**把 app 拖到 Applications 即可完成安装**。
+### 构建桌面程序
 
-#### 手动分步（等价于上面的命令，便于理解或非 Task 环境使用）
+在项目目录执行：
 
 ```bash
-# 1) 生成 .app 包（已包含前端构建与后端编译）
-wails3 package
-
-# 2) 准备 DMG 暂存目录：放入 app + 一个名为 Applications 的符号链接
-DMG_STAGING=/tmp/flyqpro-dmg
-rm -rf "$DMG_STAGING"
-mkdir -p "$DMG_STAGING"
-cp -R bin/FlyQPro.app "$DMG_STAGING/"
-# 关键：创建指向系统「应用程序」文件夹的符号链接，拖拽时即安装到 /Applications
-ln -s /Applications "$DMG_STAGING/Applications"
-
-# 3) 生成可拖拽安装的 DMG（无需额外依赖，使用 macOS 自带 hdiutil）
-hdiutil create -volname "FlyQPro" \
-  -srcfolder "$DMG_STAGING" \
-  -ov -format UDZO \
-  bin/FlyQPro.dmg
-
-# 4) 清理暂存目录
-rm -rf "$DMG_STAGING"
+wails3 build
 ```
 
-#### 可选：美化安装窗口（背景图、图标排列）
+完整的桌面安装包通常需要在目标操作系统上构建，因为 macOS、Windows 和 Linux 的窗口、签名、图标及安装器依赖不同。
 
-上面的方案已满足「可拖拽安装」的核心需求。若想进一步定制窗口背景、图标位置与大小（让 app 与 Applications 并排、居中对齐），可改用第三方 `create-dmg` 工具：
+### 运行测试
 
 ```bash
-npm i -g create-dmg
-create-dmg bin/FlyQPro.dmg bin/FlyQPro.app --volname "FlyQPro" --overwrite
+go test ./...
 ```
 
-> 提示：`wails3 task darwin:package:macdmg`（基于 `hdiutil`）零依赖、最稳妥；`create-dmg` 更美观但依赖第三方包，可按需选择。
+## 项目结构
 
-## 4. 数据存储位置
-
-应用使用 SQLite 本地数据库，文件位置随「开发 / 生产」环境自动切换：
-
-| | 开发模式 | 生产模式 |
-| --- | --- | --- |
-| 数据库位置 | 项目目录下的 `resource/app.db` | 系统用户配置目录中的 `FlyQPro/app.db` |
-| Windows | 项目 `resource/` | `%AppData%/FlyQPro/app.db` |
-| macOS | 项目 `resource/` | `~/Library/Application Support/FlyQPro/app.db` |
-| Linux | 项目 `resource/` | `~/.config/FlyQPro/app.db` |
-| 调试日志 | 开启（可见 SQL） | 关闭（更干净，启用 WAL） |
-
-> 首次启动会自动创建目录与数据表，无需手动初始化。
-> 如需自定义路径，可设置环境变量 `GOFLY_DB_PATH` 指定，优先级最高。
-
-## 4. 启动后建议体验
-1. 左侧主菜单进入「首页」，查看演示卡片。
-2. 进入「数据」→ **账单列表**，体验真实数据库的增删改查、导出与高级搜索。
-3. 点击顶栏「设置」，尝试主题切换与各类窗口调试能力。
-
----
-
-# 功能模块一览
-
-## 1. 整体架构
-
-```
-   前端页面（Vue3）
-        │  调用
-        ▼
-   自动生成的接口绑定（bindings）
-        │
-        ▼
-   Go 后端服务（Service 层）
-        │
-        ▼
-   GoFrame ──→ SQLite 数据库
-```
-
-- 桌面界面由系统 WebView 渲染，业务逻辑用 Go 编写。
-- 前端通过 Wails 生成的绑定直接调用 Go 方法，Go 处理后再把数据返回前端展示。
-
-## 2. 技术栈
-
-| 层 | 技术 | 作用 |
-| --- | --- | --- |
-| 桌面外壳 | Wails3 | 用系统浏览器内核承载界面，Go 提供后端能力 |
-| 前端 | Vue3 + TypeScript + Vite | 页面与交互逻辑 |
-| UI 组件 | ArcoDesign | 按钮、表格、表单等现成组件 |
-| 图表 | ECharts | 柱状、折线、饼图等多种可视化 |
-| 状态管理 | Pinia | 全局共享状态（如主题） |
-| 后端 | GoFrame (gf) | 数据库与业务逻辑框架 |
-| 数据库 | SQLite | 轻量本地文件数据库 |
-
-## 3. 目录结构
-
-```
-项目根目录/
-├── main.go              # 程序入口：创建窗口、注册服务、监听事件
-├── wails.json           # 打包配置
-├── frontend/            # 前端工程
+```text
+FlyQPro-wails3/
+├── main.go                    # 应用入口、窗口和服务注册
+├── frontend/                  # Vue 3 前端界面
 │   └── src/
-│       ├── main.ts      # 前端入口
-│       ├── App.vue      # 根组件（顶栏：主题 / 窗口控制）
-│       ├── router/
-│       │   └── routerMap.ts   # ★ 所有栏目的定义，新增页面先改这里
-│       ├── layouts/
-│       │   ├── AppSider.vue   # 一级布局（首页 / 数据 / 设置）
-│       │   └── Menu.vue       # 二级布局（"数据"下的子菜单）
-│       ├── store/       # 全局状态（主题等）
-│       ├── components/
-│       │   ├── chart/        # ★ 图表封装
-│       │   └── icons/        # 图标（在线 + 本地）
-│       ├── views/
-│       │   ├── home/              # 首页（演示卡片）
-│       │   ├── setting/           # 设置（调试能力）
-│       │   └── submenu/           # "数据"下的子页面
-│       │       ├── consumption-list/  # ★ 唯一对接数据库的表格
-│       │       ├── form-demo/         # 表单演示
-│       │       ├── icon-gallery/       # 图标专栏
-│       │       ├── chart-demo/         # 图表演示
-│       │       └── component-demo/     # 通用组件演示
-│       └── bindings/   # 由 Wails 自动生成的接口绑定
-└── internal/            # Go 后端
-    ├── dao/  model/     # 数据访问与模型（自动生成）
-    └── service/         # 后端服务（DbService 等）
-        └── db/          # SQLite 读写实现
+│       ├── views/chat/        # 好友、发现、聊天和设置页面
+│       ├── store/modules/chat/ # 聊天状态、好友和消息状态
+│       └── bindings/           # Wails 自动生成的前端绑定
+├── internal/chat/             # 设备发现、好友、消息和文件传输
+├── internal/service/          # Wails 暴露给前端的服务接口
+├── internal/service/db/       # SQLite 初始化和数据库访问
+├── protocol/                  # 通讯协议说明
+├── resource/                  # 字体、图标等资源
+└── docs/images/               # README 界面截图
 ```
 
-## 4. 页面模块
+## 常见问题
 
-菜单由路由表 `routerMap.ts` 自动生成——**新增页面只需先在 `routerMap.ts` 登记，菜单便会自动出现**。
+### 为什么发现不到对方？
 
-- **首页**：以卡片形式展示统计与图表类演示。
-- **数据**（二级菜单）：
-  - **账单列表** ★：唯一真正对接数据库的模块，支持新增、编辑、删除、导出、高级搜索；可在「后端 / Mock」之间切换（后端不可用时自动降级为本地内存数据，演示不中断）。
-  - **表单演示**：新增 / 编辑 / 详情三种模式，覆盖常用输入控件与表单校验。
-  - **图标专栏**：在线 iconfont 与本地 SVG 图标库，支持分类切换、搜索、分页。
-  - **图表分析**：柱状、折线、饼、环、散点、雷达、仪表盘等图表范例（前端示例数据）。
-  - **通用组件**：Tabs / Steps / Timeline / Tag / Progress / Tree / Modal 等组件集合。
-  - **参数设置**：系统名称、主题、语言、同步、通知、安全等配置表单；主题模式可真实切换全局外观。
-- **设置**（顶栏进入）：大量桌面调试能力。
+请依次检查：
 
-## 5. 后端服务
+1. 双方是否连接到同一个局域网，而不是一个连接访客网络、另一个连接主网络。
+2. 对方是否打开了“允许被发现”。
+3. 是否点击了“重新扫描”。
+4. 系统防火墙是否允许 FlyQPro 使用局域网网络。
+5. 路由器是否开启了 AP 隔离、客户端隔离或设备间禁止通信。
 
-程序启动时，以下 Go 服务被暴露给前端调用：
+### 关闭“允许被发现”后，还能和好友聊天吗？
 
-| 服务 | 用途 |
-| --- | --- |
-| `GreetService` | 主题交互等示例 |
-| `MessageService` | 消息与事件示例 |
-| `OpenWindow` | 窗口控制 |
-| `HttpService` | 网络请求示例 |
-| `DbService` | 数据库读写（账单增删改查） |
+可以。这个开关只控制陌生设备的发现列表可见性。已经建立好友关系的设备仍可以通过已保存的设备身份和地址直接连接。
 
-`DbService` 的关键能力：
-- `AddConsumption` / `UpdateConsumption`：新增 / 修改账单记录，真实落库。
-- 账单原始字段较丰富，前端表格精简展示 5 项：**交易日期、渠道、摘要、金额、余额**。
+### 聊天记录保存在哪里？
 
-> 接口绑定由 `wails3 generate bindings` 自动生成，若后端方法有变动，重新执行该命令即可，无需手动维护。
+聊天记录保存在本机 SQLite 数据库，附件保存在设置中配置的附件目录。FlyQPro 不会自动把这些数据上传到云端。
 
-## 6. 公共能力
+### 更换附件目录会删除原文件吗？
 
-- **图表**：`components/chart` 是对 ECharts 的统一封装，按需注册图表类型；页面通过 `useChartOption` 生成配置后传给 `<Chart>` 组件即可使用。
-- **图标**：
-  - 在线：阿里 iconfont，使用 `<icon-font :type="...">`。
-  - 本地：内置一批 SVG 图标，不依赖网络。
-- **主题**：`store/modules/app` 保存主题状态，顶栏、设置页、参数设置页均通过同一套逻辑真实切换亮 / 暗外观。
+正常迁移不会删除原有附件，FlyQPro 会将已管理的附件迁移到新目录，并在完成后更新本地记录。迁移过程中请不要退出应用。
 
-## 7. 设置页调试能力
+## 使用提示
 
-设置页直接调用桌面运行时，便于开发调试：
-- **外观**：亮 / 暗 / 跟随系统主题、窗口置顶、无边框、是否可调整大小。
-- **窗口**：缩放、全屏 / 最大化、隐藏 / 显示 / 还原、修改标题、修改背景色、限制最小 / 最大尺寸、打印、重置、打开调试工具。
-- **探测**：剪贴板读写、打开外部网页、实时窗口状态、屏幕分辨率、系统信息（操作系统 / 版本 / WebView2 等）。
-
-## 8. 使用要点
-
-1. **新增页面**：在 `routerMap.ts` 登记路由后，菜单自动出现。
-2. **双层菜单**：一级用 `AppSider`，"数据"下的子页用 `Menu`；内容过长时区域自动出现滚动条。
-3. **主题切换**：顶栏、设置页、参数设置页效果一致，均走同一套主题逻辑。
-4. **数据真假**：仅账单列表对接真实数据库，其余演示页面均为前端示例数据。
+FlyQPro 仅用于你有权访问的局域网环境。请确认你有权发现和联系网络中的其他设备，并妥善保管本机数据库、附件目录及设备身份信息。
