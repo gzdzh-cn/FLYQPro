@@ -46,7 +46,7 @@
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
-            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="isImageMessage(message)" class="image-message" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else>图片 {{ message.attachmentName || message.content }}</span></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template><div v-if="transferProgressFor(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }"><template v-if="message.kind === 'file'"><button v-if="isImageMessage(message)" class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message)" @click="openImage(message)"><img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" /><span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span><div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span></div></button><template v-else><strong><icon-file /> {{ message.attachmentName || message.content }}</strong><span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span><div v-if="message.senderDeviceId !== deviceInfo?.deviceId && message.attachmentStatus === 'pending'" class="attachment-actions"><a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button><a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button></div></template><div v-if="transferProgressFor(message) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div></template><template v-else>{{ message.content }}</template><small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small></div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
@@ -171,6 +171,7 @@ const filteredFriends = computed(() => {
 const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}`).join('|'))
+const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? store.transferProgress[message.attachmentId] : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
 const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && isImageMessage(message) && messagePreviews[message.messageId]))
 const imageViewerSource = computed(() => messagePreviews[imageMessages.value[imageViewerIndex.value]?.messageId] || '')
 const imageViewerName = computed(() => imageMessages.value[imageViewerIndex.value]?.attachmentName || '图片预览')
@@ -309,7 +310,10 @@ async function appendSentMessage(message: any) {
 async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) {
-  if (!message?.attachmentId || !isImageMessage(message) || messagePreviews[message.messageId]) return
+  if (!message?.attachmentId || !isImageMessage(message)) return
+  const progress = transferProgressFor(message)
+  if (message.attachmentStatus === 'receiving' || (progress && progress.direction === 'receive' && progress.phase !== 'completed' && progress.phase !== 'failed')) return
+  if (messagePreviews[message.messageId]) return
   try {
     const peerDeviceId = activePeer.value?.deviceId
     const shouldFollowBottom = Boolean(peerDeviceId && !localStorage.getItem(chatScrollKey(peerDeviceId)) && userNearBottom.value)
@@ -391,6 +395,13 @@ function transferProgressLabel(message: any): string {
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived !== undefined ? '对方接收中' : '发送中'
   return '接收中'
 }
+function imageTransferActive(message: any): boolean {
+  const progress = transferProgressFor(message)
+  return Boolean(progress && progress.phase !== 'completed' && progress.phase !== 'failed')
+}
+function imageProgressRingStyle(message: any) {
+  return { '--progress': `${transferProgressPercent(message)}%` }
+}
 function closePeerInfo() { showPeerInfo.value = false }
 function handleMessageAreaClick() { closePeerInfo(); markActiveRead() }
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
@@ -444,6 +455,7 @@ function closeWindow() { Window.Close() }
 watch(() => store.profile, (value) => Object.assign(editProfile, value), { deep: true })
 watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
 watch(activeMessageLoadKey, () => activeMessages.value.forEach(loadMessagePreview), { immediate: true })
+watch(activeTransferLoadKey, () => activeMessages.value.forEach(loadMessagePreview))
 watch(() => store.lastMessageEvent, (message) => {
   if (!message) return
   const isActiveConversation = conversationVisible.value && message.conversationId === `conv-${activePeer.value?.deviceId}`
@@ -546,6 +558,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
   --message-incoming: #e5ebf2;
   --message-outgoing: #3767e8;
   --message-outgoing-text: #ffffff;
+  --scroll-track: #edf0f3;
+  --scroll-thumb: #b7c0cb;
 }
 .chat-app.theme-dark {
   --app-bg: #0f1115;
@@ -563,6 +577,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
   --message-incoming: #252d38;
   --message-outgoing: #3f639d;
   --message-outgoing-text: #f7faff;
+  --scroll-track: #15181d;
+  --scroll-thumb: #46515d;
 }
 .chat-app,
 .chat-app .workspace,
@@ -811,6 +827,14 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .chat-app .conversation-head,
 .chat-app .composer,
 .chat-app .info-pane { background: var(--surface-1); }
+.chat-app .message-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+}
+.chat-app .message-scroll::-webkit-scrollbar { width: 10px; }
+.chat-app .message-scroll::-webkit-scrollbar-track { background: var(--scroll-track); }
+.chat-app .message-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: 2px solid var(--scroll-track); border-radius: 999px; }
+.chat-app .message-scroll::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 .chat-app.theme-dark .list-pane,
 .chat-app.theme-dark .discovery-pane { background: var(--list-bg); }
 .chat-app.theme-dark .message-scroll,
@@ -977,8 +1001,15 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .pending-image { width: 58px; height: 58px; position: relative; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
 .pending-image img { width: 100%; height: 100%; object-fit: cover; }
 .pending-image button { position: absolute; top: 2px; right: 2px; display: flex; border: 0; border-radius: 50%; padding: 2px; background: rgba(0, 0, 0, .64); color: #fff; cursor: pointer; }
-.image-message { display: block; max-width: 270px; padding: 0; border: 0; background: transparent; cursor: zoom-in; overflow: hidden; border-radius: 8px; color: inherit; }
-.image-message img { display: block; width: 100%; max-height: 220px; object-fit: cover; }
+.image-message { position: relative; display: block; max-width: 270px; min-width: 150px; min-height: 110px; padding: 0; border: 0; background: var(--surface-3); cursor: zoom-in; overflow: hidden; border-radius: 8px; color: inherit; }
+.image-message.is-transferring { cursor: progress; }
+.image-message:disabled { opacity: 1; }
+.image-pending-placeholder { display: flex; min-height: 110px; align-items: center; justify-content: center; padding: 0 18px; color: var(--muted); font-size: 12px; }
+.image-message img { display: block; width: auto; max-width: 100%; height: auto; max-height: 220px; object-fit: contain; margin: 0 auto; }
+.image-transfer-mask { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(9, 14, 24, .58); color: #fff; font-size: 12px; letter-spacing: .02em; pointer-events: none; }
+.image-progress-ring { position: relative; --progress: 0%; display: inline-flex; width: 62px; height: 62px; align-items: center; justify-content: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--progress), rgba(255, 255, 255, .28) var(--progress)); box-shadow: 0 4px 18px rgba(0, 0, 0, .22); }
+.image-progress-ring::after { content: ''; position: absolute; width: 50px; height: 50px; border-radius: 50%; background: rgba(13, 20, 34, .9); }
+.image-progress-ring strong { position: relative; z-index: 1; font-size: 13px; font-weight: 700; }
 .new-message-button { position: absolute; right: 22px; top: -41px; z-index: 8; border: 0; border-radius: 5px; padding: 7px 10px; background: var(--accent); color: #fff; font-size: 12px; cursor: pointer; box-shadow: var(--shadow); }
 .info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
 .info-fields input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); }
