@@ -103,6 +103,13 @@ export const useChatStore = defineStore('chat', {
       const conversation = this.conversations.find((item) => item.peerDeviceId === deviceId)
       if (conversation) conversation.unreadCount = 0
     },
+    clearConversationLocal(deviceId: string): Message[] {
+      const conversationId = `conv-${deviceId}`
+      const removed = this.messages[conversationId] || []
+      delete this.messages[conversationId]
+      this.conversations = this.conversations.filter((item) => item.peerDeviceId !== deviceId)
+      return removed
+    },
     setSection(section: string) { this.activeSection = section },
   },
 })

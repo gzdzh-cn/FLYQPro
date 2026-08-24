@@ -8,15 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"popchat/internal/service/db"
+	"flyqpro/internal/service/db"
 )
 
 func TestIdentityAndProfilePersist(t *testing.T) {
 	root := t.TempDir()
 	_ = os.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
-	_ = os.Setenv("LANCHAT_DATA_DIR", filepath.Join(root, "data"))
+	_ = os.Setenv("FLYQPRO_DATA_DIR", filepath.Join(root, "data"))
 	defer os.Unsetenv("GOFLY_DB_PATH")
-	defer os.Unsetenv("LANCHAT_DATA_DIR")
+	defer os.Unsetenv("FLYQPRO_DATA_DIR")
 	if err := db.Open(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close(context.Background())
-	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, LastSeen: nowString()}); err != nil {
+	if err := UpsertPeer(context.Background(), Peer{DeviceID: "peer-1", Nickname: "旧昵称", Relation: DiscoveredState, ProtocolName: "POPChat", ProtocolMajor: 1, DiscoveryMagic: "POPCHAT_DISCOVERY_V1", Capabilities: []string{"text", "image", "file"}, LastSeen: nowString()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetPeerRelation(context.Background(), "peer-1", PeerRelation); err != nil {
@@ -135,9 +135,12 @@ func TestUpsertPeerPreservesFriendRelationAndRemark(t *testing.T) {
 	if peers[0].Relation != PeerRelation || peers[0].Remark != "我的备注" {
 		t.Fatalf("好友关系被发现更新覆盖: %+v", peers[0])
 	}
+	if peers[0].ProtocolName != "POPChat" || peers[0].ProtocolMajor != 1 || peers[0].DiscoveryMagic != "POPCHAT_DISCOVERY_V1" || len(peers[0].Capabilities) != 3 {
+		t.Fatalf("好友协议方言未持久化: %+v", peers[0])
+	}
 }
 
-func TestConversationUnreadAndOutboxPersistence(t *testing.T) {
+func TestConversationUnreadPersistence(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
 	if err := db.Open(context.Background()); err != nil {
@@ -195,19 +198,6 @@ func TestConversationUnreadAndOutboxPersistence(t *testing.T) {
 	}
 	if counts["peer-unread"] != 0 || counts["peer-unread-b"] != 2 {
 		t.Fatalf("清理一个会话影响了其他会话: %+v", counts)
-	}
-	if err := SaveOutbox(ctx, "outbox-message", "peer-unread", "message", `{"type":"message","messageId":"unread-message"}`); err != nil {
-		t.Fatal(err)
-	}
-	items, err := ListOutbox(ctx, "peer-unread")
-	if err != nil || len(items) != 1 || items[0].ItemID != "outbox-message" {
-		t.Fatalf("outbox 未持久化: %v, %+v", err, items)
-	}
-	if err := MarkOutboxRetry(ctx, items[0].ItemID, items[0].Attempts); err != nil {
-		t.Fatal(err)
-	}
-	if err := DeleteOutbox(ctx, items[0].ItemID); err != nil {
-		t.Fatal(err)
 	}
 }
 

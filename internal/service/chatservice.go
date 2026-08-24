@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"flyqpro/internal/chat"
+	"flyqpro/internal/platform/startup"
+	"flyqpro/internal/version"
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"popchat/internal/chat"
-	"popchat/internal/platform/startup"
-	"popchat/internal/version"
 )
 
 type ChatService struct{ engine *chat.Engine }
@@ -399,6 +399,110 @@ func (s *ChatService) SetPeerRemark(deviceID, remark string) error {
 }
 func (s *ChatService) EnsureConversation(deviceID string) (string, error) {
 	return chat.EnsureConversation(gctx.New(), deviceID)
+}
+
+type conversationFileMove struct {
+	source string
+	target string
+}
+
+func (s *ChatService) ClearConversation(deviceID string) (chat.ClearConversationResult, error) {
+	var result chat.ClearConversationResult
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return result, fmt.Errorf("好友设备 ID 不能为空")
+	}
+	if deviceID == s.engine.DeviceInfo().DeviceID {
+		return result, fmt.Errorf("不能清除本机聊天记录")
+	}
+	if s.engine.IsAttachmentMigrationActive() {
+		return result, fmt.Errorf("附件迁移正在进行")
+	}
+
+	ctx := gctx.New()
+	s.engine.CancelIncomingForPeer(deviceID)
+	attachments, err := chat.ListConversationAttachments(ctx, deviceID)
+	if err != nil {
+		return result, err
+	}
+	profile, err := chat.GetProfile(ctx)
+	if err != nil {
+		return result, err
+	}
+	roots := []string{profile.FileSavePath, chat.DefaultAttachmentDir(), filepath.Join(chat.AppDataDir(), "temp")}
+	trashRoot := filepath.Join(chat.AppDataDir(), "temp", "chat-clear", fmt.Sprintf("%d", time.Now().UnixNano()))
+	moves := make([]conversationFileMove, 0, len(attachments))
+	seen := make(map[string]struct{}, len(attachments))
+	rollback := func() {
+		for index := len(moves) - 1; index >= 0; index-- {
+			move := moves[index]
+			if _, statErr := os.Stat(move.target); statErr == nil {
+				_ = os.MkdirAll(filepath.Dir(move.source), 0o700)
+				_ = os.Rename(move.target, move.source)
+			}
+		}
+		_ = os.RemoveAll(trashRoot)
+	}
+
+	for _, item := range attachments {
+		path := strings.TrimSpace(item.LocalPath)
+		if path == "" {
+			continue
+		}
+		// The sender's path is the user's original file, not an application
+		// copy. Never remove it as part of clearing local chat history.
+		if item.SenderDeviceID == s.engine.DeviceInfo().DeviceID {
+			result.SkippedExternalFiles++
+			continue
+		}
+		managed := false
+		for _, root := range roots {
+			if chat.IsPathWithin(path, root) {
+				managed = true
+				break
+			}
+		}
+		if !managed {
+			result.SkippedExternalFiles++
+			continue
+		}
+		cleanPath, absErr := filepath.Abs(path)
+		if absErr != nil {
+			rollback()
+			return result, absErr
+		}
+		if _, already := seen[cleanPath]; already {
+			continue
+		}
+		seen[cleanPath] = struct{}{}
+		if _, statErr := os.Stat(cleanPath); os.IsNotExist(statErr) {
+			continue
+		} else if statErr != nil {
+			rollback()
+			return result, statErr
+		}
+		if err := os.MkdirAll(trashRoot, 0o700); err != nil {
+			rollback()
+			return result, err
+		}
+		target := filepath.Join(trashRoot, fmt.Sprintf("%04d-%s", len(moves), filepath.Base(cleanPath)))
+		if err := os.Rename(cleanPath, target); err != nil {
+			rollback()
+			return result, fmt.Errorf("暂存附件失败: %w", err)
+		}
+		moves = append(moves, conversationFileMove{source: cleanPath, target: target})
+		result.DeletedFiles++
+	}
+
+	deletedMessages, deletedAttachments, err := chat.DeleteConversationRecords(ctx, deviceID)
+	if err != nil {
+		rollback()
+		return chat.ClearConversationResult{}, err
+	}
+	result.DeletedMessages = deletedMessages
+	result.DeletedAttachments = deletedAttachments
+	_ = os.RemoveAll(trashRoot)
+	return result, nil
 }
 
 func (s *ChatService) PickFile() string {

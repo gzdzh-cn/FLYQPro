@@ -12,14 +12,20 @@ func Set(enabled bool, executable string) error {
 	if appData == "" {
 		return nil
 	}
-	path := filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "POPChat.cmd")
+	path := filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "FlyQPro.cmd")
+	legacyPath := filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "POPChat.cmd")
 	if !enabled {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
+		for _, oldPath := range []string{path, legacyPath} {
+			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	content := "@echo off\nstart \"\" \"" + executable + "\"\n"

@@ -47,6 +47,10 @@ var schemaStatements = []string{
 		certificate_fingerprint TEXT NOT NULL DEFAULT '',
 		relation TEXT NOT NULL DEFAULT 'discovered',
 		remark TEXT NOT NULL DEFAULT '',
+		protocol_name TEXT NOT NULL DEFAULT '',
+		protocol_major INTEGER NOT NULL DEFAULT 0,
+		discovery_magic TEXT NOT NULL DEFAULT '',
+		capabilities TEXT NOT NULL DEFAULT '',
 		last_seen TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
@@ -97,17 +101,9 @@ var schemaStatements = []string{
 		created_at TEXT NOT NULL,
 		FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
 	)`,
-	`CREATE TABLE IF NOT EXISTS outbox (
-		item_id TEXT PRIMARY KEY,
-		peer_device_id TEXT NOT NULL,
-		kind TEXT NOT NULL,
-		payload TEXT NOT NULL,
-		attempts INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at TEXT NOT NULL,
-		created_at TEXT NOT NULL
-	)`,
 	`CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id, created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_outbox_retry ON outbox(peer_device_id, next_attempt_at, created_at)`,
+	`DROP INDEX IF EXISTS idx_outbox_retry`,
+	`DROP TABLE IF EXISTS outbox`,
 	`CREATE TABLE IF NOT EXISTS network_diagnostics (
 		id TEXT PRIMARY KEY,
 		status TEXT NOT NULL,

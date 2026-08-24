@@ -54,6 +54,24 @@ func (e *Engine) IsAttachmentMigrationActive() bool {
 	return e.attachmentMigration
 }
 
+func (e *Engine) CancelIncomingForPeer(peerDeviceID string) {
+	e.mu.Lock()
+	transfers := make([]*incomingFile, 0)
+	for attachmentID, transfer := range e.incoming {
+		if transfer.senderID != peerDeviceID {
+			continue
+		}
+		delete(e.incoming, attachmentID)
+		transfers = append(transfers, transfer)
+	}
+	e.mu.Unlock()
+	for _, transfer := range transfers {
+		if transfer.file != nil {
+			_ = transfer.file.Close()
+		}
+	}
+}
+
 type incomingFile struct {
 	file         *os.File
 	tempPath     string
@@ -205,11 +223,15 @@ func (e *Engine) handleDiscoveryTCP(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	var message wireMessage
-	if err := json.NewDecoder(conn).Decode(&message); err != nil || message.Magic != DiscoveryMagic || message.Type != "discover" || message.DeviceID == e.identity.DeviceID {
+	if err := json.NewDecoder(conn).Decode(&message); err != nil || message.Type != "discover" || message.DeviceID == e.identity.DeviceID {
+		return
+	}
+	dialect, compatible := protocolDialectForMessage(message)
+	if !compatible {
 		return
 	}
 	if e.Profile().Discoverable {
-		_ = writeWire(conn, e.helloMessage("announce"))
+		_ = writeWire(conn, e.helloMessageForDialect("announce", dialect))
 	}
 }
 
@@ -243,6 +265,12 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	var hello wireMessage
 	decoder := json.NewDecoder(conn)
 	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.DeviceID == e.identity.DeviceID {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: "PROTOCOL_UNSUPPORTED"})
+		return
+	}
+	dialect, compatible := protocolDialectForMessage(hello)
+	if !compatible {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: "PROTOCOL_UNSUPPORTED"})
 		return
 	}
 	wasOnline := false
@@ -266,7 +294,7 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	e.touchPeer(hello.DeviceID)
-	_ = writeWire(conn, e.helloMessage("hello_ack"))
+	_ = writeWire(conn, e.helloMessageForDialect("hello_ack", dialect))
 	_ = conn.SetDeadline(time.Time{})
 	for {
 		var message wireMessage
@@ -280,7 +308,11 @@ func (e *Engine) handleConnection(raw net.Conn) {
 func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessage) {
 	switch message.Type {
 	case "ping":
-		_ = writeWire(conn, wireMessage{Type: "pong", Protocol: ProtocolName, Major: ProtocolMajor, Minor: ProtocolMinor})
+		dialect, ok := protocolDialectForMessage(hello)
+		if !ok {
+			dialect = protocolDialects[0]
+		}
+		_ = writeWire(conn, wireMessage{Type: "pong", Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor})
 	case "friend_request":
 		// A known peer may send a request even when discovery is disabled. The
 		// discoverable flag controls presence broadcasts, not direct requests
@@ -654,13 +686,17 @@ func (e *Engine) discoveryLoop() {
 			}
 		}
 		var message wireMessage
-		if json.Unmarshal(buffer[:n], &message) != nil || message.Magic != DiscoveryMagic || message.DeviceID == e.identity.DeviceID {
+		if json.Unmarshal(buffer[:n], &message) != nil || message.DeviceID == e.identity.DeviceID {
+			continue
+		}
+		dialect, compatible := protocolDialectForMessage(message)
+		if !compatible {
 			continue
 		}
 		switch message.Type {
 		case "discover":
 			if e.Profile().Discoverable {
-				_ = e.sendDiscovery(addr, e.helloMessage("announce"))
+				_ = e.sendDiscovery(addr, e.helloMessageForDialect("announce", dialect))
 			}
 		case "announce":
 			message.IP = addr.IP.String()
@@ -709,7 +745,6 @@ func (e *Engine) isStarted() bool {
 }
 
 func (e *Engine) scanNetwork(includeUnicastProbe bool) {
-	message := e.helloMessage("discover")
 	targets := broadcastAddresses()
 	if len(targets) == 0 {
 		targets = []net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
@@ -721,18 +756,21 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	}
 
 	var firstErr error
-	for index := range targets[:len(targets)-len(subnetTargets)] {
-		if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
-			firstErr = err
+	for _, dialect := range protocolDialects {
+		message := e.helloMessageForDialect("discover", dialect)
+		for index := range targets[:len(targets)-len(subnetTargets)] {
+			if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
-	}
-	for index := len(targets) - len(subnetTargets); index < len(targets); index++ {
-		// Individual hosts can be offline; a failed unicast probe is expected.
-		_ = e.sendDiscovery(&targets[index], message)
-	}
-	if includeUnicastProbe {
-		if probeErr := e.probeTCPSubnets(message, subnetTargets); probeErr != nil && firstErr == nil {
-			firstErr = probeErr
+		for index := len(targets) - len(subnetTargets); index < len(targets); index++ {
+			// Individual hosts can be offline; a failed unicast probe is expected.
+			_ = e.sendDiscovery(&targets[index], message)
+		}
+		if includeUnicastProbe {
+			if probeErr := e.probeTCPSubnets(message, subnetTargets); probeErr != nil && firstErr == nil {
+				firstErr = probeErr
+			}
 		}
 	}
 	e.mu.Lock()
@@ -770,7 +808,10 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 				return
 			}
 			var response wireMessage
-			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Magic != DiscoveryMagic || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
+			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
+				return
+			}
+			if _, ok := protocolDialectForMessage(response); !ok {
 				return
 			}
 			if response.IP == "" {
@@ -805,11 +846,19 @@ func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {
 }
 
 func (e *Engine) helloMessage(kind string) wireMessage {
+	return e.helloMessageForDialect(kind, protocolDialects[0])
+}
+
+func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wireMessage {
 	e.mu.RLock()
 	identity := e.identity
 	e.mu.RUnlock()
 	profile := e.Profile()
-	return wireMessage{Magic: DiscoveryMagic, Type: kind, Protocol: ProtocolName, Major: ProtocolMajor, Minor: ProtocolMinor, MinMajor: ProtocolMajor, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: []string{"text", "image", "file", "file-progress-v1"}}
+	capabilities := []string{"text", "image", "file"}
+	if dialect.Major >= 2 {
+		capabilities = append(capabilities, "file-progress-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2")
+	}
+	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 }
 
 func (e *Engine) upsertWirePeer(message wireMessage) error {
@@ -823,7 +872,7 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 	if strings.TrimSpace(message.DeviceID) == "" {
 		return fmt.Errorf("设备身份为空")
 	}
-	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, Relation: DiscoveredState, LastSeen: nowString()}
+	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, Relation: DiscoveredState, LastSeen: nowString()}
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
 		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
 			return fmt.Errorf("DEVICE_KEY_CHANGED")
@@ -838,6 +887,11 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 		if peer.AvatarHash == "" {
 			peer.AvatarHash, peer.AvatarVersion = existing.AvatarHash, existing.AvatarVersion
 		}
+		if peer.ProtocolName == "" || peer.ProtocolMajor == 0 {
+			peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, peer.Capabilities = existing.ProtocolName, existing.ProtocolMajor, existing.DiscoveryMagic, existing.Capabilities
+		} else if len(peer.Capabilities) == 0 {
+			peer.Capabilities = append([]string(nil), existing.Capabilities...)
+		}
 	}
 	if err := UpsertPeer(context.Background(), peer); err != nil {
 		return err
@@ -848,6 +902,11 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 		peer.AvatarPath = old.AvatarPath
 		if peer.AvatarHash == "" {
 			peer.AvatarHash, peer.AvatarVersion = old.AvatarHash, old.AvatarVersion
+		}
+		if peer.ProtocolName == "" || peer.ProtocolMajor == 0 {
+			peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, peer.Capabilities = old.ProtocolName, old.ProtocolMajor, old.DiscoveryMagic, old.Capabilities
+		} else if len(peer.Capabilities) == 0 {
+			peer.Capabilities = append([]string(nil), old.Capabilities...)
 		}
 	}
 	peer.Online = true
@@ -860,6 +919,9 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 // friend restoration handshake. TLS health probes use upsertWirePeer directly
 // and therefore remain side-effect free.
 func (e *Engine) handleAnnounce(message wireMessage) error {
+	if !compatibleProtocol(message) {
+		return errors.New("PROTOCOL_UNSUPPORTED")
+	}
 	wasFriend := false
 	if existing, err := e.peer(message.DeviceID); err == nil {
 		wasFriend = existing.Relation == PeerRelation
@@ -876,6 +938,11 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 	return nil
 }
 
+func compatibleProtocol(message wireMessage) bool {
+	_, ok := protocolDialectForMessage(message)
+	return ok
+}
+
 func (e *Engine) maybeSendFriendRestore(peer Peer) {
 	e.mu.Lock()
 	last := e.friendRestoreAt[peer.DeviceID]
@@ -886,11 +953,15 @@ func (e *Engine) maybeSendFriendRestore(peer Peer) {
 	e.friendRestoreAt[peer.DeviceID] = time.Now()
 	e.mu.Unlock()
 	go func() {
-		message, err := e.friendRestoreMessage(peer.DeviceID)
-		if err != nil {
-			return
+		for _, dialect := range protocolDialectsForPeer(peer) {
+			message, err := e.friendRestoreMessageForDialect(peer.DeviceID, dialect)
+			if err != nil {
+				continue
+			}
+			if e.sendToPeerWithDialect(peer, message, dialect) == nil {
+				return
+			}
 		}
-		_ = e.sendToPeer(peer, message)
 	}()
 }
 
@@ -1283,6 +1354,18 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	if err != nil {
 		return err
 	}
+	var lastErr error
+	for _, dialect := range protocolDialectsForPeer(peer) {
+		if err := e.transferFileWithDialect(ctx, peer, message, path, sum, dialect); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message Message, path, sum string, dialect ProtocolDialect) error {
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return err
@@ -1301,7 +1384,7 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 		return err
 	}
 	decoder := json.NewDecoder(conn)
-	if err := writeWire(conn, e.helloMessage("hello")); err != nil {
+	if err := writeWire(conn, e.helloMessageForDialect("hello", dialect)); err != nil {
 		return err
 	}
 	var response wireMessage
@@ -1314,12 +1397,17 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	if response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
-	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1")
+	responseDialect, responseCompatible := protocolDialectForMessage(response)
+	if !responseCompatible {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
+	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1") && responseDialect.Major >= 2
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
 		e.emit("chat:peer-updated", e.Peers())
 	}
-	if err := e.writeFriendRestoreIfNeeded(conn, peer); err != nil {
+	if err := e.writeFriendRestoreIfNeeded(conn, peer, responseDialect); err != nil {
 		return err
 	}
 	if err := writeWire(conn, wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum}); err != nil {
@@ -1431,6 +1519,21 @@ func messageAttachmentSHA(ctx context.Context, message Message) string {
 }
 
 func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
+	var lastErr error
+	for _, dialect := range protocolDialectsForPeer(peer) {
+		if err := e.sendToPeerWithDialect(peer, message, dialect); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("对方握手失败")
+}
+
+func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect ProtocolDialect) error {
 	if peer.IP == "" || peer.Port == 0 {
 		return fmt.Errorf("好友地址不可用")
 	}
@@ -1446,7 +1549,7 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	if err := verifyPeerCertificate(conn, peer); err != nil {
 		return err
 	}
-	if err := writeWire(conn, e.helloMessage("hello")); err != nil {
+	if err := writeWire(conn, e.helloMessageForDialect("hello", dialect)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(conn)
@@ -1460,19 +1563,24 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 	if response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
+	responseDialect, responseCompatible := protocolDialectForMessage(response)
+	if !responseCompatible {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
 		e.emit("chat:peer-updated", e.Peers())
 	}
-	// A known friend may have reinstalled POPChat and lost its local database.
+	// A known friend may have reinstalled FlyQPro and lost its local database.
 	// Restore the relationship over this already authenticated connection before
 	// sending the message. Older clients ignore this optional control message.
 	if message.Type != "friend_restore" {
-		if err := e.writeFriendRestoreIfNeeded(conn, peer); err != nil {
+		if err := e.writeFriendRestoreIfNeeded(conn, peer, responseDialect); err != nil {
 			return err
 		}
 	}
-	if peer.Relation == PeerRelation && peer.AvatarHash != "" && !cachedAvatarMatches(peer) {
+	if peer.Relation == PeerRelation && peer.AvatarHash != "" && hasCapability(response.Capabilities, "avatar-sync-v1") && !cachedAvatarMatches(peer) {
 		_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
 		if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err == nil {
 			var avatar wireMessage
@@ -1511,11 +1619,11 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 // remote app was reinstalled. Signing may be unavailable on a device whose
 // secure key has been reset; in that case the normal message path still gets
 // a chance to report the real transport result.
-func (e *Engine) writeFriendRestoreIfNeeded(conn net.Conn, peer Peer) error {
+func (e *Engine) writeFriendRestoreIfNeeded(conn net.Conn, peer Peer, dialect ProtocolDialect) error {
 	if peer.Relation != PeerRelation {
 		return nil
 	}
-	restore, err := e.friendRestoreMessage(peer.DeviceID)
+	restore, err := e.friendRestoreMessageForDialect(peer.DeviceID, dialect)
 	if err != nil {
 		return nil
 	}
@@ -1529,6 +1637,16 @@ func (e *Engine) touchPeer(deviceID string) {
 	if peer, ok := e.peers[deviceID]; ok {
 		peer.LastSeen = seen
 		peer.Online = true
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) rememberPeerDialect(deviceID string, dialect ProtocolDialect, capabilities []string) {
+	_ = SetPeerProtocol(context.Background(), deviceID, dialect, capabilities)
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, peer.Capabilities = dialect.Name, dialect.Major, dialect.Magic, append([]string(nil), capabilities...)
 		e.peers[deviceID] = peer
 	}
 	e.mu.Unlock()
@@ -1562,6 +1680,18 @@ func (e *Engine) handleOffline(deviceID string) {
 }
 
 func (e *Engine) probePeer(peer Peer) error {
+	var lastErr error
+	for _, dialect := range protocolDialectsForPeer(peer) {
+		if err := e.probePeerWithDialect(peer, dialect); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error {
 	if peer.IP == "" || peer.Port == 0 {
 		return fmt.Errorf("好友地址不可用")
 	}
@@ -1578,7 +1708,7 @@ func (e *Engine) probePeer(peer Peer) error {
 	if err := verifyPeerCertificate(conn, peer); err != nil {
 		return err
 	}
-	hello := e.helloMessage("hello")
+	hello := e.helloMessageForDialect("hello", dialect)
 	hello.Probe = true
 	if err := writeWire(conn, hello); err != nil {
 		return err
@@ -1593,6 +1723,11 @@ func (e *Engine) probePeer(peer Peer) error {
 	if response.Type != "hello_ack" {
 		return fmt.Errorf("对方握手失败")
 	}
+	responseDialect, responseCompatible := protocolDialectForMessage(response)
+	if !responseCompatible {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	e.touchPeer(peer.DeviceID)
 	return nil
 }
@@ -1730,7 +1865,10 @@ func (e *Engine) Profile() Profile { e.mu.RLock(); defer e.mu.RUnlock(); return 
 func (e *Engine) DeviceInfo() DeviceInfo {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.identity.DeviceInfo
+	info := e.identity.DeviceInfo
+	info.ProtocolName = ProtocolName
+	info.ProtocolMajor = ProtocolMajor
+	return info
 }
 
 func (e *Engine) UpdateProfile(profile Profile) {
@@ -1749,11 +1887,16 @@ func (e *Engine) broadcastWithdrawal() {
 }
 
 func (e *Engine) broadcastPresence(kind string) {
-	message := e.helloMessage(kind)
 	targets := broadcastAddresses()
 	targets = append(targets, localSubnetTargets()...)
-	for index := range targets {
-		_ = e.sendDiscovery(&targets[index], message)
+	for _, dialect := range protocolDialects {
+		if kind == "offline" && dialect.Major < 2 {
+			continue
+		}
+		message := e.helloMessageForDialect(kind, dialect)
+		for index := range targets {
+			_ = e.sendDiscovery(&targets[index], message)
+		}
 	}
 }
 

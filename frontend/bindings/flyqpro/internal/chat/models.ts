@@ -104,6 +104,39 @@ export class AttachmentMigrationResult {
     }
 }
 
+export class ClearConversationResult {
+    "deletedMessages": number;
+    "deletedAttachments": number;
+    "deletedFiles": number;
+    "skippedExternalFiles": number;
+
+    /** Creates a new ClearConversationResult instance. */
+    constructor($$source: Partial<ClearConversationResult> = {}) {
+        if (!("deletedMessages" in $$source)) {
+            this["deletedMessages"] = 0;
+        }
+        if (!("deletedAttachments" in $$source)) {
+            this["deletedAttachments"] = 0;
+        }
+        if (!("deletedFiles" in $$source)) {
+            this["deletedFiles"] = 0;
+        }
+        if (!("skippedExternalFiles" in $$source)) {
+            this["skippedExternalFiles"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ClearConversationResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ClearConversationResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ClearConversationResult($$parsedSource as Partial<ClearConversationResult>);
+    }
+}
+
 export class Conversation {
     "conversationId": string;
     "peerDeviceId": string;
@@ -154,6 +187,8 @@ export class DeviceInfo {
     "ip": string;
     "port": number;
     "identityStatus"?: string;
+    "protocolName": string;
+    "protocolMajor": number;
 
     /** Creates a new DeviceInfo instance. */
     constructor($$source: Partial<DeviceInfo> = {}) {
@@ -177,6 +212,12 @@ export class DeviceInfo {
         }
         if (!("port" in $$source)) {
             this["port"] = 0;
+        }
+        if (!("protocolName" in $$source)) {
+            this["protocolName"] = "";
+        }
+        if (!("protocolMajor" in $$source)) {
+            this["protocolMajor"] = 0;
         }
 
         Object.assign(this, $$source);
@@ -434,6 +475,10 @@ export class Peer {
     "certificateFingerprint": string;
     "relation": string;
     "remark": string;
+    "protocolName"?: string;
+    "protocolMajor"?: number;
+    "discoveryMagic"?: string;
+    "capabilities"?: string[];
     "online": boolean;
     "lastSeen": string;
     "updatedAt": string;
@@ -490,7 +535,11 @@ export class Peer {
      * Creates a new Peer instance from a string or object.
      */
     static createFrom($$source: any = {}): Peer {
+        const $$createField17_0 = $$createType2;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("capabilities" in $$parsedSource) {
+            $$parsedSource["capabilities"] = $$createField17_0($$parsedSource["capabilities"]);
+        }
         return new Peer($$parsedSource as Partial<Peer>);
     }
 }

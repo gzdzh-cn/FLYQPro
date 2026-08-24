@@ -18,6 +18,17 @@ func AttachmentPeerDir(root, peerDeviceID string) string {
 	return filepath.Join(root, safeDirectoryName(peerDeviceID))
 }
 
+// IsPathWithin reports whether path is inside root without following a
+// directory traversal outside the configured attachment root.
+func IsPathWithin(path, root string) bool {
+	cleanPath, pathErr := absoluteCleanPath(path)
+	cleanRoot, rootErr := absoluteCleanPath(root)
+	if pathErr != nil || rootErr != nil {
+		return false
+	}
+	return cleanPath != cleanRoot && isWithin(cleanPath, cleanRoot)
+}
+
 func AttachmentTargetPath(root, peerDeviceID, fileName string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("附件保存目录不能为空")
@@ -253,7 +264,7 @@ func validateTargetRoot(target string) error {
 			if !info.IsDir() {
 				return fmt.Errorf("附件保存路径的父目录不是目录")
 			}
-			probe, err := os.CreateTemp(parent, ".popchat-write-test-*")
+			probe, err := os.CreateTemp(parent, ".flyqpro-write-test-*")
 			if err != nil {
 				return fmt.Errorf("附件保存路径不可写: %w", err)
 			}

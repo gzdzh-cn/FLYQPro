@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac }">
+  <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac, 'is-windows': !isMac }">
     <div v-if="isMac" class="window-drag-region" aria-hidden="true"></div>
     <div v-if="isMac" class="mac-window-controls" aria-label="macOS 窗口控制">
       <button type="button" class="mac-control close" title="关闭" @click.stop="closeWindow"></button>
@@ -12,7 +12,7 @@
       </button>
       <nav class="rail-nav">
         <button :class="{ active: section === 'friends' }" @click="enterFriends" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small><b v-if="totalUnreadCount" class="rail-unread-badge">{{ unreadLabel(totalUnreadCount) }}</b></button>
-        <button :class="{ active: section === 'discover' }" @click="section = 'discover'" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button>
+        <button :class="{ active: section === 'discover' }" @click="openDiscover" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button>
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
     </aside>
@@ -20,19 +20,20 @@
       <aside v-if="showPeerInfo && activePeer" class="info-pane info-overlay" @click.stop>
         <div class="info-head"><strong>好友资料</strong></div>
         <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3>{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
-        <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
+        <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>通讯协议<strong>{{ activePeer.protocolName || '未知' }}<template v-if="activePeer.protocolMajor">/{{ activePeer.protocolMajor }}</template></strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
+        <div class="info-danger"><a-button status="danger" long :loading="clearingConversation" @click="clearCurrentConversation">清除聊天记录</a-button><span>只清除本机消息和接收的附件，不会删除好友关系。</span></div>
       </aside>
     </Transition>
 
-    <section v-if="section === 'friends'" class="workspace">
+    <section v-show="section === 'friends'" class="workspace">
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
-        <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="section = 'discover'" title="发现好友"><icon-plus /></button></div>
+        <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="openDiscover" title="发现好友"><icon-plus /></button></div>
         <div class="list-scroll">
           <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId }" @click="selectPeer(peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
             <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}</strong><span>{{ peer.online ? '在线' : '离线' }}</span></div><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b>
           </button>
-          <div v-if="!filteredFriends.length" class="empty-small"><div class="empty-icon">⌁</div><p>还没有好友</p><a-button type="primary" size="small" @click="section = 'discover'">去发现好友</a-button></div>
+          <div v-if="!filteredFriends.length" class="empty-small"><div class="empty-icon">⌁</div><p>还没有好友</p><a-button type="primary" size="small" @click="openDiscover">去发现好友</a-button></div>
         </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('friends', $event)" title="调整列表宽度" />
@@ -59,12 +60,20 @@
           <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
-        <a-modal v-model:visible="imageViewerOpen" :footer="false" :title="imageViewerName" width="min(900px, 90vw)"><div class="image-viewer"><button aria-label="上一张" title="上一张" @click="moveImage(-1)"><icon-left /></button><img v-if="imageViewerSource" :src="imageViewerSource" /><button aria-label="下一张" title="下一张" @click="moveImage(1)"><icon-right /></button></div><div v-if="imageMessages.length > 1" class="image-thumbnails"><button v-for="(image, index) in imageMessages" :key="image.messageId" :class="{ active: index === imageViewerIndex }" :title="image.attachmentName || '图片'" @click="imageViewerIndex = index"><img :src="messagePreviews[image.messageId]" /></button></div></a-modal>
+        <Transition name="image-viewer">
+          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @wheel.prevent="handleImageViewerWheel" @click.self="closeImageViewer">
+            <section class="image-viewer-panel" @click.stop>
+              <header class="image-viewer-head"><strong>{{ imageViewerName }}</strong><button type="button" aria-label="关闭图片查看器" title="关闭" @click="closeImageViewer"><icon-close /></button></header>
+              <div class="image-viewer"><button aria-label="上一张" title="上一张" :disabled="imageViewerIndex <= 0 || imageViewerLoading" @click="moveImage(-1)"><icon-left /></button><div class="image-viewer-image"><img v-if="imageViewerSource" :src="imageViewerSource" :alt="imageViewerName" /><div v-if="imageViewerLoading" class="image-viewer-loading"><icon-loading /></div></div><button aria-label="下一张" title="下一张" :disabled="imageViewerIndex >= imageMessages.length - 1 || imageViewerLoading" @click="moveImage(1)"><icon-right /></button></div>
+              <div v-if="imageMessages.length > 1" class="image-thumbnails"><button v-for="(image, index) in imageMessages" :key="image.messageId" :class="{ active: index === imageViewerIndex }" :title="image.attachmentName || '图片'" :disabled="imageViewerLoading" @click="moveImage(index - imageViewerIndex)"><img :src="messagePreviews[image.messageId]" :alt="image.attachmentName || '图片'" /></button></div>
+            </section>
+          </div>
+        </Transition>
       </main>
-      <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>POPChat</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="section = 'discover'">发现局域网好友</a-button></main>
+      <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>FlyQPro</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="openDiscover">发现局域网好友</a-button></main>
     </section>
 
-    <section v-else-if="section === 'discover'" class="workspace">
+    <section v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
         <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
@@ -80,16 +89,16 @@
       <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" :loading="scanning" :disabled="scanning" @click="refreshPeers">立即扫描</a-button></main>
     </section>
 
-    <section v-else class="settings-shell">
+    <section v-show="section === 'settings'" class="settings-shell">
       <header class="settings-head"><div><h2>设置</h2><p>管理个人资料、网络和应用行为</p></div><div class="settings-tabs"><button :class="{ active: settingsTab === 'general' }" @click="settingsTab = 'general'">通用</button><button :class="{ active: settingsTab === 'network' }" @click="settingsTab = 'network'">网络</button><button :class="{ active: settingsTab === 'device' }" @click="settingsTab = 'device'">设备信息</button><button :class="{ active: settingsTab === 'about' }" @click="settingsTab = 'about'">关于</button></div></header>
       <div class="settings-panel">
-      <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><button class="avatar-upload" type="button" title="更换头像" @click="chooseAvatar"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><span class="avatar-camera"><icon-camera /></span></button><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @mousedown.prevent="saveProfile">保存</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 POPChat</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动点击接收</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><div class="path-actions"><a-button @click="chooseDirectory" :disabled="store.attachmentMigration.active">选择目录</a-button><a-button v-if="!isDefaultPath" @click="resetAttachmentPath" :disabled="store.attachmentMigration.active">重置</a-button></div></div></section></main>
+        <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><button class="avatar-upload" type="button" title="更换头像" @click="chooseAvatar"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><span class="avatar-camera"><icon-camera /></span></button><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @mousedown.prevent="saveProfile">保存</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 FlyQPro</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动点击接收</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><div class="path-actions"><a-button @click="chooseDirectory" :disabled="store.attachmentMigration.active">选择目录</a-button><a-button @click="resetAttachmentPath" :disabled="store.attachmentMigration.active || isDefaultPath" title="恢复为 FlyQPro 默认附件目录">重置</a-button></div></div></section></main>
       <main class="settings-content" v-else-if="settingsTab === 'network'"><section class="setting-card network-card"><div class="network-summary"><div class="network-dot" :class="store.network.status" /><div><strong>{{ store.network.status === 'normal' ? '网络正常' : '网络需要检查' }}</strong><span>{{ store.network.localIps.join('、') || '尚未获取局域网地址' }}</span></div><a-button type="primary" @click="runDiagnostic">网络诊断</a-button></div><div class="diagnostic-list" v-if="diagnostic"><div v-for="item in diagnostic.items" :key="item.name" class="diagnostic-row"><span :class="['diagnostic-icon', item.status]">{{ item.status === 'ok' ? '✓' : '!' }}</span><div><strong>{{ item.name }}</strong><span>{{ item.detail }} · {{ item.status === 'ok' ? '正常' : item.advice }}</span></div></div></div></section><section class="setting-card"><h3>监听信息</h3><div class="setting-line"><div><strong>UDP 发现端口</strong><span>用于局域网设备发现</span></div><code>{{ store.network.discoveryPort }}</code></div><div class="setting-line"><div><strong>TCP 发现端口</strong><span>UDP 不可用时的设备发现</span></div><code>{{ store.network.discoveryPort }}</code></div><div class="setting-line"><div><strong>TCP/TLS 聊天端口</strong><span>用于好友连接和消息传输</span></div><code>{{ store.network.chatPort || '启动中' }}</code></div><div class="setting-line"><div><strong>设备状态</strong><span>{{ store.network.peerCount }} 台已发现，{{ store.network.onlineCount }} 台在线</span></div><a-button @click="refreshPeers">重新扫描</a-button></div></section></main>
-      <main class="settings-content" v-else-if="settingsTab === 'device'"><section class="setting-card device-card"><div class="device-card-head"><div><span class="device-eyebrow">本机身份</span><h3>设备信息</h3><p>用于局域网发现与加密连接的本机凭据</p></div><span class="device-badge"><i />本机</span></div><div class="device-fields"><label><span class="device-field-label"><i class="device-field-icon">⌘</i>平台</span><strong>{{ deviceInfo?.platform || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">▣</i>操作系统</span><strong>{{ deviceInfo?.osVersion || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">ID</i>设备 ID</span><strong class="mono">{{ deviceInfo?.deviceId || '尚未生成' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">✓</i>证书指纹</span><strong class="mono">{{ deviceInfo?.certificateFingerprint || '尚未生成' }}</strong></label></div><div class="device-card-foot">设备身份信息仅保存在本机，用于验证局域网连接安全性。</div></section></main>
-        <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2>POPChat</h2><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>{{ appVersion || '未知' }}</strong></span><span>协议版本<strong>POPChat/1.0</strong></span><span>数据存储<strong>本地 SQLite</strong></span><div class="about-link-row"><span>开源仓库</span><button type="button" class="repo-link" title="在浏览器中打开开源仓库" @click="openRepository">github.com/gzdzh-cn/POPChat <icon-export /></button></div></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
+        <main class="settings-content" v-else-if="settingsTab === 'device'"><section class="setting-card device-card"><div class="device-card-head"><div><span class="device-eyebrow">本机身份</span><h3>设备信息</h3><p>用于局域网发现与加密连接的本机凭据</p></div><span class="device-badge"><i />本机</span></div><div class="device-fields"><label><span class="device-field-label"><i class="device-field-icon">⌘</i>平台</span><strong>{{ deviceInfo?.platform || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">▣</i>操作系统</span><strong>{{ deviceInfo?.osVersion || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">◈</i>通讯协议</span><strong>{{ deviceInfo?.protocolName || 'dzhgo' }}/{{ deviceInfo?.protocolMajor || 2 }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">ID</i>设备 ID</span><strong class="mono">{{ deviceInfo?.deviceId || '尚未生成' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">✓</i>证书指纹</span><strong class="mono">{{ deviceInfo?.certificateFingerprint || '尚未生成' }}</strong></label></div><div class="device-card-foot">设备身份信息仅保存在本机，用于验证局域网连接安全性。</div></section></main>
+        <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2>FlyQPro</h2><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>{{ appVersion || '未知' }}</strong></span><span>协议版本<strong>{{ deviceInfo?.protocolName || 'dzhgo' }}/{{ deviceInfo?.protocolMajor || 2 }}.0</strong></span><span>数据存储<strong>本地 SQLite</strong></span><div class="about-link-row"><span>开源仓库</span><button type="button" class="repo-link" title="在浏览器中打开开源仓库" @click="openRepository">github.com/gzdzh-cn/FlyQPro <icon-export /></button></div></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
       </div>
     </section>
-    <a-modal v-model:visible="termsVisible" title="使用条款与隐私说明" hide-cancel><p>POPChat 仅在局域网内进行点对点通信。聊天记录、设备信息和附件保存在本机，不上传云端。请确认你有权在当前网络中发现和联系其他设备。</p></a-modal>
+    <a-modal v-model:visible="termsVisible" title="使用条款与隐私说明" hide-cancel><p>FlyQPro 仅在局域网内进行点对点通信。聊天记录、设备信息和附件保存在本机，不上传云端。请确认你有权在当前网络中发现和联系其他设备。</p></a-modal>
     <div v-if="store.attachmentMigration.active || migrationResultVisible" class="migration-lock" @click.stop>
       <section class="migration-card" role="dialog" aria-modal="true" aria-label="附件迁移进度">
         <icon-loading v-if="store.attachmentMigration.active" class="migration-spinner" />
@@ -112,7 +121,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { Browser, System, Window } from '@wailsio/runtime'
-import { ChatService } from '/#/popchat/internal/service'
+import { ChatService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
 import type { FriendRequest, Peer } from '@/store/modules/chat/types'
 
@@ -134,12 +143,16 @@ const isMac = ref(false)
 const editProfile = reactive({ ...store.profile })
 const groups = reactive({ requests: true, discovered: true })
 function storedSize(key: string, fallback: number, min: number, max: number) {
-  const value = Number(localStorage.getItem(key))
-  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
+	const legacyKey = key.replace('flyqpro.', 'popchat.')
+	const stored = localStorage.getItem(key)
+	const legacy = stored === null ? localStorage.getItem(legacyKey) : null
+	if (stored === null && legacy !== null) localStorage.setItem(key, legacy)
+	const value = Number(stored ?? legacy)
+	return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
-const friendsWidth = ref(storedSize('popchat.friendsWidth', 290, 220, 440))
-const discoveryWidth = ref(storedSize('popchat.discoveryWidth', 320, 240, 460))
-const composerHeight = ref(storedSize('popchat.composerHeight', 158, 120, 320))
+const friendsWidth = ref(storedSize('flyqpro.friendsWidth', 290, 220, 440))
+const discoveryWidth = ref(storedSize('flyqpro.discoveryWidth', 320, 240, 460))
+const composerHeight = ref(storedSize('flyqpro.composerHeight', 158, 120, 320))
 const emojiOpen = ref(false)
 const emojis = ['😀', '😂', '😍', '👍', '🎉', '🤔', '😭', '😎', '❤️', '👏', '🙏', '🔥']
 const pendingImages = ref<string[]>([])
@@ -147,7 +160,10 @@ const messagePreviews = reactive<Record<string, string>>({})
 const retryingMessages = reactive<Record<string, boolean>>({})
 const imageViewerOpen = ref(false)
 const imageViewerIndex = ref(0)
+const imageViewerSource = ref('')
+const imageViewerLoading = ref(false)
 const peerRemark = ref('')
+const clearingConversation = ref(false)
 const messageScroll = ref<HTMLElement>()
 const newMessageCount = ref(0)
 const userNearBottom = ref(true)
@@ -160,6 +176,9 @@ let suppressScrollReadUntil = 0
 let scrollScheduleFrame = 0
 let scrollAnimationFrame = 0
 let scrollAnimationToken = 0
+let bottomSettleToken = 0
+let imageViewerLoadToken = 0
+let imageWheelTimer = 0
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -173,7 +192,6 @@ const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? store.transferProgress[message.attachmentId] : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
 const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && isImageMessage(message) && messagePreviews[message.messageId]))
-const imageViewerSource = computed(() => messagePreviews[imageMessages.value[imageViewerIndex.value]?.messageId] || '')
 const imageViewerName = computed(() => imageMessages.value[imageViewerIndex.value]?.attachmentName || '图片预览')
 const migrationPercent = computed(() => store.attachmentMigration.total ? Math.min(100, Math.round(store.attachmentMigration.current / store.attachmentMigration.total * 100)) : 0)
 const isDefaultPath = computed(() => !editProfile.fileSavePath || editProfile.fileSavePath === defaultAttachmentPath.value)
@@ -188,11 +206,12 @@ function messageStatusText(status: string, kind = 'text') { if (status === 'sent
 function unreadCount(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId)?.unreadCount || 0 }
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
 function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
-function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('popchat-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('popchat-dark') } }
+function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
-function chatScrollKey(deviceId: string) { return `popchat.chatScroll.v2.${deviceId}` }
+function chatScrollKey(deviceId: string) { return `flyqpro.chatScroll.v2.${deviceId}` }
 function legacyChatScrollKey(deviceId: string) { return `popchat.chatScroll.${deviceId}` }
 function saveActiveScrollPosition() {
+  bottomSettleToken++
   const peer = activePeer.value
   const el = messageScroll.value
   if (!peer || !el) return
@@ -223,15 +242,76 @@ async function restoreChatScrollPosition(deviceId: string) {
     if (userNearBottom.value) localStorage.removeItem(chatScrollKey(deviceId))
     return
   }
-  // The conversation is mounted again when returning from Discover. Keep
-  // correcting for a few frames so the latest message remains visible even
-  // while Vue is laying out message rows and image previews.
-  for (let frame = 0; frame < 3; frame++) {
-    scrollToBottom(false, 'instant')
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  // No saved position means that the latest message must be visible. Set it
+  // immediately, then keep correcting while rows, fonts and image previews
+  // finish changing the scroll height.
+  userNearBottom.value = true
+  el.scrollTop = el.scrollHeight
+  void settleChatBottom(deviceId)
+}
+
+function clearCurrentConversation() {
+  const peer = activePeer.value
+  if (!peer || clearingConversation.value) return
+  Modal.confirm({
+    title: '清除聊天记录',
+    content: `确定清除与“${peer.remark || peer.nickname}”的全部本地聊天记录、图片和文件吗？此操作不可恢复，但不会删除好友关系。`,
+    okText: '清除记录',
+    cancelText: '取消',
+    okButtonProps: { status: 'danger' },
+    onOk: async () => {
+      if (clearingConversation.value) return
+      clearingConversation.value = true
+      const peerDeviceId = peer.deviceId
+      try {
+        const result = await ChatService.ClearConversation(peerDeviceId)
+        imageViewerOpen.value = false
+        imageViewerLoading.value = false
+        imageViewerLoadToken++
+        const removedMessages = store.clearConversationLocal(peerDeviceId)
+        removedMessages.forEach((message: any) => {
+          delete messagePreviews[message.messageId]
+          if (message.attachmentId) delete store.transferProgress[message.attachmentId]
+        })
+        newMessageCount.value = 0
+        userNearBottom.value = true
+        localStorage.removeItem(chatScrollKey(peerDeviceId))
+        showPeerInfo.value = false
+        const skipped = result?.skippedExternalFiles ? `，保留 ${result.skippedExternalFiles} 个本机原始文件` : ''
+        Message.success(`聊天记录已清除${skipped}`)
+      } catch (error: any) {
+        Message.error(error?.message || '清除聊天记录失败')
+        throw error
+      } finally {
+        clearingConversation.value = false
+      }
+    },
+  })
+}
+async function settleChatBottom(deviceId: string) {
+  const token = ++bottomSettleToken
+  const waitFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  const correct = () => {
+    const el = messageScroll.value
+    if (!el || activePeer.value?.deviceId !== deviceId || !userNearBottom.value) return false
+    el.scrollTop = el.scrollHeight
+    return true
+  }
+  for (let frame = 0; frame < 12; frame++) {
+    await waitFrame()
+    if (token !== bottomSettleToken || !correct()) return
+  }
+  // Attachment previews can arrive after the initial Vue layout. These two
+  // bounded checkpoints close the small gap caused by that late reflow
+  // without keeping a permanent observer or taking control from the user.
+  for (const delay of [100, 220]) {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
+    if (token !== bottomSettleToken || !correct()) return
   }
 }
-async function loadConversation(peer: Peer, markRead: boolean) {
+async function loadConversation(peer: Peer, markRead: boolean, preserveViewport = false) {
+  const previousPeerId = activePeer.value?.deviceId
+  const cachedMessages = Boolean(store.messages[`conv-${peer.deviceId}`])
   saveActiveScrollPosition()
   store.selectPeer(peer.deviceId)
   showPeerInfo.value = false
@@ -242,18 +322,26 @@ async function loadConversation(peer: Peer, markRead: boolean) {
     const id = await ChatService.EnsureConversation(peer.deviceId)
     const messages = await ChatService.ListMessages(id)
     store.messages[id] = messages
-    await restoreChatScrollPosition(peer.deviceId)
+    const shouldRestore = !(preserveViewport && previousPeerId === peer.deviceId && cachedMessages)
+    if (shouldRestore) await restoreChatScrollPosition(peer.deviceId)
     if (markRead) await ChatService.MarkConversationRead(peer.deviceId)
   } catch { /* the conversation can still be restored from the live store */ }
 }
 function selectPeer(peer: Peer) { void loadConversation(peer, true) }
+function openDiscover() {
+  if (store.attachmentMigration.active) return
+  saveActiveScrollPosition()
+  section.value = 'discover'
+}
 function enterFriends() {
   if (store.attachmentMigration.active) return
+  saveActiveScrollPosition()
+  const previousPeerId = activePeer.value?.deviceId
   section.value = 'friends'
   const selected = activePeer.value && store.friends.some((peer) => peer.deviceId === activePeer.value?.deviceId) ? activePeer.value : store.friends[0]
-  if (selected) void loadConversation(selected, false)
+  if (selected) void loadConversation(selected, false, previousPeerId === selected.deviceId)
 }
-function openSettings(tab: string) { if (store.attachmentMigration.active) return; section.value = 'settings'; settingsTab.value = tab }
+function openSettings(tab: string) { if (store.attachmentMigration.active) return; saveActiveScrollPosition(); section.value = 'settings'; settingsTab.value = tab }
 async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
 function syncNickname() { editProfile.nickname = editProfile.nickname.trim() }
 async function toggleStartup() { try { store.profile = await ChatService.SetLaunchAtStartup(editProfile.launchAtStartup); Object.assign(editProfile, store.profile) } catch (error: any) { editProfile.launchAtStartup = !editProfile.launchAtStartup; Message.error(error?.message || '设置失败') } }
@@ -321,9 +409,69 @@ async function loadMessagePreview(message: any) {
     if (shouldFollowBottom && activePeer.value?.deviceId === peerDeviceId) scheduleScrollToBottom(false, 'instant')
   } catch { /* pending remote image; clicking the image retries */ }
 }
-async function openImage(message: any) { await loadMessagePreview(message); const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId); if (index >= 0) { imageViewerIndex.value = index; imageViewerOpen.value = true } else { Message.warning('图片仍在接收或暂时无法读取') } }
-function moveImage(direction: number) { const count = imageMessages.value.length; if (count) imageViewerIndex.value = (imageViewerIndex.value + direction + count) % count }
-function handleImageViewerKey(event: KeyboardEvent) { if (!imageViewerOpen.value) return; if (event.key === 'ArrowLeft') { event.preventDefault(); moveImage(-1) } if (event.key === 'ArrowRight') { event.preventDefault(); moveImage(1) } if (event.key === 'Escape') imageViewerOpen.value = false }
+function preloadViewerImage(index: number): Promise<boolean> {
+  const source = messagePreviews[imageMessages.value[index]?.messageId || '']
+  if (!source) return Promise.resolve(false)
+  const token = ++imageViewerLoadToken
+  imageViewerLoading.value = true
+  return new Promise((resolve) => {
+    const image = new Image()
+    const finish = (loaded: boolean) => {
+      if (token !== imageViewerLoadToken) {
+        resolve(false)
+        return
+      }
+      imageViewerLoading.value = false
+      if (loaded) imageViewerSource.value = source
+      resolve(loaded)
+    }
+    image.onload = () => finish(true)
+    image.onerror = () => finish(false)
+    image.src = source
+  })
+}
+async function openImage(message: any) {
+  await loadMessagePreview(message)
+  const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId)
+  if (index < 0) {
+    Message.warning('图片仍在接收或暂时无法读取')
+    return
+  }
+  saveActiveScrollPosition()
+  imageViewerIndex.value = index
+  if (await preloadViewerImage(index)) imageViewerOpen.value = true
+  else Message.warning('图片暂时无法读取')
+}
+async function moveImage(direction: number) {
+  if (imageViewerLoading.value) return
+  const count = imageMessages.value.length
+  if (!count) return
+  const target = Math.max(0, Math.min(count - 1, imageViewerIndex.value + direction))
+  if (target === imageViewerIndex.value) return
+  if (await preloadViewerImage(target)) imageViewerIndex.value = target
+}
+function closeImageViewer() {
+  imageViewerOpen.value = false
+  imageViewerLoading.value = false
+  imageViewerLoadToken++
+  if (imageWheelTimer) {
+    window.clearTimeout(imageWheelTimer)
+    imageWheelTimer = 0
+  }
+}
+function handleImageViewerWheel(event: WheelEvent) {
+  if (!imageViewerOpen.value) return
+  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+  if (Math.abs(delta) < 8 || imageWheelTimer) return
+  imageWheelTimer = window.setTimeout(() => { imageWheelTimer = 0 }, 180)
+  void moveImage(delta > 0 ? 1 : -1)
+}
+function handleImageViewerKey(event: KeyboardEvent) {
+  if (!imageViewerOpen.value) return
+  if (event.key === 'ArrowLeft') { event.preventDefault(); void moveImage(-1) }
+  if (event.key === 'ArrowRight') { event.preventDefault(); void moveImage(1) }
+  if (event.key === 'Escape') { event.preventDefault(); closeImageViewer() }
+}
 function unlockNotificationAudio() {
   if (audioUnlocked) return
   try {
@@ -409,7 +557,7 @@ function markActiveRead() { if (!conversationVisible.value || !activePeer.value)
 function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (activePeer.value) { if (userNearBottom.value) localStorage.removeItem(chatScrollKey(activePeer.value.deviceId)); else localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, el.scrollTop))) } if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false }
 function cancelScrollAnimation() { if (scrollScheduleFrame) { cancelAnimationFrame(scrollScheduleFrame); scrollScheduleFrame = 0 }; if (scrollAnimationFrame) { cancelAnimationFrame(scrollAnimationFrame); scrollAnimationFrame = 0 }; scrollAnimationToken++ }
-function cancelAutoScroll() { cancelScrollAnimation() }
+function cancelAutoScroll() { cancelScrollAnimation(); bottomSettleToken++ }
 function scrollToBottom(preserveUnread = false, mode: 'instant' | 'animated' = 'instant') {
   const el = messageScroll.value
   if (!el) return
@@ -445,10 +593,10 @@ function scheduleScrollToBottom(preserveUnread = false, mode: 'instant' | 'anima
 }
 function startResize(kind: 'friends' | 'discover' | 'composer', event: PointerEvent) { resizeState = { kind, startX: event.clientX, startY: event.clientY, startValue: kind === 'friends' ? friendsWidth.value : kind === 'discover' ? discoveryWidth.value : composerHeight.value }; window.addEventListener('pointermove', onResize); window.addEventListener('pointerup', stopResize) }
 function onResize(event: PointerEvent) { if (!resizeState) return; if (resizeState.kind === 'friends') friendsWidth.value = Math.min(440, Math.max(220, resizeState.startValue + event.clientX - resizeState.startX)); else if (resizeState.kind === 'discover') discoveryWidth.value = Math.min(460, Math.max(240, resizeState.startValue + event.clientX - resizeState.startX)); else composerHeight.value = Math.min(320, Math.max(120, resizeState.startValue - event.clientY + resizeState.startY)) }
-function stopResize() { if (!resizeState) return; localStorage.setItem('popchat.friendsWidth', String(friendsWidth.value)); localStorage.setItem('popchat.discoveryWidth', String(discoveryWidth.value)); localStorage.setItem('popchat.composerHeight', String(composerHeight.value)); resizeState = undefined; window.removeEventListener('pointermove', onResize); window.removeEventListener('pointerup', stopResize) }
+function stopResize() { if (!resizeState) return; localStorage.setItem('flyqpro.friendsWidth', String(friendsWidth.value)); localStorage.setItem('flyqpro.discoveryWidth', String(discoveryWidth.value)); localStorage.setItem('flyqpro.composerHeight', String(composerHeight.value)); resizeState = undefined; window.removeEventListener('pointermove', onResize); window.removeEventListener('pointerup', stopResize) }
 async function savePeerRemark() { if (!activePeer.value || peerRemark.value === activePeer.value.remark) return; try { await ChatService.SetPeerRemark(activePeer.value.deviceId, peerRemark.value.trim()); const peer = store.peers.find((item) => item.deviceId === activePeer.value?.deviceId); if (peer) peer.remark = peerRemark.value.trim() } catch (error: any) { Message.error(error?.message || '备注保存失败') } }
 async function runDiagnostic() { diagnostic.value = await ChatService.RunNetworkDiagnostic() }
-function openRepository() { void Browser.OpenURL('https://github.com/gzdzh-cn/POPChat') }
+function openRepository() { void Browser.OpenURL('https://github.com/gzdzh-cn/FlyQPro') }
 function minimiseWindow() { Window.Minimise() }
 async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
 function closeWindow() { Window.Close() }
@@ -481,7 +629,7 @@ onMounted(async () => {
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); window.removeEventListener('keydown', handleImageViewerKey); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; closeImageViewer(); window.removeEventListener('keydown', handleImageViewerKey); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -490,7 +638,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .profile-button, .rail-nav button, .rail-settings { border: 0; background: transparent; color: inherit; cursor: pointer; border-radius: 14px; }
 .profile-button { padding: 0; margin-bottom: 28px; }.rail-nav { display: flex; flex-direction: column; gap: 10px; align-items: center; flex: 1; }.rail-nav button, .rail-settings { width: 54px; height: 58px; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }.rail-nav button span, .rail-settings span, .rail-nav button svg, .rail-settings svg { font-size: 22px; width: 22px; height: 22px; line-height: 22px; }.rail-nav small, .rail-settings small { font-size: 11px; }.rail-nav button.active, .rail-settings.active { color: #fff; background: #2e5bba; }.rail-nav b { position: absolute; top: 2px; right: 5px; min-width: 16px; height: 16px; border-radius: 9px; background: #f53f3f; color: #fff; font-size: 10px; line-height: 16px; }
 .avatar { width: 44px; height: 44px; border-radius: 14px; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; position: relative; flex: 0 0 auto; }.avatar.large { width: 46px; height: 46px; border-radius: 15px; }.avatar.huge { width: 92px; height: 92px; border-radius: 28px; font-size: 30px; }.avatar i { position: absolute; width: 10px; height: 10px; border: 2px solid #fff; border-radius: 50%; background: #86909c; bottom: -1px; right: -1px; }.avatar i.online { background: #00b42a; }
-.workspace { flex: 1; display: flex; min-width: 0; }.list-pane { width: 290px; flex: 0 0 290px; background: #fff; border-right: 1px solid #e5e6eb; display: flex; flex-direction: column; }.pane-title { padding: 26px 20px 18px; display: flex; justify-content: space-between; align-items: center; }.pane-title div { display: flex; align-items: baseline; gap: 8px; }.pane-title strong { font-size: 22px; }.pane-title span { color: #86909c; font-size: 13px; }.icon-button { border: 0; background: transparent; cursor: pointer; color: #4e5969; font-size: 22px; }.search { margin: 0 16px 14px; width: calc(100% - 32px); }.list-scroll { flex: 1; overflow: auto; padding: 0 10px 20px; }.peer-row, .request-row { width: 100%; border: 0; background: transparent; text-align: left; display: flex; align-items: center; gap: 12px; padding: 11px 10px; border-radius: 12px; cursor: pointer; }.peer-row:hover, .request-row:hover, .peer-row.selected, .request-row.selected { background: #f2f5ff; }.peer-copy, .request-row > div:last-child { display: flex; flex-direction: column; gap: 4px; min-width: 0; }.peer-copy strong, .request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.peer-copy span, .request-row span { font-size: 12px; color: #86909c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.empty-small { text-align: center; color: #86909c; padding: 90px 20px; }.empty-icon, .brand-mark { font-size: 42px; color: #4e7cff; }.conversation, .detail-pane, .blank-state { flex: 1; min-width: 0; display: flex; flex-direction: column; }.conversation-head { height: 76px; flex: 0 0 76px; background: #fff; border-bottom: 1px solid #e5e6eb; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; }.head-peer { display: flex; gap: 12px; align-items: center; }.head-peer > div:last-child { display: flex; flex-direction: column; gap: 4px; }.head-peer span { font-size: 12px; color: #86909c; }.onlineText { color: #00b42a !important; }.message-scroll { flex: 1; overflow: auto; padding: 28px 12%; }.message-line { display: flex; margin: 12px 0; }.message-line.mine { justify-content: flex-end; }.message-bubble { max-width: 65%; padding: 11px 15px; border-radius: 16px 16px 16px 4px; background: #fff; box-shadow: 0 4px 16px rgba(28, 49, 93, .05); white-space: pre-wrap; line-height: 1.55; }.message-line.mine .message-bubble { color: #fff; background: #3767e8; border-radius: 16px 16px 4px 16px; }.message-bubble small { display: block; opacity: .65; font-size: 10px; margin-top: 5px; }.conversation-empty, .blank-state { align-items: center; justify-content: center; color: #86909c; }.conversation-empty h3, .conversation-empty p { margin: 4px; }.blank-state h2, .blank-state p { margin: 7px; }.composer { padding: 12px 24px 18px; background: #fff; border-top: 1px solid #e5e6eb; }.composer-tools { height: 28px; display: flex; align-items: center; gap: 10px; }.composer-tools button { border: 0; background: transparent; color: #4e5969; font-size: 18px; cursor: pointer; }.picked-file { color: #4e7cff; font-size: 12px; }.composer textarea { display: block; width: 100%; min-height: 68px; border: 0; outline: none; resize: none; font-size: 14px; padding: 8px 0; box-sizing: border-box; }.composer-foot { display: flex; align-items: center; justify-content: space-between; color: #86909c; font-size: 12px; }.info-pane { width: 280px; flex: 0 0 280px; background: #fff; border-left: 1px solid #e5e6eb; padding: 24px 20px; }.info-head { display: flex; justify-content: space-between; }.info-profile { text-align: center; padding: 30px 0 24px; }.info-profile .avatar { margin: auto; }.info-profile h3 { margin: 12px 0 4px; }.info-profile span { color: #00b42a; font-size: 12px; }.info-fields, .basic-info, .device-fields { display: flex; flex-direction: column; gap: 18px; }.info-fields label, .basic-info label, .device-fields label { color: #86909c; font-size: 12px; display: flex; flex-direction: column; gap: 5px; }.info-fields strong, .basic-info strong, .device-fields strong { color: #1d2129; font-weight: 500; word-break: break-all; }.mono { font-family: monospace; font-size: 11px; }.discovery-pane { width: 320px; flex-basis: 320px; }.group-title { border: 0; background: transparent; display: flex; justify-content: space-between; width: 100%; padding: 14px 20px 7px; cursor: pointer; color: #4e5969; font-weight: 600; }.group-title b { background: #e8f3ff; color: #165dff; padding: 1px 7px; border-radius: 10px; }.request-row { padding: 12px 18px; }.detail-pane { overflow: auto; align-items: center; justify-content: center; padding: 40px; box-sizing: border-box; }.detail-card { width: min(440px, 100%); background: #fff; border-radius: 20px; padding: 42px; box-sizing: border-box; text-align: center; box-shadow: 0 16px 50px rgba(32, 56, 99, .08); }.detail-card .avatar { margin: auto; }.detail-card h2 { margin: 18px 0 8px; }.detail-card p { color: #4e5969; line-height: 1.6; }.detail-actions { display: flex; justify-content: center; gap: 12px; margin-top: 26px; }.subtle { color: #86909c; font-size: 12px; }.tags { display: flex; justify-content: center; gap: 8px; margin: 16px; }.basic-info { text-align: left; padding: 18px 0 25px; }.settings-shell { flex: 1; overflow: auto; }.settings-head { padding: 30px 52px 0; background: #fff; }.settings-head h2 { margin: 0 0 6px; font-size: 26px; }.settings-head p { color: #86909c; margin: 0 0 24px; }.settings-tabs { display: flex; gap: 25px; }.settings-tabs button { border: 0; background: transparent; padding: 12px 2px; color: #86909c; cursor: pointer; border-bottom: 2px solid transparent; }.settings-tabs button.active { color: #165dff; border-color: #165dff; }.settings-content { max-width: 900px; padding: 28px 52px 60px; }.setting-card { background: #fff; border-radius: 16px; padding: 24px 28px; margin-bottom: 16px; }.setting-card h3 { margin: 0 0 16px; }.profile-card, .device-card { display: flex; gap: 28px; align-items: center; }.profile-edit { flex: 1; }.profile-edit p { color: #86909c; font-size: 12px; }.setting-line { min-height: 58px; border-top: 1px solid #f2f3f5; display: flex; align-items: center; justify-content: space-between; gap: 20px; }.setting-line > div { display: flex; flex-direction: column; gap: 5px; }.setting-line span { color: #86909c; font-size: 12px; }.path { max-width: 550px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.network-summary { display: flex; align-items: center; gap: 14px; }.network-summary > div:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 5px; }.network-summary span { color: #86909c; font-size: 12px; }.network-dot { width: 12px; height: 12px; border-radius: 50%; background: #00b42a; }.network-dot.warning { background: #ff7d00; }.network-dot.error { background: #f53f3f; }.diagnostic-list { margin-top: 24px; border-top: 1px solid #f2f3f5; }.diagnostic-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid #f2f3f5; }.diagnostic-icon { width: 20px; height: 20px; border-radius: 50%; text-align: center; line-height: 20px; color: #fff; background: #00b42a; }.diagnostic-icon.error { background: #f53f3f; }.diagnostic-row div { display: flex; flex-direction: column; gap: 3px; }.diagnostic-row span:last-child { font-size: 12px; color: #86909c; }.about-card { text-align: center; padding: 60px; }.about-card .brand-mark { font-size: 60px; }.about-rows { max-width: 380px; margin: 25px auto; text-align: left; }.about-rows span { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f2f3f5; color: #86909c; }.about-rows strong { color: #1d2129; font-weight: 500; }
+.workspace { flex: 1; display: flex; min-width: 0; }.list-pane { width: 290px; flex: 0 0 290px; background: #fff; border-right: 1px solid #e5e6eb; display: flex; flex-direction: column; }.pane-title { padding: 26px 20px 18px; display: flex; justify-content: space-between; align-items: center; }.pane-title div { display: flex; align-items: baseline; gap: 8px; }.pane-title strong { font-size: 22px; }.pane-title span { color: #86909c; font-size: 13px; }.icon-button { border: 0; background: transparent; cursor: pointer; color: #4e5969; font-size: 22px; }.search { margin: 0 16px 14px; width: calc(100% - 32px); }.list-scroll { flex: 1; overflow: auto; padding: 0 0 20px; }.peer-row, .request-row { width: 100%; box-sizing: border-box; border: 0; background: transparent; text-align: left; display: flex; align-items: center; gap: 12px; padding: 11px 20px; border-radius: 0; cursor: pointer; }.peer-row:hover, .request-row:hover, .peer-row.selected, .request-row.selected { background: #f2f5ff; }.peer-copy, .request-row > div:last-child { display: flex; flex-direction: column; gap: 4px; min-width: 0; }.peer-copy strong, .request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.peer-copy span, .request-row span { font-size: 12px; color: #86909c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.empty-small { text-align: center; color: #86909c; padding: 90px 20px; }.empty-icon, .brand-mark { font-size: 42px; color: #4e7cff; }.conversation, .detail-pane, .blank-state { flex: 1; min-width: 0; display: flex; flex-direction: column; }.conversation-head { height: 76px; flex: 0 0 76px; background: #fff; border-bottom: 1px solid #e5e6eb; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; }.head-peer { display: flex; gap: 12px; align-items: center; }.head-peer > div:last-child { display: flex; flex-direction: column; gap: 4px; }.head-peer span { font-size: 12px; color: #86909c; }.onlineText { color: #00b42a !important; }.message-scroll { flex: 1; overflow: auto; padding: 28px 12%; }.message-line { display: flex; margin: 12px 0; }.message-line.mine { justify-content: flex-end; }.message-bubble { max-width: 65%; padding: 11px 15px; border-radius: 16px 16px 16px 4px; background: #fff; box-shadow: 0 4px 16px rgba(28, 49, 93, .05); white-space: pre-wrap; line-height: 1.55; }.message-line.mine .message-bubble { color: #fff; background: #3767e8; border-radius: 16px 16px 4px 16px; }.message-bubble small { display: block; opacity: .65; font-size: 10px; margin-top: 5px; }.conversation-empty, .blank-state { align-items: center; justify-content: center; color: #86909c; }.conversation-empty h3, .conversation-empty p { margin: 4px; }.blank-state h2, .blank-state p { margin: 7px; }.composer { padding: 12px 24px 18px; background: #fff; border-top: 1px solid #e5e6eb; }.composer-tools { height: 28px; display: flex; align-items: center; gap: 10px; }.composer-tools button { border: 0; background: transparent; color: #4e5969; font-size: 18px; cursor: pointer; }.picked-file { color: #4e7cff; font-size: 12px; }.composer textarea { display: block; width: 100%; min-height: 68px; border: 0; outline: none; resize: none; font-size: 14px; padding: 8px 0; box-sizing: border-box; }.composer-foot { display: flex; align-items: center; justify-content: space-between; color: #86909c; font-size: 12px; }.info-pane { width: 280px; flex: 0 0 280px; background: #fff; border-left: 1px solid #e5e6eb; padding: 24px 20px; }.info-head { display: flex; justify-content: space-between; }.info-profile { text-align: center; padding: 30px 0 24px; }.info-profile .avatar { margin: auto; }.info-profile h3 { margin: 12px 0 4px; }.info-profile span { color: #00b42a; font-size: 12px; }.info-fields, .basic-info, .device-fields { display: flex; flex-direction: column; gap: 18px; }.info-fields label, .basic-info label, .device-fields label { color: #86909c; font-size: 12px; display: flex; flex-direction: column; gap: 5px; }.info-fields strong, .basic-info strong, .device-fields strong { color: #1d2129; font-weight: 500; word-break: break-all; }.mono { font-family: monospace; font-size: 11px; }.discovery-pane { width: 320px; flex-basis: 320px; }.group-title { border: 0; background: transparent; display: flex; justify-content: space-between; width: 100%; padding: 14px 20px 7px; cursor: pointer; color: #4e5969; font-weight: 600; }.group-title b { background: #e8f3ff; color: #165dff; padding: 1px 7px; border-radius: 10px; }.request-row { padding: 12px 18px; }.detail-pane { overflow: auto; align-items: center; justify-content: center; padding: 40px; box-sizing: border-box; }.detail-card { width: min(440px, 100%); background: #fff; border-radius: 20px; padding: 42px; box-sizing: border-box; text-align: center; box-shadow: 0 16px 50px rgba(32, 56, 99, .08); }.detail-card .avatar { margin: auto; }.detail-card h2 { margin: 18px 0 8px; }.detail-card p { color: #4e5969; line-height: 1.6; }.detail-actions { display: flex; justify-content: center; gap: 12px; margin-top: 26px; }.subtle { color: #86909c; font-size: 12px; }.tags { display: flex; justify-content: center; gap: 8px; margin: 16px; }.basic-info { text-align: left; padding: 18px 0 25px; }.settings-shell { flex: 1; overflow: auto; }.settings-head { padding: 30px 52px 0; background: #fff; }.settings-head h2 { margin: 0 0 6px; font-size: 26px; }.settings-head p { color: #86909c; margin: 0 0 24px; }.settings-tabs { display: flex; gap: 25px; }.settings-tabs button { border: 0; background: transparent; padding: 12px 2px; color: #86909c; cursor: pointer; border-bottom: 2px solid transparent; }.settings-tabs button.active { color: #165dff; border-color: #165dff; }.settings-content { max-width: 900px; padding: 28px 52px 60px; }.setting-card { background: #fff; border-radius: 16px; padding: 24px 28px; margin-bottom: 16px; }.setting-card h3 { margin: 0 0 16px; }.profile-card, .device-card { display: flex; gap: 28px; align-items: center; }.profile-edit { flex: 1; }.profile-edit p { color: #86909c; font-size: 12px; }.setting-line { min-height: 58px; border-top: 1px solid #f2f3f5; display: flex; align-items: center; justify-content: space-between; gap: 20px; }.setting-line > div { display: flex; flex-direction: column; gap: 5px; }.setting-line span { color: #86909c; font-size: 12px; }.path { max-width: 550px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.network-summary { display: flex; align-items: center; gap: 14px; }.network-summary > div:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 5px; }.network-summary span { color: #86909c; font-size: 12px; }.network-dot { width: 12px; height: 12px; border-radius: 50%; background: #00b42a; }.network-dot.warning { background: #ff7d00; }.network-dot.error { background: #f53f3f; }.diagnostic-list { margin-top: 24px; border-top: 1px solid #f2f3f5; }.diagnostic-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid #f2f3f5; }.diagnostic-icon { width: 20px; height: 20px; border-radius: 50%; text-align: center; line-height: 20px; color: #fff; background: #00b42a; }.diagnostic-icon.error { background: #f53f3f; }.diagnostic-row div { display: flex; flex-direction: column; gap: 3px; }.diagnostic-row span:last-child { font-size: 12px; color: #86909c; }.about-card { text-align: center; padding: 60px; }.about-card .brand-mark { font-size: 60px; }.about-rows { max-width: 380px; margin: 25px auto; text-align: left; }.about-rows span { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f2f3f5; }.about-rows strong { color: #1d2129; font-weight: 500; }
+.info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
  .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
  .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
@@ -674,9 +823,9 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .chat-app.theme-dark :deep(.arco-select-view-value) { color: var(--text); }
 .chat-app.theme-dark :deep(.arco-input::placeholder),
 .chat-app.theme-dark :deep(.arco-textarea::placeholder) { color: var(--muted); }
-:global(body.popchat-dark .arco-trigger-popup),
-:global(body.popchat-dark .arco-select-popup),
-:global(body.popchat-dark .arco-modal-container) { background: #1b2027; color: #f0f2f5; border-color: #39424d; }
+:global(body.flyqpro-dark .arco-trigger-popup),
+:global(body.flyqpro-dark .arco-select-popup),
+:global(body.flyqpro-dark .arco-modal-container) { background: #1b2027; color: #f0f2f5; border-color: #39424d; }
 
 .migration-lock { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(12, 18, 28, .62); backdrop-filter: blur(3px); cursor: wait; }
 .migration-card { width: min(460px, calc(100vw - 48px)); padding: 30px 34px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-1); color: var(--text); box-shadow: 0 24px 80px rgba(0, 0, 0, .28); text-align: center; cursor: default; }
@@ -852,9 +1001,15 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
    right-side layout does not receive any extra titlebar padding. */
 :global(html),
 :global(body),
-:global(#app) { background: var(--app-bg, #0f1115); }
+:global(#app) { background: var(--window-corner-bg, #edf0f3); }
+:global(body.flyqpro-dark),
+:global(body.flyqpro-dark #app) { background: var(--window-corner-bg, #0f1115); }
 .chat-app { position: relative; border-radius: 0; overflow: hidden; }
 .chat-app.is-mac { border-radius: 16px; }
+/* Keep the native Windows title bar, while rounding only the lower content
+   corners. The rule is independent of the theme so light and dark windows
+   have the same silhouette. */
+.chat-app.is-windows { border-radius: 0 0 12px 12px; }
 .window-drag-region {
   position: fixed;
   z-index: 20;
@@ -1011,11 +1166,28 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .image-progress-ring::after { content: ''; position: absolute; width: 50px; height: 50px; border-radius: 50%; background: rgba(13, 20, 34, .9); }
 .image-progress-ring strong { position: relative; z-index: 1; font-size: 13px; font-weight: 700; }
 .new-message-button { position: absolute; right: 22px; top: -41px; z-index: 8; border: 0; border-radius: 5px; padding: 7px 10px; background: var(--accent); color: #fff; font-size: 12px; cursor: pointer; box-shadow: var(--shadow); }
-.info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+.info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .info-fields input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); }
 .image-viewer { display: flex; min-height: 50vh; align-items: center; justify-content: center; gap: 12px; }
 .image-viewer img { max-width: calc(100% - 96px); max-height: 70vh; object-fit: contain; }
 .image-viewer button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--surface-3); color: var(--text); cursor: pointer; }
+.image-viewer-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 28px; box-sizing: border-box; background: rgba(7, 11, 18, .72); backdrop-filter: blur(4px); }
+.image-viewer-panel { width: min(960px, 100%); max-height: min(900px, calc(100vh - 56px)); overflow: hidden; box-sizing: border-box; padding: 14px 18px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-1); color: var(--text); box-shadow: 0 28px 90px rgba(0, 0, 0, .42); }
+.image-viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 30px; color: var(--text); }
+.image-viewer-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.image-viewer-head button { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; flex: 0 0 30px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.image-viewer-head button:hover { background: var(--hover); color: var(--text); }
+.image-viewer-image { position: relative; display: flex; min-width: 0; min-height: 50vh; align-items: center; justify-content: center; }
+.image-viewer-image img { display: block; max-width: calc(100% - 96px); max-height: min(70vh, 680px); object-fit: contain; }
+.image-viewer-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 30px; pointer-events: none; }
+.image-viewer-loading svg { animation: image-viewer-spin .9s linear infinite; }
+.image-viewer button:disabled { opacity: .35; cursor: default; }
+.image-viewer-enter-active, .image-viewer-leave-active { transition: opacity .2s ease; }
+.image-viewer-enter-active .image-viewer-panel, .image-viewer-leave-active .image-viewer-panel { transition: transform .22s cubic-bezier(.22, .8, .28, 1), opacity .2s ease; }
+.image-viewer-enter-from, .image-viewer-leave-to { opacity: 0; }
+.image-viewer-enter-from .image-viewer-panel, .image-viewer-leave-to .image-viewer-panel { transform: translateY(8px) scale(.98); opacity: 0; }
+.image-viewer-enter-to .image-viewer-panel, .image-viewer-leave-from .image-viewer-panel { transform: translateY(0) scale(1); opacity: 1; }
+@keyframes image-viewer-spin { to { transform: rotate(360deg); } }
 .image-thumbnails { display: flex; max-width: 100%; gap: 8px; overflow-x: auto; padding: 14px 4px 0; }
 .image-thumbnails button { width: 56px; height: 56px; flex: 0 0 56px; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 5px; background: transparent; cursor: pointer; }
 .image-thumbnails button.active { border-color: var(--accent); }
@@ -1058,7 +1230,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 .peer-copy { flex: 1; }
 .unread-badge { position: absolute; right: 10px; top: 50%; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 10px; transform: translateY(-50%); background: #f53f3f; color: #fff !important; font-size: 10px !important; font-weight: 700 !important; line-height: 18px; text-align: center; }
 .rail-unread-badge { right: 2px !important; top: 0 !important; }
-.info-overlay { position: fixed; z-index: 40; top: 52px; right: 0; bottom: 0; width: min(320px, 100vw); padding: 16px; border-radius: 14px 0 0 14px; }
+.info-overlay { position: fixed; z-index: 40; top: 52px; right: 0; bottom: 0; width: min(320px, 100vw); padding: 16px; border-radius: 14px 0 0 14px; display: flex; flex-direction: column; }
 .peer-info-enter-active,
 .peer-info-leave-active { transition: transform .28s cubic-bezier(.22, .8, .28, 1), opacity .22s ease; will-change: transform, opacity; }
 .peer-info-enter-from,
@@ -1083,6 +1255,9 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); win
 
 @media (prefers-reduced-motion: reduce) {
   .message-line { animation: none !important; }
+  .image-viewer-enter-active, .image-viewer-leave-active,
+  .image-viewer-enter-active .image-viewer-panel, .image-viewer-leave-active .image-viewer-panel { transition: none !important; }
+  .image-viewer-loading svg { animation: none !important; }
 }
 
 @media (max-width: 760px) {

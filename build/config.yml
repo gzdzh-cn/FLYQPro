@@ -6,11 +6,11 @@ version: '3'
 # This information is used to generate the build assets.
 info:
   companyName: "DZH"
-  productName: "POPChat"
-  productIdentifier: "com.dzh.popchat"
+  productName: "FlyQPro"
+  productIdentifier: "com.dzh.flyqpro"
   description: "局域网点对点聊天工具"
   copyright: "(c) 2026, DZH"
-  comments: "POPChat desktop application"
+  comments: "FlyQPro desktop application"
   version: "v0.1.0"
 
 # Dev mode configuration

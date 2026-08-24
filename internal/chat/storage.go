@@ -5,11 +5,12 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"flyqpro/internal/service/db"
 	"github.com/gogf/gf/v2/database/gdb"
-	"popchat/internal/service/db"
 )
 
 type profileRow struct {
@@ -46,6 +47,10 @@ type peerRow struct {
 	CertificateFingerprint string `orm:"certificate_fingerprint"`
 	Relation               string `orm:"relation"`
 	Remark                 string `orm:"remark"`
+	ProtocolName           string `orm:"protocol_name"`
+	ProtocolMajor          int    `orm:"protocol_major"`
+	DiscoveryMagic         string `orm:"discovery_magic"`
+	Capabilities           string `orm:"capabilities"`
 	LastSeen               string `orm:"last_seen"`
 	UpdatedAt              string `orm:"updated_at"`
 }
@@ -103,12 +108,9 @@ type attachmentMigrationRow struct {
 	PeerDeviceID string `orm:"peer_device_id"`
 }
 
-type outboxRow struct {
-	ItemID        string `orm:"item_id"`
-	PeerDeviceID  string `orm:"peer_device_id"`
-	Payload       string `orm:"payload"`
-	Attempts      int    `orm:"attempts"`
-	NextAttemptAt string `orm:"next_attempt_at"`
+type ConversationAttachment struct {
+	Attachment
+	SenderDeviceID string `json:"senderDeviceId"`
 }
 
 func nowString() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -175,7 +177,31 @@ func GetProfile(ctx context.Context) (Profile, error) {
 			return Profile{}, err
 		}
 	}
+	if migratedPath := migrateLegacyAttachmentPath(profile.FileSavePath); migratedPath != profile.FileSavePath {
+		profile.FileSavePath = migratedPath
+		if err := SaveProfile(ctx, profile); err != nil {
+			return Profile{}, err
+		}
+	}
 	return profile, nil
+}
+
+func migrateLegacyAttachmentPath(path string) string {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return path
+	}
+	for _, legacyRoot := range []string{
+		filepath.Join(legacyAppDataDir(), "attachments"),
+		filepath.Join(legacyLanChatDataDir(), "attachments"),
+	} {
+		relative, err := filepath.Rel(legacyRoot, cleanPath)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return filepath.Join(DefaultAttachmentDir(), relative)
+	}
+	return path
 }
 
 func SaveProfile(ctx context.Context, profile Profile) error {
@@ -206,10 +232,10 @@ func SaveIdentity(ctx context.Context, identity DeviceInfo, privateKeyPEM, certi
 }
 
 func UpsertPeer(ctx context.Context, peer Peer) error {
-	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, last_seen, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?)
-		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.LastSeen, nowString(), nowString())
+	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, last_seen, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), peer.LastSeen, nowString(), nowString())
 }
 
 func SetPeerRelation(ctx context.Context, deviceID, relation string) error {
@@ -220,12 +246,16 @@ func SetPeerRemark(ctx context.Context, deviceID, remark string) error {
 	return exec(ctx, `UPDATE peers SET remark=?, updated_at=? WHERE device_id=?`, remark, nowString(), deviceID)
 }
 
+func SetPeerProtocol(ctx context.Context, deviceID string, dialect ProtocolDialect, capabilities []string) error {
+	return exec(ctx, `UPDATE peers SET protocol_name=?, protocol_major=?, discovery_magic=?, capabilities=?, updated_at=? WHERE device_id=?`, dialect.Name, dialect.Major, dialect.Magic, strings.Join(capabilities, ","), nowString(), deviceID)
+}
+
 func SetPeerAvatar(ctx context.Context, deviceID, avatarPath, avatarHash string, avatarVersion int64) error {
 	return exec(ctx, `UPDATE peers SET avatar_path=?, avatar_hash=?, avatar_version=?, updated_at=? WHERE device_id=?`, avatarPath, avatarHash, avatarVersion, nowString(), deviceID)
 }
 
 func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
-	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, last_seen, updated_at FROM peers`
+	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, last_seen, updated_at FROM peers`
 	args := []any{}
 	if relation != "" {
 		sql += ` WHERE relation=?`
@@ -242,9 +272,23 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 	}
 	peers := make([]Peer, 0, len(rows))
 	for _, row := range rows {
-		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
+		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
 	}
 	return peers, nil
+}
+
+func splitCapabilities(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func SaveFriendRequest(ctx context.Context, request FriendRequest) error {
@@ -483,6 +527,84 @@ func ListMessages(ctx context.Context, conversationID string) ([]Message, error)
 	return messages, nil
 }
 
+func ListConversationAttachments(ctx context.Context, peerDeviceID string) ([]ConversationAttachment, error) {
+	var rows []struct {
+		AttachmentID   string `orm:"attachment_id"`
+		MessageID      string `orm:"message_id"`
+		FileName       string `orm:"file_name"`
+		MimeType       string `orm:"mime_type"`
+		FileSize       int64  `orm:"file_size"`
+		SHA256         string `orm:"sha256"`
+		LocalPath      string `orm:"local_path"`
+		Status         string `orm:"status"`
+		SenderDeviceID string `orm:"sender_device_id"`
+	}
+	result, err := query(ctx, `SELECT a.attachment_id, a.message_id, a.file_name, a.mime_type, a.file_size, a.sha256, a.local_path, a.status, m.sender_device_id
+		FROM attachments a JOIN messages m ON m.message_id=a.message_id JOIN conversations c ON c.conversation_id=m.conversation_id
+		WHERE c.peer_device_id=? ORDER BY a.created_at, a.attachment_id`, peerDeviceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	attachments := make([]ConversationAttachment, 0, len(rows))
+	for _, row := range rows {
+		attachments = append(attachments, ConversationAttachment{
+			Attachment:     Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, LocalPath: row.LocalPath, Status: row.Status},
+			SenderDeviceID: row.SenderDeviceID,
+		})
+	}
+	return attachments, nil
+}
+
+func DeleteConversationRecords(ctx context.Context, peerDeviceID string) (int, int, error) {
+	database := db.DB()
+	if database == nil {
+		return 0, 0, fmt.Errorf("数据库尚未初始化")
+	}
+	var messageRows []struct {
+		Count int `orm:"count"`
+	}
+	result, err := query(ctx, `SELECT COUNT(*) AS count FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?`, peerDeviceID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := result.Structs(&messageRows); err != nil {
+		return 0, 0, err
+	}
+	var attachmentRows []struct {
+		Count int `orm:"count"`
+	}
+	result, err = query(ctx, `SELECT COUNT(*) AS count FROM attachments a JOIN messages m ON m.message_id=a.message_id JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?`, peerDeviceID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := result.Structs(&attachmentRows); err != nil {
+		return 0, 0, err
+	}
+	if err := database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`DELETE FROM attachments WHERE message_id IN (SELECT m.message_id FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?)`, peerDeviceID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_id IN (SELECT conversation_id FROM conversations WHERE peer_device_id=?)`, peerDeviceID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM conversations WHERE peer_device_id=?`, peerDeviceID)
+		return err
+	}); err != nil {
+		return 0, 0, err
+	}
+	messageCount, attachmentCount := 0, 0
+	if len(messageRows) > 0 {
+		messageCount = messageRows[0].Count
+	}
+	if len(attachmentRows) > 0 {
+		attachmentCount = attachmentRows[0].Count
+	}
+	return messageCount, attachmentCount, nil
+}
+
 func GetMessage(ctx context.Context, messageID string) (Message, error) {
 	var rows []messageRow
 	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at FROM messages WHERE message_id=? LIMIT 1`, messageID)
@@ -585,39 +707,6 @@ func AttachmentPeerDeviceID(ctx context.Context, attachmentID string) (string, e
 		return "", nil
 	}
 	return rows[0].PeerDeviceID, nil
-}
-
-func SaveOutbox(ctx context.Context, itemID, peerDeviceID, kind, payload string) error {
-	return exec(ctx, `INSERT INTO outbox(item_id, peer_device_id, kind, payload, attempts, next_attempt_at, created_at) VALUES(?, ?, ?, ?, 0, ?, ?) ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload, next_attempt_at=excluded.next_attempt_at`, itemID, peerDeviceID, kind, payload, nowString(), nowString())
-}
-
-func ListOutbox(ctx context.Context, peerDeviceID string) ([]outboxRow, error) {
-	var rows []outboxRow
-	result, err := query(ctx, `SELECT item_id, peer_device_id, payload, attempts, next_attempt_at FROM outbox WHERE peer_device_id=? AND next_attempt_at<=? ORDER BY created_at`, peerDeviceID, nowString())
-	if err != nil {
-		return nil, err
-	}
-	if err := result.Structs(&rows); err != nil {
-		return nil, err
-	}
-	return rows, nil
-}
-
-func MarkOutboxRetry(ctx context.Context, itemID string, attempts int) error {
-	if attempts < 0 {
-		attempts = 0
-	}
-	// Keep retries bounded but useful on a sleeping/offline laptop: 2, 4, 8...
-	// minutes, capped at five minutes. The persisted deadline survives restart.
-	delay := time.Duration(1<<minInt(attempts, 8)) * time.Second
-	if delay > 5*time.Minute {
-		delay = 5 * time.Minute
-	}
-	return exec(ctx, `UPDATE outbox SET attempts=?, next_attempt_at=? WHERE item_id=?`, attempts+1, time.Now().Add(delay).UTC().Format(time.RFC3339Nano), itemID)
-}
-
-func DeleteOutbox(ctx context.Context, itemID string) error {
-	return exec(ctx, `DELETE FROM outbox WHERE item_id=?`, itemID)
 }
 
 func GetAttachment(ctx context.Context, id string) (Attachment, error) {

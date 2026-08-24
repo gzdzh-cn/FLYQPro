@@ -24,10 +24,11 @@ func Set(enabled bool, executable string) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, "Library", "LaunchAgents", "com.dzh.popchat.desktop.plist")
+	path := filepath.Join(home, "Library", "LaunchAgents", "com.dzh.flyqpro.desktop.plist")
+	legacyProductPath := filepath.Join(home, "Library", "LaunchAgents", "com.dzh.popchat.desktop.plist")
 	legacyPath := filepath.Join(home, "Library", "LaunchAgents", "com.lanchat.desktop.plist")
 	if !enabled {
-		for _, oldPath := range []string{path, legacyPath} {
+		for _, oldPath := range []string{path, legacyProductPath, legacyPath} {
 			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -37,7 +38,12 @@ func Set(enabled bool, executable string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	content := []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.dzh.popchat.desktop</string><key>ProgramArguments</key><array><string>" + xmlEscape(executable) + "</string></array><key>RunAtLoad</key><true/></dict></plist>\n")
+	for _, oldPath := range []string{legacyProductPath, legacyPath} {
+		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	content := []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.dzh.flyqpro.desktop</string><key>ProgramArguments</key><array><string>" + xmlEscape(executable) + "</string></array><key>RunAtLoad</key><true/></dict></plist>\n")
 	return os.WriteFile(path, content, 0o600)
 }
 

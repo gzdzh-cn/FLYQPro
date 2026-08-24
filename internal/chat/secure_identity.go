@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	secureIdentityService = "com.dzh.popchat.identity"
+	secureIdentityService = "com.dzh.flyqpro.identity"
+	legacyIdentityService = "com.dzh.popchat.identity"
 	secureIdentityVersion = 1
 )
 
@@ -32,12 +33,16 @@ type secureIdentityRecord struct {
 }
 
 func secureIdentityUser() string {
-	sum := sha256.Sum256([]byte(AppDataDir()))
+	return secureIdentityUserFor(AppDataDir())
+}
+
+func secureIdentityUserFor(dataDir string) string {
+	sum := sha256.Sum256([]byte(dataDir))
 	return "device-identity-" + hex.EncodeToString(sum[:])[:24]
 }
 
 func secureIdentityEnabled() bool {
-	return strings.TrimSpace(os.Getenv("POPCHAT_DISABLE_SECURE_IDENTITY")) != "1"
+	return strings.TrimSpace(os.Getenv("FLYQPRO_DISABLE_SECURE_IDENTITY")) != "1" && strings.TrimSpace(os.Getenv("POPCHAT_DISABLE_SECURE_IDENTITY")) != "1"
 }
 
 func loadSecureIdentity() (Identity, error) {
@@ -45,6 +50,11 @@ func loadSecureIdentity() (Identity, error) {
 		return Identity{}, errSecureIdentityNotFound
 	}
 	value, err := keyring.Get(secureIdentityService, secureIdentityUser())
+	if err != nil {
+		// Load the old keychain entry once so a product rename does not create
+		// a new device identity. The next save writes the FlyQPro entry.
+		value, err = keyring.Get(legacyIdentityService, secureIdentityUserFor(legacyAppDataDir()))
+	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return Identity{}, errSecureIdentityNotFound

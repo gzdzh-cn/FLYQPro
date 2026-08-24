@@ -6,6 +6,52 @@ import (
 	"testing"
 )
 
+func TestProtocolDialectsAcceptSupportedTuples(t *testing.T) {
+	for _, dialect := range protocolDialects {
+		message := wireMessage{Protocol: dialect.Name, Major: dialect.Major, MinMajor: dialect.Major, Magic: dialect.Magic}
+		got, ok := protocolDialectForMessage(message)
+		if !ok || got != dialect {
+			t.Fatalf("dialect %+v was not accepted: %+v, %v", dialect, got, ok)
+		}
+	}
+	for _, message := range []wireMessage{
+		{Protocol: "unknown", Major: 2, Magic: DiscoveryMagic},
+		{Protocol: "dzhgo", Major: 2, Magic: "WRONG_MAGIC"},
+		{Protocol: "POPChat", Major: 2, Magic: "POPCHAT_DISCOVERY_V1"},
+		{Protocol: "POPChat", Major: 1, MinMajor: 2, Magic: "POPCHAT_DISCOVERY_V1"},
+	} {
+		if _, ok := protocolDialectForMessage(message); ok {
+			t.Fatalf("unsupported dialect tuple was accepted: %+v", message)
+		}
+	}
+}
+
+func TestProtocolDialectsForPeerReuseStoredDialect(t *testing.T) {
+	got := protocolDialectsForPeer(Peer{ProtocolName: "POPChat", ProtocolMajor: 1, DiscoveryMagic: "POPCHAT_DISCOVERY_V1"})
+	if len(got) != 1 || got[0].Name != "POPChat" {
+		t.Fatalf("stored peer dialect was not reused: %+v", got)
+	}
+	if got := protocolDialectsForPeer(Peer{}); len(got) != len(protocolDialects) {
+		t.Fatalf("unknown peer should use all fallback dialects: %+v", got)
+	}
+}
+
+func TestHelloMessageForDialectUsesCompatibleCapabilities(t *testing.T) {
+	engine := NewEngine()
+	for _, dialect := range protocolDialects {
+		message := engine.helloMessageForDialect("hello", dialect)
+		if message.Protocol != dialect.Name || message.Major != dialect.Major || message.Magic != dialect.Magic {
+			t.Fatalf("hello did not use dialect %+v: %+v", dialect, message)
+		}
+		if !hasCapability(message.Capabilities, "text") || !hasCapability(message.Capabilities, "image") || !hasCapability(message.Capabilities, "file") {
+			t.Fatalf("common capabilities missing for %+v: %v", dialect, message.Capabilities)
+		}
+		if dialect.Major == 1 && hasCapability(message.Capabilities, "file-progress-v1") {
+			t.Fatalf("POPChat/v1 should not advertise v2 capabilities: %v", message.Capabilities)
+		}
+	}
+}
+
 func TestSubnetHostTargetsIncludesPeerAndExcludesLocalAndBroadcast(t *testing.T) {
 	_, subnet, err := net.ParseCIDR("192.168.43.4/24")
 	if err != nil {
@@ -52,7 +98,7 @@ func TestHandleDiscoveryTCPRepliesWhenDiscoverable(t *testing.T) {
 		close(done)
 	}()
 
-	if err := writeWire(client, wireMessage{Magic: DiscoveryMagic, Type: "discover", DeviceID: "remote-device"}); err != nil {
+	if err := writeWire(client, wireMessage{Protocol: ProtocolName, Major: ProtocolMajor, MinMajor: ProtocolMajor, Magic: DiscoveryMagic, Type: "discover", DeviceID: "remote-device"}); err != nil {
 		t.Fatal(err)
 	}
 	var response wireMessage

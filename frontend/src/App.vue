@@ -1,6 +1,6 @@
 <template>
   <div class="app-shell">
-    <div v-if="bootError" class="boot-error">POPChat 加载失败：{{ bootError }}</div>
+    <div v-if="bootError" class="boot-error">FlyQPro 加载失败：{{ bootError }}</div>
     <router-view v-else />
   </div>
 </template>
@@ -13,11 +13,11 @@ import { useChatStore } from '@/store/modules/chat';
 const chatStore = useChatStore();
 const bootError = ref('')
 window.addEventListener('error', (event) => {
-  console.error('[POPChat] 前端运行时错误', event.error || event.message)
+  console.error('[FlyQPro] 前端运行时错误', event.error || event.message)
   if (!document.querySelector('.chat-app')) bootError.value = event.message || '页面脚本异常'
 });
 window.addEventListener('unhandledrejection', (event) => {
-  console.error('[POPChat] 未处理的异步错误', event.reason)
+  console.error('[FlyQPro] 未处理的异步错误', event.reason)
   if (!document.querySelector('.chat-app')) bootError.value = String(event.reason?.message || event.reason || '页面初始化异常')
 });
 const eventNames = ['chat:profile-updated', 'chat:network-status', 'chat:peer-updated', 'chat:friend-request', 'chat:friend-request-updated', 'chat:message', 'chat:message-status', 'chat:attachment', 'chat:transfer-progress', 'chat:attachment-migration'];
@@ -27,7 +27,7 @@ onMounted(() => {
   try {
     handlers = eventNames.map((name) => Events.On(name, (event: any) => chatStore.handleEvent(name, event?.data ?? event)));
   } catch (error) {
-    console.error('[POPChat] Wails 事件初始化失败', error);
+    console.error('[FlyQPro] Wails 事件初始化失败', error);
   }
 });
 

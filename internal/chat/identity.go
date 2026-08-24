@@ -29,6 +29,11 @@ type Identity struct {
 }
 
 func AppDataDir() string {
+	if value := strings.TrimSpace(os.Getenv("FLYQPRO_DATA_DIR")); value != "" {
+		return value
+	}
+	// Compatibility for installations that still set the former product
+	// variable. New writes use the FlyQPro directory.
 	if value := strings.TrimSpace(os.Getenv("POPCHAT_DATA_DIR")); value != "" {
 		return value
 	}
@@ -39,7 +44,23 @@ func AppDataDir() string {
 	if err != nil || base == "" {
 		base = "."
 	}
+	return filepath.Join(base, "FlyQPro")
+}
+
+func legacyAppDataDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = "."
+	}
 	return filepath.Join(base, "POPChat")
+}
+
+func legacyLanChatDataDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = "."
+	}
+	return filepath.Join(base, "LANChat")
 }
 
 func DefaultAttachmentDir() string {

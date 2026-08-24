@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +17,8 @@ import (
 )
 
 const (
-	defaultAppDataDir = "POPChat"
+	defaultAppDataDir = "FlyQPro"
+	legacyProductDir  = "POPChat"
 	legacyAppDataDir  = "LANChat"
 	defaultSQLiteName = "app.db"
 )
@@ -76,6 +78,10 @@ func Open(ctx context.Context) error {
 		database = nil
 		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
 	}
+	if _, err := database.Exec(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(3, datetime('now')) ON CONFLICT(version) DO NOTHING`); err != nil {
+		database = nil
+		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
+	}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 5000",
@@ -122,6 +128,10 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"peers", "certificate_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "relation", "TEXT NOT NULL DEFAULT 'discovered'"},
 		{"peers", "remark", "TEXT NOT NULL DEFAULT ''"},
+		{"peers", "protocol_name", "TEXT NOT NULL DEFAULT ''"},
+		{"peers", "protocol_major", "INTEGER NOT NULL DEFAULT 0"},
+		{"peers", "discovery_magic", "TEXT NOT NULL DEFAULT ''"},
+		{"peers", "capabilities", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "last_seen", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "updated_at", "TEXT NOT NULL DEFAULT ''"},
@@ -148,11 +158,6 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"attachments", "local_path", "TEXT NOT NULL DEFAULT ''"},
 		{"attachments", "status", "TEXT NOT NULL DEFAULT 'pending'"},
 		{"attachments", "created_at", "TEXT NOT NULL DEFAULT ''"},
-		{"outbox", "kind", "TEXT NOT NULL DEFAULT 'message'"},
-		{"outbox", "payload", "TEXT NOT NULL DEFAULT ''"},
-		{"outbox", "attempts", "INTEGER NOT NULL DEFAULT 0"},
-		{"outbox", "next_attempt_at", "TEXT NOT NULL DEFAULT ''"},
-		{"outbox", "created_at", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, migration := range migrations {
 		var columns []struct {
@@ -220,6 +225,17 @@ func resolveSQLitePath() (string, error) {
 	if override := strings.TrimSpace(os.Getenv("GOFLY_DB_PATH")); override != "" {
 		return filepath.Abs(override)
 	}
+	if override := strings.TrimSpace(os.Getenv("FLYQPRO_DATA_DIR")); override != "" {
+		return filepath.Abs(filepath.Join(override, defaultSQLiteName))
+	}
+	// Keep the former environment variables readable for one-way migration
+	// and scripted deployments. New documentation uses FLYQPRO_DATA_DIR.
+	if override := strings.TrimSpace(os.Getenv("POPCHAT_DATA_DIR")); override != "" {
+		return filepath.Abs(filepath.Join(override, defaultSQLiteName))
+	}
+	if override := strings.TrimSpace(os.Getenv("LANCHAT_DATA_DIR")); override != "" {
+		return filepath.Abs(filepath.Join(override, defaultSQLiteName))
+	}
 	if !productionBuild {
 		return filepath.Abs(filepath.Join(developmentResourceDir(), defaultSQLiteName))
 	}
@@ -228,16 +244,71 @@ func resolveSQLitePath() (string, error) {
 		return "", err
 	}
 	preferred := filepath.Join(configDir, defaultAppDataDir, defaultSQLiteName)
+	legacyProduct := filepath.Join(configDir, legacyProductDir, defaultSQLiteName)
 	legacy := filepath.Join(configDir, legacyAppDataDir, defaultSQLiteName)
 	if _, err := os.Stat(preferred); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
 	if _, err := os.Stat(preferred); os.IsNotExist(err) {
+		if _, legacyErr := os.Stat(legacyProduct); legacyErr == nil {
+			if err := migrateLegacyDirectory(filepath.Dir(legacyProduct), filepath.Dir(preferred)); err != nil {
+				return "", err
+			}
+			return preferred, nil
+		}
 		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
-			return legacy, nil
+			if err := migrateLegacyDirectory(filepath.Dir(legacy), filepath.Dir(preferred)); err != nil {
+				return "", err
+			}
+			return preferred, nil
 		}
 	}
 	return preferred, nil
+}
+
+func migrateLegacyDirectory(source, target string) error {
+	if source == target {
+		return nil
+	}
+	return filepath.Walk(source, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		if info.IsDir() {
+			return os.MkdirAll(destination, info.Mode())
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			return err
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode())
+		if os.IsExist(err) {
+			_ = input.Close()
+			return nil
+		}
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		inputErr := input.Close()
+		outputErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if inputErr != nil {
+			return inputErr
+		}
+		return outputErr
+	})
 }
 
 func developmentResourceDir() string {

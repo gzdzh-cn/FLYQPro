@@ -68,3 +68,30 @@ func TestFriendRestoreRejectsTamperedSignature(t *testing.T) {
 		t.Fatal("篡改后的好友恢复签名应被拒绝")
 	}
 }
+
+func TestFriendRestoreSupportsDzhgoAndPopchatSignatures(t *testing.T) {
+	source := testIdentity(t)
+	engine := NewEngine()
+	engine.identity = source
+
+	dzhgoMessage, err := engine.friendRestoreMessageForDialect("fresh-device", protocolDialects[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	dzhgoHello := wireMessage{DeviceID: source.DeviceID, PublicKey: source.PublicKeyPEM, Protocol: "dzhgo", Major: 2, Magic: "DZHGO_DISCOVERY_V1"}
+	if err := verifyFriendRestore(dzhgoMessage, dzhgoHello, "fresh-device"); err != nil {
+		t.Fatalf("dzhgo 好友恢复签名校验失败: %v", err)
+	}
+
+	popMessage, err := engine.friendRestoreMessageForDialect("fresh-device", protocolDialects[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if popMessage.RestoreSignatureV2 != "" {
+		t.Fatal("POPChat/v1 不应携带 dzhgo v2 签名")
+	}
+	popHello := wireMessage{DeviceID: source.DeviceID, PublicKey: source.PublicKeyPEM, Protocol: "POPChat", Major: 1, Magic: "POPCHAT_DISCOVERY_V1"}
+	if err := verifyFriendRestore(popMessage, popHello, "fresh-device"); err != nil {
+		t.Fatalf("POPChat 好友恢复签名校验失败: %v", err)
+	}
+}

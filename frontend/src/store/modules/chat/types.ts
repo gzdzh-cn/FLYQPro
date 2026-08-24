@@ -26,6 +26,10 @@ export interface Peer {
   certificateFingerprint: string
   relation: string
   remark: string
+  protocolName?: string
+  protocolMajor?: number
+  discoveryMagic?: string
+  capabilities?: string[]
   online: boolean
   lastSeen: string
 }

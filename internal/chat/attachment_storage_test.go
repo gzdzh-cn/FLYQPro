@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"popchat/internal/service/db"
+	"flyqpro/internal/service/db"
 )
 
 func TestAttachmentTargetPathUsesStablePeerDirectoryAndSuffix(t *testing.T) {
@@ -88,7 +88,7 @@ func TestMigrateAttachmentsClassifiesAndVerifiesFiles(t *testing.T) {
 func TestArchivePendingAttachmentsAfterMigration(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
-	t.Setenv("LANCHAT_DATA_DIR", filepath.Join(root, "data"))
+	t.Setenv("FLYQPRO_DATA_DIR", filepath.Join(root, "data"))
 	if err := db.Open(context.Background()); err != nil {
 		t.Fatal(err)
 	}

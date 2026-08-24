@@ -5,10 +5,10 @@ import (
 	"log"
 	"runtime"
 
+	"flyqpro/internal/service"
+	"flyqpro/internal/service/db"
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"popchat/internal/service"
-	"popchat/internal/service/db"
 )
 
 //go:embed all:frontend/dist
@@ -25,8 +25,15 @@ func main() {
 	}()
 
 	chatService := service.NewChatService()
+	backgroundType := application.BackgroundTypeSolid
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		// Let the themed page own the pixels behind its rounded corners. A solid
+		// native background would otherwise show the startup dark colour there
+		// when the user switches to the light theme.
+		backgroundType = application.BackgroundTypeTransparent
+	}
 	app := application.New(application.Options{
-		Name:        "POPChat",
+		Name:        "FlyQPro",
 		Description: "局域网点对点聊天工具",
 		Services: []application.Service{
 			application.NewService(chatService),
@@ -40,20 +47,20 @@ func main() {
 	})
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            "POPChat",
+		Title:            "FlyQPro",
 		Frameless:        runtime.GOOS == "darwin",
 		Width:            1100,
 		Height:           700,
 		MinWidth:         980,
 		MinHeight:        640,
-		BackgroundType:   application.BackgroundTypeSolid,
+		BackgroundType:   backgroundType,
 		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
 		Windows: application.WindowsWindow{
 			Theme:                  0,
 			NonClientRegionSupport: true,
 		},
 		Mac: application.MacWindow{
-			Backdrop:     application.MacBackdropNormal,
+			Backdrop:     application.MacBackdropTransparent,
 			CornerType:   application.MacWindowCornerTypeRounded,
 			CornerRadius: 16,
 			TitleBar:     application.MacTitleBarHiddenInsetUnified,

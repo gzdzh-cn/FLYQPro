@@ -9,8 +9,8 @@ frontend/.npm-cache
 frontend/bindings/*
 !frontend/bindings/github.com/
 !frontend/bindings/github.com/**
-!frontend/bindings/popchat/
-!frontend/bindings/popchat/**
+!frontend/bindings/flyqpro/
+!frontend/bindings/flyqpro/**
 
 # Local SQLite development data and sidecar files
 **/resource/app.db

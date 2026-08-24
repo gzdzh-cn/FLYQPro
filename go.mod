@@ -1,4 +1,4 @@
-module popchat
+module flyqpro
 
 go 1.25.0
 

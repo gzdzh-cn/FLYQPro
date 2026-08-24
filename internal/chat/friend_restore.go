@@ -14,11 +14,15 @@ import (
 
 const friendRestoreVersion = 1
 
-func friendRestorePayload(sourceDeviceID, targetDeviceID, sourcePublicKey string) []byte {
-	return []byte(fmt.Sprintf("POPChat/friend-restore/v1\n%s\n%s\n%s", sourceDeviceID, targetDeviceID, sourcePublicKey))
+func friendRestorePayload(domain, sourceDeviceID, targetDeviceID, sourcePublicKey string) []byte {
+	return []byte(fmt.Sprintf("%s/friend-restore/v1\n%s\n%s\n%s", domain, sourceDeviceID, targetDeviceID, sourcePublicKey))
 }
 
 func (e *Engine) friendRestoreMessage(targetDeviceID string) (wireMessage, error) {
+	return e.friendRestoreMessageForDialect(targetDeviceID, protocolDialects[0])
+}
+
+func (e *Engine) friendRestoreMessageForDialect(targetDeviceID string, dialect ProtocolDialect) (wireMessage, error) {
 	e.mu.RLock()
 	identity := e.identity
 	e.mu.RUnlock()
@@ -26,12 +30,25 @@ func (e *Engine) friendRestoreMessage(targetDeviceID string) (wireMessage, error
 	if err != nil {
 		return wireMessage{}, err
 	}
-	digest := sha256.Sum256(friendRestorePayload(identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
+	legacyDomain := "FlyQPro"
+	if dialect.Name == "POPChat" {
+		legacyDomain = "POPChat"
+	}
+	digest := sha256.Sum256(friendRestorePayload(legacyDomain, identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
 	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
 	if err != nil {
 		return wireMessage{}, err
 	}
-	return wireMessage{Type: "friend_restore", SourceDeviceID: identity.DeviceID, TargetDeviceID: targetDeviceID, SourcePublicKey: identity.PublicKeyPEM, RestoreVersion: friendRestoreVersion, RestoreSignature: base64.StdEncoding.EncodeToString(signature)}, nil
+	message := wireMessage{Type: "friend_restore", SourceDeviceID: identity.DeviceID, TargetDeviceID: targetDeviceID, SourcePublicKey: identity.PublicKeyPEM, RestoreVersion: friendRestoreVersion, RestoreSignature: base64.StdEncoding.EncodeToString(signature)}
+	if dialect.Name == ProtocolName {
+		v2Digest := sha256.Sum256(friendRestorePayload(ProtocolName, identity.DeviceID, targetDeviceID, identity.PublicKeyPEM))
+		v2Signature, signErr := ecdsa.SignASN1(rand.Reader, privateKey, v2Digest[:])
+		if signErr != nil {
+			return wireMessage{}, signErr
+		}
+		message.RestoreSignatureV2 = base64.StdEncoding.EncodeToString(v2Signature)
+	}
+	return message, nil
 }
 
 func verifyFriendRestore(message wireMessage, hello wireMessage, localDeviceID string) error {
@@ -56,12 +73,32 @@ func verifyFriendRestore(message wireMessage, hello wireMessage, localDeviceID s
 	if !ok {
 		return errors.New("好友恢复公钥类型不支持")
 	}
-	signature, err := base64.StdEncoding.DecodeString(message.RestoreSignature)
-	if err != nil || len(signature) == 0 {
-		return errors.New("好友恢复签名无效")
+	verify := func(value string, domains ...string) bool {
+		if value == "" {
+			return false
+		}
+		signature, decodeErr := base64.StdEncoding.DecodeString(value)
+		if decodeErr != nil || len(signature) == 0 {
+			return false
+		}
+		for _, domain := range domains {
+			if domain == "" {
+				continue
+			}
+			digest := sha256.Sum256(friendRestorePayload(domain, message.SourceDeviceID, message.TargetDeviceID, message.SourcePublicKey))
+			if ecdsa.VerifyASN1(ecdsaKey, digest[:], signature) {
+				return true
+			}
+		}
+		return false
 	}
-	digest := sha256.Sum256(friendRestorePayload(message.SourceDeviceID, message.TargetDeviceID, message.SourcePublicKey))
-	if !ecdsa.VerifyASN1(ecdsaKey, digest[:], signature) {
+	if message.RestoreSignatureV2 != "" && !verify(message.RestoreSignatureV2, ProtocolName) {
+		return errors.New("好友恢复新版签名校验失败")
+	}
+	if message.RestoreSignature != "" && !verify(message.RestoreSignature, hello.Protocol, "FlyQPro", "POPChat") {
+		return errors.New("好友恢复签名校验失败")
+	}
+	if message.RestoreSignature == "" && message.RestoreSignatureV2 == "" {
 		return errors.New("好友恢复签名校验失败")
 	}
 	return nil

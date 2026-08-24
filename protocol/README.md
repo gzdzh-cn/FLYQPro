@@ -1,25 +1,46 @@
-# POPChat protocol v1
+# dzhgo protocol v2
 
-POPChat uses a language-neutral protocol so another desktop or mobile client can interoperate without depending on Wails bindings.
+FlyQPro uses a language-neutral JSON protocol. The application brand remains
+FlyQPro; `dzhgo` is the canonical communication protocol name.
+
+## Protocol dialects
+
+The protocol major version remains `2`. A receiver accepts these dialects:
+
+| Name | Discovery magic | Major | Role |
+| --- | --- | ---: | --- |
+| `dzhgo` | `DZHGO_DISCOVERY_V1` | 2 | canonical |
+| `FlyQPro` | `FLYQPRO_DISCOVERY_V1` | 2 | legacy |
+| `POPChat` | `POPCHAT_DISCOVERY_V1` | 1 | legacy |
+
+Discovery requests are sent with each supported dialect so existing paired
+devices can still find the application. A response uses the dialect from the
+request. The receiver validates the complete tuple of magic, protocol name,
+major version and `minMajor`; an unknown or mismatched tuple is rejected.
+
+Peers persist the negotiated `protocolName`, `protocolMajor`,
+`discoveryMagic`, and `capabilities`. A known friend reuses that dialect on
+the next connection. A peer without saved dialect information is tried in the
+order `dzhgo`, `FlyQPro`, `POPChat`.
 
 ## Discovery
 
 - Transport: IPv4 UDP broadcast.
 - Port: `39190`.
-- Fallback: TCP `39190` probes the local IPv4 subnets when UDP broadcast is unavailable.
+- Fallback: TCP `39190` probes local IPv4 subnets when UDP broadcast is unavailable.
 - Encoding: UTF-8 JSON.
-- Magic: `POPCHAT_DISCOVERY_V1`.
 - Discovery messages never carry chat or file content.
 
 Example announcement:
 
 ```json
 {
-  "magic": "POPCHAT_DISCOVERY_V1",
+  "magic": "DZHGO_DISCOVERY_V1",
   "type": "announce",
-  "protocol": "POPChat",
-  "major": 1,
+  "protocol": "dzhgo",
+  "major": 2,
   "minor": 0,
+  "minMajor": 2,
   "deviceId": "sha256-of-public-key",
   "nickname": "Alice",
   "avatarHash": "sha256-of-avatar",
@@ -29,7 +50,7 @@ Example announcement:
   "port": 42000,
   "publicKey": "base64-or-pem-public-key",
   "certificateFingerprint": "sha256-of-x509-der",
-  "capabilities": ["text", "image", "file"]
+  "capabilities": ["text", "image", "file", "file-progress-v1"]
 }
 ```
 
@@ -37,35 +58,78 @@ Example announcement:
 
 - Transport: TCP with TLS 1.2 or newer.
 - Control frames: newline-delimited UTF-8 JSON.
-- Files: base64 encoded 32 KiB JSON chunks in v1; a later major version may add a binary frame while retaining the control schema.
+- Files: base64 encoded 32 KiB JSON chunks.
 - Device identity: ECDSA P-256 public key SHA-256.
 - Certificate fingerprint: SHA-256 of the DER encoded X.509 certificate.
 
-The first frame is `hello`; the peer answers with `hello_ack`. Friend requests and messages are rejected until the local database marks the device as a friend. A peer that already has the authenticated device marked as a friend may then send an optional `friend_restore` frame so a fresh installation with the same device identity can restore the relationship without another request.
+The first frame is `hello`; the peer answers with `hello_ack` using the same
+negotiated dialect. Friend requests and messages are rejected until the local
+database marks the device as a friend. Unknown optional frames and fields must
+be ignored, so old clients remain usable for text, images and ordinary files.
 
-When a POPChat service stops normally, it may broadcast an optional `offline` discovery frame. Receivers should mark the matching peer offline immediately; an unknown or unsupported frame must not affect normal communication. Unexpected exits and network failures are detected by periodic authenticated TLS `hello`/`hello_ack` health probes.
+The v2 capabilities `avatar-sync-v1`, `file-progress-v1`, `offline-v1`, and
+`friend-restore-v2` are only used when advertised by both sides. POPChat/v1
+connections use the common text, image and file behavior and do not require
+these capabilities.
 
-After a friend handshake, a client may send `avatar_request`. The friend may answer with an optional `avatar_response` containing `avatarHash`, `avatarVersion`, `avatarMime`, and base64 `avatarData`. Avatar bytes are never sent through discovery announcements and are accepted only after the certificate-verified TLS handshake and friendship check.
+When a FlyQPro service stops normally, it may broadcast an optional `offline`
+discovery frame. Receivers keep friends in the list and mark them offline;
+non-friends may be removed from the discovery list. Unexpected exits and
+network failures are detected by authenticated TLS health probes.
+
+## Friend restore signatures
+
+A friend that still has the original authenticated device key may send an
+optional `friend_restore` frame after TLS authentication. The legacy
+`restoreSignature` field remains available for old devices. Its signature
+domain is selected from the negotiated legacy dialect:
+
+```text
+FlyQPro/friend-restore/v1
+sourceDeviceId
+targetDeviceId
+sourcePublicKey
+```
+
+For POPChat peers the legacy domain is `POPChat/friend-restore/v1`. New dzhgo
+peers additionally send `restoreSignatureV2`, signed over:
+
+```text
+dzhgo/friend-restore/v1
+sourceDeviceId
+targetDeviceId
+sourcePublicKey
+```
+
+The receiver validates the TLS peer, target ID, public-key-derived source ID,
+and every signature field that is present. No friend request, notification,
+message, or unread count is created by restoration. Older clients ignore the
+new optional signature field.
+
+## Optional fields and message behavior
 
 The following fields are optional and may be ignored by older clients:
 
-- `avatarHash`, `avatarVersion`, `avatarMime`, `avatarData`: profile avatar cache negotiation and transfer.
-- `capabilities`: supported message kinds such as `text`, `image`, and `file`.
-- `messageIds`: message IDs carried by `read_receipt`.
-- `syncSince`, `syncUntil`, `syncToken`, `readAt`: optional message synchronization and read-state hints.
-- `acceptedAt`: optional first-approval timestamp carried by `friend_request_response`; older clients may ignore it and use their local receipt time.
-- `targetDeviceId`, `sourceDeviceId`, `sourcePublicKey`, `restoreVersion`, `restoreSignature`: optional signed friendship restoration fields. The signature covers `POPChat/friend-restore/v1`, the source device ID, target device ID, and source public key. The receiver must validate the TLS peer, public-key-derived source ID, target ID, and signature before marking the peer as a friend. Older clients may ignore this frame.
-- `offline`: optional discovery presence event indicating that the sender's service stopped normally. It does not change the friendship relation and may be ignored by older clients.
-- `probe`: optional `hello` flag used for a liveness check. A probe completes authentication without triggering outbox retries or business-message side effects.
-- `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`, and `payload`: encrypted attachment transfer metadata and chunks.
-- `file-progress-v1` capability and optional `file_progress` frames: the receiver reports the number of verified bytes written after each chunk, allowing the sender to show the other side's receive progress. The `transferred` field is the cumulative byte count and `status` is `receiving`, `completed`, or `failed`. Clients without this capability continue to transfer files without remote progress feedback.
+- `avatarHash`, `avatarVersion`, `avatarMime`, `avatarData`.
+- `capabilities`, `messageIds`, `syncSince`, `syncUntil`, `syncToken`, `readAt`.
+- `acceptedAt` on `friend_request_response`.
+- `targetDeviceId`, `sourceDeviceId`, `sourcePublicKey`, `restoreVersion`,
+  `restoreSignature`, and `restoreSignatureV2`.
+- `offline` discovery presence events and `probe` hello flags.
+- `attachmentId`, `fileName`, `mimeType`, `fileSize`, `sha256`, `chunkIndex`,
+  and `payload` for encrypted attachment transfer.
+- `file_progress` frames and the `file-progress-v1` capability.
 
-Message status values exposed by the application are `sending`, `sent`, `read`, and `failed`. A receiver must acknowledge a duplicate `messageId`, but must not persist or display it again.
+Message status values are `sending`, `sent`, `read`, and `failed`. A receiver
+must acknowledge a duplicate `messageId`, but must not persist or display it
+again.
 
-## Versioning
+## Versioning and errors
 
-Unknown fields must be ignored. New optional fields are backward compatible. A breaking change increments `major` and returns `VERSION_TOO_OLD` or `PROTOCOL_UNSUPPORTED`.
+Future protocol renames add a dialect alias and magic without replacing the
+existing values. Breaking wire changes increment `major` and return
+`VERSION_TOO_OLD` or `PROTOCOL_UNSUPPORTED`.
 
-## Error codes
-
-`PROTOCOL_UNSUPPORTED`, `VERSION_TOO_OLD`, `CERTIFICATE_CHANGED`, `DEVICE_KEY_CHANGED`, `DEVICE_NOT_TRUSTED`, `FRIENDSHIP_REQUIRED`.
+Error codes include `PROTOCOL_UNSUPPORTED`, `VERSION_TOO_OLD`,
+`CERTIFICATE_CHANGED`, `DEVICE_KEY_CHANGED`, `DEVICE_NOT_TRUSTED`, and
+`FRIENDSHIP_REQUIRED`.
