@@ -53,26 +53,26 @@
                   <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message) || attachmentNeedsDecision(message)" @click="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
-                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
+                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                   </button>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
-                    <a-button size="mini" type="primary" @click.stop="acceptAttachment(message)">接收</a-button>
-                    <a-button size="mini" @click.stop="saveAttachmentAs(message)">另存</a-button>
-                    <a-button size="mini" status="danger" @click.stop="rejectAttachment(message)">拒绝</a-button>
+                    <a-button size="mini" type="primary" :loading="attachmentActionBusy(message)" @click.stop.prevent="acceptAttachment(message)">接收</a-button>
+                    <a-button size="mini" :loading="attachmentActionBusy(message)" @click.stop.prevent="saveAttachmentAs(message)">另存</a-button>
+                    <a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="rejectAttachment(message)">拒绝</a-button>
                   </div>
-                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
+                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
                 <template v-else>
                   <strong><icon-file /> {{ message.attachmentName || message.content }}</strong>
                   <span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
-                    <a-button size="mini" type="primary" @click="acceptAttachment(message)">接收</a-button>
-                    <a-button size="mini" @click="saveAttachmentAs(message)">另存</a-button>
-                    <a-button size="mini" status="danger" @click="rejectAttachment(message)">拒绝</a-button>
+                    <a-button size="mini" type="primary" :loading="attachmentActionBusy(message)" @click.stop.prevent="acceptAttachment(message)">接收</a-button>
+                    <a-button size="mini" :loading="attachmentActionBusy(message)" @click.stop.prevent="saveAttachmentAs(message)">另存</a-button>
+                    <a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="rejectAttachment(message)">拒绝</a-button>
                   </div>
-                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div>
+                  <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
-                <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" @click.stop="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
+                <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
               </template>
               <template v-else>{{ message.content }}</template>
               <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small>
@@ -187,6 +187,7 @@ const emojis = ['😀', '😂', '😍', '👍', '🎉', '🤔', '😭', '😎', 
 const pendingImages = ref<string[]>([])
 const messagePreviews = reactive<Record<string, string>>({})
 const retryingMessages = reactive<Record<string, boolean>>({})
+const attachmentActions = reactive<Record<string, boolean>>({})
 const imageViewerOpen = ref(false)
 const imageViewerIndex = ref(0)
 const imageViewerSource = ref('')
@@ -555,7 +556,7 @@ function playNotificationTone() {
     oscillator.stop(context.currentTime + .17)
   } catch { /* browser audio may be unavailable */ }
 }
-async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); Message.success('文件已发送') } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
+async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); notifyAttachmentResult(message) } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
 async function retryMessage(message: any) {
   if (!message?.messageId || retryingMessages[message.messageId]) return
   retryingMessages[message.messageId] = true
@@ -566,7 +567,7 @@ async function retryMessage(message: any) {
       ? await ChatService.RetryAttachment(message.messageId)
       : await ChatService.RetryMessage(message.messageId)
     store.handleEvent('chat:message', retried)
-    Message.success('附件已发送')
+    notifyAttachmentResult(retried)
   } catch (error: any) {
     message.status = 'failed'
     if (message.kind === 'file') message.attachmentStatus = 'failed'
@@ -575,10 +576,72 @@ async function retryMessage(message: any) {
     delete retryingMessages[message.messageId]
   }
 }
-async function acceptAttachment(message: any) { try { const attachment = await ChatService.AcceptAttachment(message.attachmentId); message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('已开始接收文件') } catch (error: any) { Message.error(error?.message || '接收文件失败') } }
-async function saveAttachmentAs(message: any) { try { const attachment = await ChatService.SaveAttachmentAs(message.attachmentId); if (attachment.status !== 'receiving' && attachment.status !== 'saved') return; message.attachmentStatus = attachment.status; message.attachmentPath = attachment.localPath; await loadMessagePreview(message); Message.success('已开始接收文件') } catch (error: any) { Message.error(error?.message || '另存附件失败') } }
-async function rejectAttachment(message: any) { try { await ChatService.RejectAttachment(message.attachmentId); message.attachmentStatus = 'rejected'; message.status = 'rejected' } catch (error: any) { Message.error(error?.message || '拒绝文件失败') } }
-async function cancelAttachment(message: any) { try { await ChatService.CancelAttachment(message.attachmentId); message.attachmentStatus = 'canceled'; message.status = 'canceled'; delete store.transferProgress[message.attachmentId] } catch (error: any) { Message.error(error?.message || '取消传输失败') } }
+async function acceptAttachment(message: any) {
+  if (attachmentActionBusy(message)) return
+  const previousStatus = message.attachmentStatus
+  const previousMessageStatus = message.status
+  attachmentActions[message.attachmentId] = true
+  message.attachmentStatus = 'receiving'
+  message.status = 'receiving'
+  try {
+    await nextTick()
+    const attachment = await ChatService.AcceptAttachment(message.attachmentId)
+    message.attachmentStatus = attachment.status
+    message.attachmentPath = attachment.localPath
+    await loadMessagePreview(message)
+    Message.success('已开始接收文件')
+  } catch (error: any) {
+    message.attachmentStatus = previousStatus
+    message.status = previousMessageStatus
+    Message.error(error?.message || '接收文件失败')
+  } finally { delete attachmentActions[message.attachmentId] }
+}
+async function saveAttachmentAs(message: any) {
+  if (attachmentActionBusy(message)) return
+  attachmentActions[message.attachmentId] = true
+  try {
+    await nextTick()
+    const attachment = await ChatService.SaveAttachmentAs(message.attachmentId)
+    if (attachment.status !== 'receiving' && attachment.status !== 'saved') return
+    message.attachmentStatus = attachment.status
+    message.attachmentPath = attachment.localPath
+    await loadMessagePreview(message)
+    Message.success('已开始接收文件')
+  } catch (error: any) { Message.error(error?.message || '另存附件失败')
+  } finally { delete attachmentActions[message.attachmentId] }
+}
+async function rejectAttachment(message: any) {
+  if (attachmentActionBusy(message)) return
+  const previousStatus = message.attachmentStatus
+  const previousMessageStatus = message.status
+  attachmentActions[message.attachmentId] = true
+  message.attachmentStatus = 'rejected'
+  message.status = 'rejected'
+  try { await nextTick(); await ChatService.RejectAttachment(message.attachmentId); Message.info('已拒绝接收文件')
+  } catch (error: any) { message.attachmentStatus = previousStatus; message.status = previousMessageStatus; Message.error(error?.message || '拒绝文件失败')
+  } finally { delete attachmentActions[message.attachmentId] }
+}
+async function cancelAttachment(message: any) {
+  if (attachmentActionBusy(message)) return
+  const previousStatus = message.attachmentStatus
+  const previousMessageStatus = message.status
+  attachmentActions[message.attachmentId] = true
+  message.attachmentStatus = 'canceled'
+  message.status = 'canceled'
+  try { await nextTick(); await ChatService.CancelAttachment(message.attachmentId); delete store.transferProgress[message.attachmentId]; Message.info('文件传输已取消')
+  } catch (error: any) { message.attachmentStatus = previousStatus; message.status = previousMessageStatus; Message.error(error?.message || '取消传输失败')
+  } finally { delete attachmentActions[message.attachmentId] }
+}
+function attachmentActionBusy(message: any): boolean { return Boolean(message?.attachmentId && attachmentActions[message.attachmentId]) }
+function notifyAttachmentResult(message: any) {
+  switch (message?.attachmentStatus || message?.status) {
+    case 'sent': Message.success('文件已发送'); break
+    case 'rejected': Message.warning('对方已拒绝接收文件'); break
+    case 'canceled': Message.info('文件传输已取消'); break
+    case 'failed': Message.error('文件发送失败'); break
+    default: Message.info('文件正在等待对方接收')
+  }
+}
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
 function attachmentAwaitingAcceptance(message: any): boolean {
   if (message?.senderDeviceId !== deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
