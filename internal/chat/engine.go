@@ -366,7 +366,7 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	// been disabled. Friends and peers with an active friend request still need
 	// a direct connection for messaging and request responses.
 	isFriend := e.isFriend(hello.DeviceID)
-	if !isFriend && !e.Profile().Discoverable {
+	if !isFriend && !e.hasPendingFriendRequest(hello.DeviceID) && !e.Profile().Discoverable {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
 		return
 	}
@@ -1357,6 +1357,10 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 			continue
 		}
 		if !ok {
+			if e.hasPendingFriendRequest(peer.DeviceID) {
+				e.setPeerDiscoveryVisible(peer.DeviceID, false)
+				continue
+			}
 			e.forgetDiscoveredPeer(peer.DeviceID)
 		}
 	}
@@ -2546,6 +2550,19 @@ func (e *Engine) peer(deviceID string) (Peer, error) {
 func (e *Engine) isFriend(deviceID string) bool {
 	peer, err := e.peer(deviceID)
 	return err == nil && peer.Relation == PeerRelation
+}
+
+func (e *Engine) hasPendingFriendRequest(deviceID string) bool {
+	requests, err := listFriendRequestRows(context.Background(), "")
+	if err != nil {
+		return false
+	}
+	for _, request := range requests {
+		if request.DeviceID == deviceID && (request.Status == "queued" || request.Status == "sent" || request.Status == "pending") {
+			return true
+		}
+	}
+	return false
 }
 
 // canRespondToDiscovery is the privacy boundary for the discovery protocol.
