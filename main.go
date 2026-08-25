@@ -7,6 +7,7 @@ import (
 
 	"flyqpro/internal/service"
 	"flyqpro/internal/service/db"
+	"flyqpro/internal/version"
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -33,8 +34,8 @@ func main() {
 		backgroundType = application.BackgroundTypeTransparent
 	}
 	app := application.New(application.Options{
-		Name:        "FlyQPro",
-		Description: "局域网点对点聊天工具",
+		Name:        "飞秋Pro",
+		Description: "版本：v" + version.AppVersion + "\n技术栈：Go、Wails v3、Vue 3、TypeScript、Arco Design、SQLite\n技术支持：广州大智汇信息科技有限公司",
 		Services: []application.Service{
 			application.NewService(chatService),
 		},
@@ -45,6 +46,7 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
+	configureApplicationMenu(app)
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "FlyQPro",
@@ -79,4 +81,34 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// configureApplicationMenu replaces Wails' English About role on macOS with
+// a localized menu item. The package/binary name remains FlyQPro so existing
+// DMG names and installation paths do not change.
+func configureApplicationMenu(app *application.App) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+
+	menu := application.NewMenu()
+	appMenu := menu.AddSubmenu("飞秋Pro")
+	appMenu.Add("关于飞秋Pro").OnClick(func(_ *application.Context) {
+		app.Menu.ShowAbout()
+	})
+	appMenu.AddSeparator()
+	appMenu.AddRole(application.ServicesMenu)
+	appMenu.AddSeparator()
+	appMenu.AddRole(application.Hide)
+	appMenu.AddRole(application.HideOthers)
+	appMenu.AddRole(application.UnHide)
+	appMenu.AddSeparator()
+	appMenu.AddRole(application.Quit)
+
+	menu.AddRole(application.FileMenu)
+	menu.AddRole(application.EditMenu)
+	menu.AddRole(application.ViewMenu)
+	menu.AddRole(application.WindowMenu)
+	menu.AddRole(application.HelpMenu)
+	app.Menu.Set(menu)
 }
