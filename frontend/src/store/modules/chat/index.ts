@@ -43,7 +43,7 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:transfer-progress') {
         const progress = value as TransferProgress
         if (progress?.attachmentId) {
-          if (['completed', 'canceled', 'failed'].includes(progress.phase)) delete this.transferProgress[progress.attachmentId]
+          if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) delete this.transferProgress[progress.attachmentId]
           else this.transferProgress[progress.attachmentId] = {
             ...this.transferProgress[progress.attachmentId],
             ...progress,

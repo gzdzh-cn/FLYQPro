@@ -72,6 +72,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
+                <div v-if="attachmentTerminalStatus(message)" class="attachment-terminal-status" :class="`is-${attachmentTerminalStatus(message)}`">{{ attachmentTerminalLabel(message) }}</div>
                 <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
               </template>
               <template v-else>{{ message.content }}</template>
@@ -661,6 +662,15 @@ function notifyAttachmentResult(message: any) {
     default: Message.info('文件正在等待对方接收')
   }
 }
+function attachmentTerminalStatus(message: any): string {
+  const status = message?.attachmentStatus || message?.status
+  return ['canceled', 'rejected', 'failed'].includes(status) ? status : ''
+}
+function attachmentTerminalLabel(message: any): string {
+  const status = attachmentTerminalStatus(message)
+  if (status === 'rejected') return message?.senderDeviceId === deviceInfo.value?.deviceId ? '对方已拒绝' : '已拒绝'
+  return ({ canceled: '已取消', failed: '传输失败' } as Record<string, string>)[status] || ''
+}
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
 function attachmentAwaitingAcceptance(message: any): boolean {
   if (message?.senderDeviceId !== deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
@@ -688,6 +698,7 @@ function transferProgressLabel(message: any): string {
   if (!progress) return ''
   if (progress.phase === 'failed') return '传输失败'
   if (progress.phase === 'canceled') return '已取消'
+  if (progress.phase === 'rejected') return '已拒绝'
   if (progress.phase === 'awaiting_acceptance') return '等待对方接收'
   if (progress.phase === 'completed') return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方已接收' : '接收完成'
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived !== undefined ? '对方接收中' : '发送中'
@@ -695,7 +706,7 @@ function transferProgressLabel(message: any): string {
 }
 function imageTransferActive(message: any): boolean {
   const progress = transferProgressFor(message)
-  return Boolean(progress && !['completed', 'canceled', 'failed'].includes(progress.phase))
+  return Boolean(progress && !['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase))
 }
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
@@ -795,7 +806,10 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .conversation-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; padding: 18px 14px; }
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
- .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
+.attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
+.attachment-terminal-status { margin-top: 7px; font-size: 12px; font-weight: 500; color: var(--muted-text); }
+.attachment-terminal-status.is-canceled { color: var(--muted-text); }
+.attachment-terminal-status.is-rejected, .attachment-terminal-status.is-failed { color: var(--danger); }
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
 .request-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 .attachment-pending { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }

@@ -90,7 +90,7 @@ export interface TransferProgress {
   received?: number
   remoteReceived?: number
   direction: 'send' | 'receive' | 'remote-receive'
-  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'failed' | string
+  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
 }
 
 export interface NetworkStatus {

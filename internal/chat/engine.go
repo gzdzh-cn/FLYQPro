@@ -1926,6 +1926,12 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 		if err := e.transferFileWithDialect(ctx, peer, message, path, sum, dialect); err == nil {
 			return nil
 		} else {
+			// Cancellation and rejection are intentional terminal outcomes.
+			// Do not fall through to another protocol dialect after the user
+			// has stopped the transfer or the receiver has refused it.
+			if errors.Is(err, errAttachmentCanceled) || errors.Is(err, errAttachmentRejected) {
+				return err
+			}
 			lastErr = err
 		}
 	}
@@ -1967,6 +1973,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	}
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil {
+		if session.isCanceled() {
+			return errAttachmentCanceled
+		}
 		return fmt.Errorf("对方握手失败")
 	}
 	if response.Type == "error" {
@@ -1996,6 +2005,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if supportsDemand || supportsPreflight {
 		offerResponse, err := readFileOfferResponse(decoder, message.AttachmentID)
 		if err != nil {
+			if session.isCanceled() {
+				return errAttachmentCanceled
+			}
 			return err
 		}
 		if offerResponse.Status == "pending" {
@@ -2003,6 +2015,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
 			offerResponse, err = readAttachmentDecision(decoder, message.AttachmentID)
 			if err != nil {
+				if session.isCanceled() {
+					return errAttachmentCanceled
+				}
 				return err
 			}
 			_ = conn.SetDeadline(time.Time{})
@@ -2048,6 +2063,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			if supportsProgress {
 				progress, err := readFileProgress(decoder, message.AttachmentID)
 				if err != nil {
+					if session.isCanceled() {
+						return errAttachmentCanceled
+					}
 					return err
 				}
 				phase := "receiving"
@@ -2082,6 +2100,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if supportsProgress {
 		progress, err := readFileProgress(decoder, message.AttachmentID)
 		if err != nil {
+			if session.isCanceled() {
+				return errAttachmentCanceled
+			}
 			return err
 		}
 		phase := "completed"
@@ -2191,7 +2212,7 @@ func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, stat
 	_ = UpdateMessageStatus(ctx, message.MessageID, status)
 	_ = SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: messageAttachmentSHA(ctx, message), ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime, LocalPath: message.AttachmentPath, Status: status})
 	e.emit("chat:message", message)
-	phase := map[string]string{"sent": "completed", "failed": "failed", "canceled": "canceled", "rejected": "canceled"}[status]
+	phase := map[string]string{"sent": "completed", "failed": "failed", "canceled": "canceled", "rejected": "rejected"}[status]
 	if phase != "" {
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, strings.TrimPrefix(message.ConversationID, "conv-"), message.AttachmentSize, message.AttachmentSize, "send", phase)
 	}
