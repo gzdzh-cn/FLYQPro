@@ -138,6 +138,25 @@ func TestDiscoveryPermissionAllowsStrangersWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestDiscoveryResponseMustBelongToCurrentScan(t *testing.T) {
+	engine := NewEngine()
+	engine.activeDiscoveryIDs = map[string]struct{}{"current-scan": {}}
+	engine.activeDiscoverySeen = make(map[string]struct{})
+
+	if engine.acceptDiscoveryResponse("old-scan", "stale-device") {
+		t.Fatal("a delayed response from an old scan must be ignored")
+	}
+	if !engine.acceptDiscoveryResponse("current-scan", "current-device") {
+		t.Fatal("the response for the active scan must be accepted")
+	}
+	if _, ok := engine.activeDiscoverySeen["stale-device"]; ok {
+		t.Fatal("stale device must not be included in the current scan snapshot")
+	}
+	if _, ok := engine.activeDiscoverySeen["current-device"]; !ok {
+		t.Fatal("current device must be included in the current scan snapshot")
+	}
+}
+
 func TestDiscoverabilityPresenceTransition(t *testing.T) {
 	tests := []struct {
 		name            string

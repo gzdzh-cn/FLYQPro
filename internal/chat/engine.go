@@ -44,6 +44,10 @@ type Engine struct {
 	attachmentMigration bool
 	friendRestoreAt     map[string]time.Time
 	presenceMu          sync.Mutex
+	discoveryScanMu     sync.Mutex
+	discoveryMu         sync.Mutex
+	activeDiscoveryIDs  map[string]struct{}
+	activeDiscoverySeen map[string]struct{}
 }
 
 func (e *Engine) SetAttachmentMigrationActive(active bool) {
@@ -1118,6 +1122,9 @@ func (e *Engine) discoveryLoop() {
 				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort}, response)
 			}
 		case "announce":
+			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID) {
+				continue
+			}
 			message.IP = addr.IP.String()
 			e.handleAnnounce(message)
 		case "withdraw":
@@ -1164,6 +1171,24 @@ func (e *Engine) isStarted() bool {
 }
 
 func (e *Engine) scanNetwork(includeUnicastProbe bool) {
+	// A scan is a snapshot. Serialize manual and periodic scans so a delayed
+	// response from an older scan cannot keep a disabled device visible.
+	e.discoveryScanMu.Lock()
+	defer e.discoveryScanMu.Unlock()
+
+	e.discoveryMu.Lock()
+	e.activeDiscoveryIDs = make(map[string]struct{})
+	e.activeDiscoverySeen = make(map[string]struct{})
+	e.discoveryMu.Unlock()
+	defer func() {
+		e.discoveryMu.Lock()
+		seen := e.activeDiscoverySeen
+		e.activeDiscoveryIDs = nil
+		e.activeDiscoverySeen = nil
+		e.discoveryMu.Unlock()
+		e.removeUnseenDiscoveredPeers(seen)
+	}()
+
 	// Scanning and being discoverable are independent. A disabled device may
 	// still look for devices that opted in; only the receiver decides whether
 	// it should answer the discover request. This is also required for Android
@@ -1182,6 +1207,9 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	for _, dialect := range protocolDialects {
 		message := e.helloMessageForDialect("discover", dialect)
 		message.RequestID = newID()
+		e.discoveryMu.Lock()
+		e.activeDiscoveryIDs[message.RequestID] = struct{}{}
+		e.discoveryMu.Unlock()
 		for index := range targets[:len(targets)-len(subnetTargets)] {
 			if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
 				firstErr = err
@@ -1197,6 +1225,9 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 			}
 		}
 	}
+	// UDP responses are handled by the long-running listener. Give them a
+	// short window to arrive before removing devices absent from this snapshot.
+	time.Sleep(300 * time.Millisecond)
 	e.mu.Lock()
 	e.lastScan = time.Now()
 	if firstErr != nil {
@@ -1252,6 +1283,9 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
 				return
 			}
+			if response.RequestID != message.RequestID || !e.acceptDiscoveryResponse(response.RequestID, response.DeviceID) {
+				return
+			}
 			if _, ok := protocolDialectForMessage(response); !ok {
 				return
 			}
@@ -1269,6 +1303,32 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 	}
 	wait.Wait()
 	return firstErr
+}
+
+func (e *Engine) acceptDiscoveryResponse(requestID, deviceID string) bool {
+	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(deviceID) == "" {
+		return false
+	}
+	e.discoveryMu.Lock()
+	defer e.discoveryMu.Unlock()
+	if _, ok := e.activeDiscoveryIDs[requestID]; !ok {
+		return false
+	}
+	if e.activeDiscoverySeen != nil {
+		e.activeDiscoverySeen[deviceID] = struct{}{}
+	}
+	return true
+}
+
+func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
+	if seen == nil {
+		return
+	}
+	for _, peer := range e.PeersByRelation(DiscoveredState) {
+		if _, ok := seen[peer.DeviceID]; !ok {
+			e.forgetDiscoveredPeer(peer.DeviceID)
+		}
+	}
 }
 
 func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {
