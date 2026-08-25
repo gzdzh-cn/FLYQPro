@@ -387,9 +387,10 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: err.Error()})
 		return
 	}
-	if !isFriend {
-		e.setPeerDiscoveryVisible(hello.DeviceID, false)
-	}
+	// An incoming chat/health-probe connection must not change discoveryVisible.
+	// That field belongs to the current discovery scan. Clearing it here made a
+	// visible stranger disappear whenever it probed this desktop, then reappear
+	// on the next scan.
 	if !hello.Probe || !wasOnline {
 		e.emit("chat:peer-updated", e.Peers())
 	}
@@ -1240,9 +1241,10 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 			}
 		}
 	}
-	// UDP responses are handled by the long-running listener. Give them a
-	// short window to arrive before removing devices absent from this snapshot.
-	time.Sleep(300 * time.Millisecond)
+	// UDP responses are handled by the long-running listener. Desktop peers may
+	// answer slightly later while their own scan is running; wait for the
+	// response window to settle before removing devices absent from this scan.
+	time.Sleep(1 * time.Second)
 	e.mu.Lock()
 	e.lastScan = time.Now()
 	if firstErr != nil {
@@ -2441,6 +2443,14 @@ func (e *Engine) probeKnownPeers() {
 	var wait sync.WaitGroup
 	for _, peer := range peers {
 		peer := peer
+		// Discovery peers are kept online by the discovery snapshot. Probing
+		// strangers over TLS is only a best-effort connection check and can fail
+		// transiently even while UDP discovery is healthy; changing Online here
+		// makes the discovery list flicker every liveness interval. Friends still
+		// use probes to keep their direct messaging endpoint current.
+		if peer.Relation != PeerRelation {
+			continue
+		}
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
