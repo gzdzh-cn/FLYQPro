@@ -312,7 +312,9 @@ func (e *Engine) handleDiscoveryTCP(conn net.Conn) {
 		return
 	}
 	if e.canRespondToDiscovery(message.DeviceID) {
-		_ = writeWire(conn, e.helloMessageForDialect("announce", dialect))
+		response := e.helloMessageForDialect("announce", dialect)
+		response.RequestID = message.RequestID
+		_ = writeWire(conn, response)
 	}
 }
 
@@ -1111,7 +1113,9 @@ func (e *Engine) discoveryLoop() {
 				// Android discovery sends from an ephemeral UDP source port while
 				// listening on the canonical discovery port. Always send announces
 				// to that fixed port so both desktop and Android can receive them.
-				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort}, e.helloMessageForDialect("announce", dialect))
+				response := e.helloMessageForDialect("announce", dialect)
+				response.RequestID = message.RequestID
+				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort}, response)
 			}
 		case "announce":
 			message.IP = addr.IP.String()
@@ -1160,25 +1164,10 @@ func (e *Engine) isStarted() bool {
 }
 
 func (e *Engine) scanNetwork(includeUnicastProbe bool) {
-	// A discovery request contains the sender's identity. It must not be
-	// broadcast while discovery is disabled, because older clients may treat a
-	// request as a visible peer instead of waiting for an announce response.
-	// Known friends are queried directly so their presence can still recover
-	// without exposing this device to strangers.
-	if !e.Profile().Discoverable {
-		firstErr := e.scanKnownFriends()
-		e.mu.Lock()
-		e.lastScan = time.Now()
-		if firstErr != nil {
-			e.lastErr = firstErr.Error()
-		} else {
-			e.lastErr = ""
-		}
-		e.mu.Unlock()
-		e.emit("chat:network-status", e.NetworkStatus())
-		return
-	}
-
+	// Scanning and being discoverable are independent. A disabled device may
+	// still look for devices that opted in; only the receiver decides whether
+	// it should answer the discover request. This is also required for Android
+	// to find a discoverable device when the desktop setting is disabled.
 	targets := broadcastAddresses()
 	if len(targets) == 0 {
 		targets = []net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
@@ -1192,6 +1181,7 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 	var firstErr error
 	for _, dialect := range protocolDialects {
 		message := e.helloMessageForDialect("discover", dialect)
+		message.RequestID = newID()
 		for index := range targets[:len(targets)-len(subnetTargets)] {
 			if err := e.sendDiscovery(&targets[index], message); err != nil && firstErr == nil {
 				firstErr = err
@@ -2348,7 +2338,17 @@ func (e *Engine) probeKnownPeers() {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			online := e.probePeer(peer) == nil
+			probeErr := e.probePeer(peer)
+			online := probeErr == nil
+			if probeErr != nil && strings.Contains(probeErr.Error(), "DISCOVERY_DISABLED") && peer.Relation != PeerRelation {
+				// A cached stranger explicitly opted out of discovery. Remove the
+				// stale result instead of leaving it in the desktop discovery list.
+				e.forgetDiscoveredPeer(peer.DeviceID)
+				changedMu.Lock()
+				changed = true
+				changedMu.Unlock()
+				return
+			}
 			// probePeer updates lastSeen (and may optimistically mark the in-memory
 			// peer online) before returning. Compare with the snapshot used for the
 			// probe so an offline peer loaded from SQLite still produces the online
@@ -2447,17 +2447,18 @@ func (e *Engine) isFriend(deviceID string) bool {
 }
 
 // canRespondToDiscovery is the privacy boundary for the discovery protocol.
-// A friend is addressable even when the local device is not generally
-// discoverable; an unknown device must opt in through the profile setting.
+// The discoverable switch controls whether this device appears in discovery
+// results. Friends do not need discovery to message each other: their saved
+// endpoint is accepted by canAcceptPeerConnection below.
 func (e *Engine) canRespondToDiscovery(deviceID string) bool {
-	return e.Profile().Discoverable || e.isFriend(deviceID)
+	return e.Profile().Discoverable
 }
 
 // canAcceptPeerConnection also permits the direct response to a friend
 // request. This keeps the request/accept flow working when the requester has
 // discovery disabled, without making the requester generally discoverable.
 func (e *Engine) canAcceptPeerConnection(deviceID string) bool {
-	if e.canRespondToDiscovery(deviceID) {
+	if e.Profile().Discoverable || e.isFriend(deviceID) {
 		return true
 	}
 	requests, err := listFriendRequestRows(context.Background(), "")
