@@ -18,7 +18,7 @@ export const useChatStore = defineStore('chat', {
   }),
   getters: {
     friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
-    discovered: (state) => state.peers.filter((peer) => peer.relation !== 'friend' && peer.online),
+    discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online),
     pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },

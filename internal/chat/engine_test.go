@@ -115,8 +115,8 @@ func TestDiscoveryPermissionKeepsFriendsDirectlyReachableWhenDisabled(t *testing
 	engine.profile = Profile{Discoverable: false}
 	engine.peers["friend-1"] = Peer{DeviceID: "friend-1", Relation: PeerRelation}
 
-	if engine.canRespondToDiscovery("friend-1") {
-		t.Fatal("friends must not appear in discovery when discovery is disabled")
+	if engine.discoveryResponseScope("friend-1") != DiscoveryScopeFriend {
+		t.Fatal("friends must remain privately discoverable when public discovery is disabled")
 	}
 	if engine.canRespondToDiscovery("stranger-1") {
 		t.Fatal("strangers must not be discoverable when general discovery is disabled")
@@ -138,15 +138,36 @@ func TestDiscoveryPermissionAllowsStrangersWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestDiscoveryScopeSeparatesFriendVisibilityFromRelationship(t *testing.T) {
+	engine := NewEngine()
+	engine.peers["friend-1"] = Peer{DeviceID: "friend-1", Relation: PeerRelation}
+
+	engine.profile = Profile{Discoverable: false}
+	if got := engine.discoveryResponseScope("friend-1"); got != DiscoveryScopeFriend {
+		t.Fatalf("private friend scope = %q, want %q", got, DiscoveryScopeFriend)
+	}
+	if got := engine.discoveryResponseScope("stranger-1"); got != "" {
+		t.Fatalf("disabled stranger scope = %q, want no response", got)
+	}
+
+	engine.profile = Profile{Discoverable: true}
+	if got := engine.discoveryResponseScope("friend-1"); got != DiscoveryScopePublic {
+		t.Fatalf("public friend scope = %q, want %q", got, DiscoveryScopePublic)
+	}
+	if got := engine.discoveryResponseScope("stranger-1"); got != DiscoveryScopePublic {
+		t.Fatalf("public stranger scope = %q, want %q", got, DiscoveryScopePublic)
+	}
+}
+
 func TestDiscoveryResponseMustBelongToCurrentScan(t *testing.T) {
 	engine := NewEngine()
 	engine.activeDiscoveryIDs = map[string]struct{}{"current-scan": {}}
 	engine.activeDiscoverySeen = make(map[string]struct{})
 
-	if engine.acceptDiscoveryResponse("old-scan", "stale-device") {
+	if engine.acceptDiscoveryResponse("old-scan", "stale-device", DiscoveryScopePublic) {
 		t.Fatal("a delayed response from an old scan must be ignored")
 	}
-	if !engine.acceptDiscoveryResponse("current-scan", "current-device") {
+	if !engine.acceptDiscoveryResponse("current-scan", "current-device", DiscoveryScopePublic) {
 		t.Fatal("the response for the active scan must be accepted")
 	}
 	if _, ok := engine.activeDiscoverySeen["stale-device"]; ok {

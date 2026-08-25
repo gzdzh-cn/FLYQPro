@@ -3,13 +3,15 @@ package chat
 import "time"
 
 const (
-	ProtocolName    = "dzhgo"
-	ProtocolMajor   = 2
-	ProtocolMinor   = 0
-	DiscoveryPort   = 39190
-	DiscoveryMagic  = "DZHGO_DISCOVERY_V1"
-	PeerRelation    = "friend"
-	DiscoveredState = "discovered"
+	ProtocolName         = "dzhgo"
+	ProtocolMajor        = 2
+	ProtocolMinor        = 0
+	DiscoveryPort        = 39190
+	DiscoveryMagic       = "DZHGO_DISCOVERY_V1"
+	PeerRelation         = "friend"
+	DiscoveredState      = "discovered"
+	DiscoveryScopePublic = "public"
+	DiscoveryScopeFriend = "friend"
 )
 
 type ProtocolDialect struct {
@@ -67,6 +69,7 @@ type Peer struct {
 	ProtocolMajor          int       `json:"protocolMajor,omitempty"`
 	DiscoveryMagic         string    `json:"discoveryMagic,omitempty"`
 	Capabilities           []string  `json:"capabilities,omitempty"`
+	DiscoveryVisible       bool      `json:"discoveryVisible"`
 	Online                 bool      `json:"online"`
 	LastSeen               string    `json:"lastSeen"`
 	UpdatedAt              time.Time `json:"updatedAt"`
@@ -192,6 +195,7 @@ type wireMessage struct {
 	MinMajor         int      `json:"minMajor,omitempty"`
 	MinMinor         int      `json:"minMinor,omitempty"`
 	RequestID        string   `json:"requestId,omitempty"`
+	DiscoveryScope   string   `json:"discoveryScope,omitempty"`
 	MessageID        string   `json:"messageId,omitempty"`
 	DeviceID         string   `json:"deviceId,omitempty"`
 	Nickname         string   `json:"nickname,omitempty"`

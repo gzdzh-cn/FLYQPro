@@ -51,6 +51,7 @@ var schemaStatements = []string{
 		protocol_major INTEGER NOT NULL DEFAULT 0,
 		discovery_magic TEXT NOT NULL DEFAULT '',
 		capabilities TEXT NOT NULL DEFAULT '',
+		discovery_visible INTEGER NOT NULL DEFAULT 0,
 		last_seen TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL

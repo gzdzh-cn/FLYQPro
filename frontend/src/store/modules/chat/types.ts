@@ -30,6 +30,7 @@ export interface Peer {
   protocolMajor?: number
   discoveryMagic?: string
   capabilities?: string[]
+  discoveryVisible: boolean
   online: boolean
   lastSeen: string
 }

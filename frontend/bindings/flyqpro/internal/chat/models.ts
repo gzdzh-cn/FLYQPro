@@ -483,6 +483,7 @@ export class Peer {
     "protocolMajor"?: number;
     "discoveryMagic"?: string;
     "capabilities"?: string[];
+    "discoveryVisible": boolean;
     "online": boolean;
     "lastSeen": string;
     "updatedAt": string;
@@ -521,6 +522,9 @@ export class Peer {
         }
         if (!("remark" in $$source)) {
             this["remark"] = "";
+        }
+        if (!("discoveryVisible" in $$source)) {
+            this["discoveryVisible"] = false;
         }
         if (!("online" in $$source)) {
             this["online"] = false;

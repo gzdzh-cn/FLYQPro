@@ -315,9 +315,10 @@ func (e *Engine) handleDiscoveryTCP(conn net.Conn) {
 	if !compatible {
 		return
 	}
-	if e.canRespondToDiscovery(message.DeviceID) {
+	if scope := e.discoveryResponseScope(message.DeviceID); scope != "" {
 		response := e.helloMessageForDialect("announce", dialect)
 		response.RequestID = message.RequestID
+		response.DiscoveryScope = scope
 		_ = writeWire(conn, response)
 	}
 }
@@ -364,17 +365,30 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	// record. Do not let that path make a stranger visible after discovery has
 	// been disabled. Friends and peers with an active friend request still need
 	// a direct connection for messaging and request responses.
-	if !e.canAcceptPeerConnection(hello.DeviceID) {
+	isFriend := e.isFriend(hello.DeviceID)
+	if !isFriend && !e.Profile().Discoverable {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
+		return
+	}
+	existing, existingErr := e.peer(hello.DeviceID)
+	if hello.Probe && existingErr != nil && !isFriend {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: "PEER_NOT_FOUND"})
 		return
 	}
 	wasOnline := false
 	if existing, existingErr := e.peer(hello.DeviceID); existingErr == nil {
 		wasOnline = existing.Online
 	}
-	if err := e.upsertWirePeerWithOptions(hello); err != nil {
+	discoveryVisible := false
+	if existingErr == nil {
+		discoveryVisible = existing.DiscoveryVisible
+	}
+	if err := e.upsertWirePeerWithOptions(hello, discoveryVisible); err != nil {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: err.Error()})
 		return
+	}
+	if !isFriend {
+		e.setPeerDiscoveryVisible(hello.DeviceID, false)
 	}
 	if !hello.Probe || !wasOnline {
 		e.emit("chat:peer-updated", e.Peers())
@@ -1113,16 +1127,17 @@ func (e *Engine) discoveryLoop() {
 		}
 		switch message.Type {
 		case "discover":
-			if e.canRespondToDiscovery(message.DeviceID) {
+			if scope := e.discoveryResponseScope(message.DeviceID); scope != "" {
 				// Android discovery sends from an ephemeral UDP source port while
 				// listening on the canonical discovery port. Always send announces
 				// to that fixed port so both desktop and Android can receive them.
 				response := e.helloMessageForDialect("announce", dialect)
 				response.RequestID = message.RequestID
+				response.DiscoveryScope = scope
 				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort}, response)
 			}
 		case "announce":
-			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID) {
+			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID, message.DiscoveryScope) {
 				continue
 			}
 			message.IP = addr.IP.String()
@@ -1283,7 +1298,7 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
 				return
 			}
-			if response.RequestID != message.RequestID || !e.acceptDiscoveryResponse(response.RequestID, response.DeviceID) {
+			if response.RequestID != message.RequestID || !e.acceptDiscoveryResponse(response.RequestID, response.DeviceID, response.DiscoveryScope) {
 				return
 			}
 			if _, ok := protocolDialectForMessage(response); !ok {
@@ -1305,18 +1320,27 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 	return firstErr
 }
 
-func (e *Engine) acceptDiscoveryResponse(requestID, deviceID string) bool {
+func (e *Engine) acceptDiscoveryResponse(requestID, deviceID, scope string) bool {
 	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(deviceID) == "" {
 		return false
 	}
 	e.discoveryMu.Lock()
-	defer e.discoveryMu.Unlock()
 	if _, ok := e.activeDiscoveryIDs[requestID]; !ok {
+		e.discoveryMu.Unlock()
 		return false
 	}
-	if e.activeDiscoverySeen != nil {
+	e.discoveryMu.Unlock()
+	if scope != DiscoveryScopePublic && scope != DiscoveryScopeFriend {
+		return false
+	}
+	if scope == DiscoveryScopeFriend && !e.isFriend(deviceID) {
+		return false
+	}
+	e.discoveryMu.Lock()
+	if scope == DiscoveryScopePublic && e.activeDiscoverySeen != nil {
 		e.activeDiscoverySeen[deviceID] = struct{}{}
 	}
+	e.discoveryMu.Unlock()
 	return true
 }
 
@@ -1324,8 +1348,15 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 	if seen == nil {
 		return
 	}
-	for _, peer := range e.PeersByRelation(DiscoveredState) {
-		if _, ok := seen[peer.DeviceID]; !ok {
+	for _, peer := range e.Peers() {
+		_, ok := seen[peer.DeviceID]
+		if peer.Relation == PeerRelation {
+			if !ok && peer.DiscoveryVisible {
+				e.setPeerDiscoveryVisible(peer.DeviceID, false)
+			}
+			continue
+		}
+		if !ok {
 			e.forgetDiscoveredPeer(peer.DeviceID)
 		}
 	}
@@ -1362,18 +1393,18 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 }
 
-func (e *Engine) upsertWirePeer(message wireMessage) error {
-	return e.upsertWirePeerWithOptions(message)
+func (e *Engine) upsertWirePeer(message wireMessage, discoveryVisible bool) error {
+	return e.upsertWirePeerWithOptions(message, discoveryVisible)
 }
 
-func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
+func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible bool) error {
 	if message.PublicKey != "" && !validDevicePublicKey(message.DeviceID, message.PublicKey) {
 		return fmt.Errorf("设备身份校验失败")
 	}
 	if strings.TrimSpace(message.DeviceID) == "" {
 		return fmt.Errorf("设备身份为空")
 	}
-	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, Relation: DiscoveredState, LastSeen: nowString()}
+	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, DiscoveryVisible: discoveryVisible, Relation: DiscoveredState, LastSeen: nowString()}
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
 		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
 			return fmt.Errorf("DEVICE_KEY_CHANGED")
@@ -1385,6 +1416,9 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 			peer.CertificateFingerprint = existing.CertificateFingerprint
 		}
 		peer.Relation, peer.Remark, peer.AvatarPath = existing.Relation, existing.Remark, existing.AvatarPath
+		if !discoveryVisible {
+			peer.DiscoveryVisible = existing.DiscoveryVisible
+		}
 		if peer.AvatarHash == "" {
 			peer.AvatarHash, peer.AvatarVersion = existing.AvatarHash, existing.AvatarVersion
 		}
@@ -1401,6 +1435,9 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage) error {
 	if old, exists := e.peers[peer.DeviceID]; exists {
 		peer.Relation, peer.Remark = old.Relation, old.Remark
 		peer.AvatarPath = old.AvatarPath
+		if !discoveryVisible {
+			peer.DiscoveryVisible = old.DiscoveryVisible
+		}
 		if peer.AvatarHash == "" {
 			peer.AvatarHash, peer.AvatarVersion = old.AvatarHash, old.AvatarVersion
 		}
@@ -1427,9 +1464,14 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 	if existing, err := e.peer(message.DeviceID); err == nil {
 		wasFriend = existing.Relation == PeerRelation
 	}
-	if err := e.upsertWirePeer(message); err != nil {
+	discoveryVisible := message.DiscoveryScope == DiscoveryScopePublic
+	if message.DiscoveryScope == DiscoveryScopeFriend && !e.isFriend(message.DeviceID) {
+		return errors.New("FRIEND_DISCOVERY_NOT_ALLOWED")
+	}
+	if err := e.upsertWirePeer(message, discoveryVisible); err != nil {
 		return err
 	}
+	e.setPeerDiscoveryVisible(message.DeviceID, discoveryVisible)
 	e.emit("chat:peer-updated", e.Peers())
 	if wasFriend {
 		if peer, err := e.peer(message.DeviceID); err == nil {
@@ -2511,26 +2553,39 @@ func (e *Engine) isFriend(deviceID string) bool {
 // results. Friends do not need discovery to message each other: their saved
 // endpoint is accepted by canAcceptPeerConnection below.
 func (e *Engine) canRespondToDiscovery(deviceID string) bool {
-	return e.Profile().Discoverable
+	return e.discoveryResponseScope(deviceID) != ""
+}
+
+func (e *Engine) discoveryResponseScope(deviceID string) string {
+	if e.isFriend(deviceID) {
+		if e.Profile().Discoverable {
+			return DiscoveryScopePublic
+		}
+		return DiscoveryScopeFriend
+	}
+	if e.Profile().Discoverable {
+		return DiscoveryScopePublic
+	}
+	return ""
 }
 
 // canAcceptPeerConnection also permits the direct response to a friend
 // request. This keeps the request/accept flow working when the requester has
 // discovery disabled, without making the requester generally discoverable.
 func (e *Engine) canAcceptPeerConnection(deviceID string) bool {
-	if e.Profile().Discoverable || e.isFriend(deviceID) {
-		return true
+	return e.Profile().Discoverable || e.isFriend(deviceID)
+}
+
+func (e *Engine) setPeerDiscoveryVisible(deviceID string, visible bool) {
+	if err := SetPeerDiscoveryVisible(context.Background(), deviceID, visible); err != nil {
+		return
 	}
-	requests, err := listFriendRequestRows(context.Background(), "")
-	if err != nil {
-		return false
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.DiscoveryVisible = visible
+		e.peers[deviceID] = peer
 	}
-	for _, request := range requests {
-		if request.DeviceID == deviceID && (request.Status == "pending" || request.Status == "sent" || request.Status == "queued") {
-			return true
-		}
-	}
-	return false
+	e.mu.Unlock()
 }
 
 func (e *Engine) updatePeerRelation(deviceID, relation string) {

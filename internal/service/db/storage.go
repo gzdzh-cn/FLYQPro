@@ -132,6 +132,7 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"peers", "protocol_major", "INTEGER NOT NULL DEFAULT 0"},
 		{"peers", "discovery_magic", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "capabilities", "TEXT NOT NULL DEFAULT ''"},
+		{"peers", "discovery_visible", "INTEGER NOT NULL DEFAULT 0"},
 		{"peers", "last_seen", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "updated_at", "TEXT NOT NULL DEFAULT ''"},

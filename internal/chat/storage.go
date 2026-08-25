@@ -51,6 +51,7 @@ type peerRow struct {
 	ProtocolMajor          int    `orm:"protocol_major"`
 	DiscoveryMagic         string `orm:"discovery_magic"`
 	Capabilities           string `orm:"capabilities"`
+	DiscoveryVisible       int    `orm:"discovery_visible"`
 	LastSeen               string `orm:"last_seen"`
 	UpdatedAt              string `orm:"updated_at"`
 }
@@ -234,10 +235,14 @@ func SaveIdentity(ctx context.Context, identity DeviceInfo, privateKeyPEM, certi
 }
 
 func UpsertPeer(ctx context.Context, peer Peer) error {
-	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, last_seen, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), peer.LastSeen, nowString(), nowString())
+	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, last_seen, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.LastSeen, nowString(), nowString())
+}
+
+func SetPeerDiscoveryVisible(ctx context.Context, deviceID string, visible bool) error {
+	return exec(ctx, `UPDATE peers SET discovery_visible=?, updated_at=? WHERE device_id=?`, boolInt(visible), nowString(), deviceID)
 }
 
 func SetPeerRelation(ctx context.Context, deviceID, relation string) error {
@@ -257,7 +262,7 @@ func SetPeerAvatar(ctx context.Context, deviceID, avatarPath, avatarHash string,
 }
 
 func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
-	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, last_seen, updated_at FROM peers`
+	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, last_seen, updated_at FROM peers`
 	args := []any{}
 	if relation != "" {
 		sql += ` WHERE relation=?`
@@ -274,7 +279,7 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 	}
 	peers := make([]Peer, 0, len(rows))
 	for _, row := range rows {
-		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
+		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
 	}
 	return peers, nil
 }
