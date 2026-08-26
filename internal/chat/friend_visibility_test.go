@@ -150,6 +150,42 @@ func TestRemovedFriendCanBeRediscoveredAsStranger(t *testing.T) {
 	}
 }
 
+func TestRemovedFriendAcceptsLegacyScopeLessAnnounce(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := MarkFriendRemoved(ctx, "peer-legacy-announce"); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	message := wireMessage{
+		Type:     "announce",
+		DeviceID: "peer-legacy-announce",
+		Nickname: "旧版设备",
+		Protocol: ProtocolName,
+		Major:    ProtocolMajor,
+		Magic:    DiscoveryMagic,
+	}
+	if got := engine.compatibilityDiscoveryScope(message); got != DiscoveryScopePublic {
+		t.Fatalf("删除好友的旧版 announce 未兼容为 public: %q", got)
+	}
+	message.DiscoveryScope = engine.compatibilityDiscoveryScope(message)
+	if err := engine.handleAnnounce(message); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Relation != DiscoveredState || !peers[0].DiscoveryVisible {
+		t.Fatalf("旧版设备删除后未重新显示在发现列表: %+v", peers)
+	}
+}
+
 func TestSendFailureStatusDistinguishesRemovedFriend(t *testing.T) {
 	if got := sendFailureStatus(fmt.Errorf("对方握手失败: FRIENDSHIP_REQUIRED")); got != "not_friend" {
 		t.Fatalf("好友关系拒绝未转换为 not_friend: %s", got)

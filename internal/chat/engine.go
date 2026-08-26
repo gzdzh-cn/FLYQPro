@@ -1206,6 +1206,7 @@ func (e *Engine) discoveryLoop() {
 				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort}, response)
 			}
 		case "announce":
+			message.DiscoveryScope = e.compatibilityDiscoveryScope(message)
 			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID, message.DiscoveryScope) {
 				continue
 			}
@@ -1368,6 +1369,7 @@ func (e *Engine) probeTCPSubnets(message wireMessage, targets []net.UDPAddr) err
 			if err := json.NewDecoder(conn).Decode(&response); err != nil || response.Type != "announce" || response.DeviceID == e.identity.DeviceID {
 				return
 			}
+			response.DiscoveryScope = e.compatibilityDiscoveryScope(response)
 			if response.RequestID != message.RequestID || !e.acceptDiscoveryResponse(response.RequestID, response.DeviceID, response.DiscoveryScope) {
 				return
 			}
@@ -1412,6 +1414,22 @@ func (e *Engine) acceptDiscoveryResponse(requestID, deviceID, scope string) bool
 	}
 	e.discoveryMu.Unlock()
 	return true
+}
+
+// compatibilityDiscoveryScope supports an older desktop peer that already
+// uses the current discovery request format but does not yet include the
+// discoveryScope field. This fallback is deliberately limited to a device
+// that was explicitly removed on this machine; other scope-less responses
+// remain ignored so a disabled stranger cannot become visible.
+func (e *Engine) compatibilityDiscoveryScope(message wireMessage) string {
+	if message.DiscoveryScope != "" {
+		return message.DiscoveryScope
+	}
+	removed, err := IsFriendRemoved(context.Background(), message.DeviceID)
+	if err == nil && removed {
+		return DiscoveryScopePublic
+	}
+	return ""
 }
 
 func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
