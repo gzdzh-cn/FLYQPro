@@ -445,7 +445,17 @@ function enterFriends() {
   const previousPeerId = activePeer.value?.deviceId
   section.value = 'friends'
   const selected = activePeer.value && store.friends.some((peer) => peer.deviceId === activePeer.value?.deviceId) ? activePeer.value : store.friends[0]
-  if (selected) void loadConversation(selected, false, previousPeerId === selected.deviceId)
+  if (selected) {
+    void loadConversation(selected, false, previousPeerId === selected.deviceId)
+  } else {
+    // The current peer may have just been downgraded to a stranger after a
+    // remote friendship rejection. Do not leave its conversation rendered
+    // beside an empty friends list.
+    store.selectPeer('')
+    showPeerInfo.value = false
+    newMessageCount.value = 0
+    userNearBottom.value = true
+  }
 }
 function openSettings(tab: string) { if (store.attachmentMigration.active) return; saveActiveScrollPosition(); section.value = 'settings'; settingsTab.value = tab }
 async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
