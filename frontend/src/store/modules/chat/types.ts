@@ -77,6 +77,22 @@ export interface Message {
   attachmentThumbnailMime?: string
   attachmentStatus?: string
   attachmentPath?: string
+  isFavorite?: boolean
+  deletedAt?: string
+  quoteMessageId?: string
+  quoteContent?: string
+  forwardedFrom?: string
+}
+
+export interface AttachmentDetails {
+  attachmentId: string
+  fileName: string
+  mimeType: string
+  fileSize: number
+  sha256: string
+  status: string
+  createdAt: string
+  localPath: string
 }
 
 export interface TransferProgress {

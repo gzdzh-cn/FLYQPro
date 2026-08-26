@@ -56,6 +56,55 @@ export class Attachment {
     }
 }
 
+export class AttachmentDetails {
+    "attachmentId": string;
+    "fileName": string;
+    "mimeType": string;
+    "fileSize": number;
+    "sha256": string;
+    "status": string;
+    "createdAt": string;
+    "localPath": string;
+
+    /** Creates a new AttachmentDetails instance. */
+    constructor($$source: Partial<AttachmentDetails> = {}) {
+        if (!("attachmentId" in $$source)) {
+            this["attachmentId"] = "";
+        }
+        if (!("fileName" in $$source)) {
+            this["fileName"] = "";
+        }
+        if (!("mimeType" in $$source)) {
+            this["mimeType"] = "";
+        }
+        if (!("fileSize" in $$source)) {
+            this["fileSize"] = 0;
+        }
+        if (!("sha256" in $$source)) {
+            this["sha256"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            this["createdAt"] = "";
+        }
+        if (!("localPath" in $$source)) {
+            this["localPath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new AttachmentDetails instance from a string or object.
+     */
+    static createFrom($$source: any = {}): AttachmentDetails {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new AttachmentDetails($$parsedSource as Partial<AttachmentDetails>);
+    }
+}
+
 export class AttachmentMigrationResult {
     "sourceRoot": string;
     "targetRoot": string;
@@ -366,6 +415,11 @@ export class Message {
     "attachmentThumbnailMime"?: string;
     "attachmentStatus"?: string;
     "attachmentPath"?: string;
+    "isFavorite"?: boolean;
+    "deletedAt"?: string;
+    "quoteMessageId"?: string;
+    "quoteContent"?: string;
+    "forwardedFrom"?: string;
 
     /** Creates a new Message instance. */
     constructor($$source: Partial<Message> = {}) {

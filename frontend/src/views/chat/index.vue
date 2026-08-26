@@ -44,10 +44,11 @@
         </header>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @wheel="cancelAutoScroll" @pointerdown="cancelAutoScroll" @touchstart="cancelAutoScroll" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId }">
+          <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
-            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file' }">
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'is-favorite': message.isFavorite }">
+              <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
                   <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message) || attachmentNeedsDecision(message)" @click="openImage(message)">
@@ -73,6 +74,7 @@
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
                 <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
+                <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop="showAttachmentDetails(message)">详情</button></div>
               </template>
               <template v-else>{{ message.content }}</template>
               <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId && messageStatusText(message.status, message.kind, message.attachmentStatus)"> <span class="message-status">{{ messageStatusText(message.status, message.kind, message.attachmentStatus) }}</span></template></small>
@@ -80,6 +82,20 @@
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
         </div>
+        <div v-if="messageMenu.visible" class="message-context-menu" :style="messageMenuStyle" @click.stop>
+          <template v-if="messageMenu.message && messageMenu.message.kind !== 'file'">
+            <button @click="copyTextMessage(messageMenu.message)">复制</button><button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button @click="quoteMessage(messageMenu.message)">引用</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
+          </template>
+          <template v-else-if="messageMenu.message && isImageMessage(messageMenu.message)">
+            <button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="copyImageMessage(messageMenu.message)">复制</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openImage(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
+          </template>
+          <template v-else-if="messageMenu.message">
+            <button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openAttachment(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
+          </template>
+        </div>
+        <div v-if="selectionMode" class="selection-toolbar"><strong>已选 {{ selectedMessageIds.size }} 条</strong><a-button size="small" @click="batchFavorite">收藏</a-button><a-button size="small" @click="batchForward">转发</a-button><a-button size="small" status="danger" @click="batchDelete">删除</a-button><a-button size="small" @click="exitMultiSelect">取消</a-button></div>
+        <a-modal v-model:visible="forwardVisible" title="选择转发好友" @ok="confirmForward" @cancel="forwardVisible = false"><div class="forward-targets"><a-checkbox v-for="peer in forwardCandidates" :key="peer.deviceId" :model-value="forwardTargetIds.includes(peer.deviceId)" @change="toggleForwardTarget(peer.deviceId)">{{ peer.remark || peer.nickname }}</a-checkbox></div></a-modal>
+        <a-modal v-model:visible="attachmentDetailsVisible" title="附件详情" :footer="false"><div v-if="attachmentDetails" class="attachment-details"><p><span>文件名</span><strong>{{ attachmentDetails.fileName }}</strong></p><p><span>类型</span><strong>{{ attachmentDetails.mimeType || '未知' }}</strong></p><p><span>大小</span><strong>{{ formatBytes(attachmentDetails.fileSize) }}</strong></p><p><span>状态</span><strong>{{ attachmentDetails.status }}</strong></p><p><span>时间</span><strong>{{ formatTime(attachmentDetails.createdAt) }}</strong></p><p><span>路径</span><strong>{{ attachmentDetails.localPath }}</strong></p><p><span>SHA256</span><strong class="mono">{{ attachmentDetails.sha256 || '未知' }}</strong></p></div></a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :style="{ height: `${composerHeight}px` }">
           <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button></div>
@@ -90,7 +106,7 @@
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
         <Transition name="image-viewer">
-          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @wheel.prevent="handleImageViewerWheel" @click.self="closeImageViewer">
+          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @wheel.prevent="handleImageViewerWheel" @pointerdown="handleImageViewerPointerDown" @pointerup="handleImageViewerPointerUp" @click.self="closeImageViewer">
             <section class="image-viewer-panel" @click.stop>
               <header class="image-viewer-head"><strong>{{ imageViewerName }}</strong><button type="button" aria-label="关闭图片查看器" title="关闭" @click="closeImageViewer"><icon-close /></button></header>
               <div class="image-viewer"><button aria-label="上一张" title="上一张" :disabled="imageViewerIndex <= 0 || imageViewerLoading" @click="moveImage(-1)"><icon-left /></button><div class="image-viewer-image"><img v-if="imageViewerSource" :src="imageViewerSource" :alt="imageViewerName" /><div v-if="imageViewerLoading" class="image-viewer-loading"><icon-loading /></div></div><button aria-label="下一张" title="下一张" :disabled="imageViewerIndex >= imageMessages.length - 1 || imageViewerLoading" @click="moveImage(1)"><icon-right /></button></div>
@@ -149,16 +165,18 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
-import { Browser, System, Window } from '@wailsio/runtime'
+import { Browser, Clipboard, System, Window } from '@wailsio/runtime'
 import { ChatService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
-import type { FriendRequest, Peer } from '@/store/modules/chat/types'
+import type { AttachmentDetails, FriendRequest, Message as ChatMessage, Peer } from '@/store/modules/chat/types'
 
 const store = useChatStore()
 const section = ref('friends')
 const settingsTab = ref('general')
 const friendSearch = ref('')
 const draft = ref('')
+const quoteMessageId = ref('')
+const quoteContent = ref('')
 const pickedFile = ref('')
 const showPeerInfo = ref(false)
 const selectedRequest = ref<FriendRequest>()
@@ -199,6 +217,15 @@ const newMessageCount = ref(0)
 const userNearBottom = ref(true)
 const migrationResultVisible = ref(false)
 const scanning = ref(false)
+const messageMenu = reactive<{ visible: boolean; x: number; y: number; message?: ChatMessage }>({ visible: false, x: 0, y: 0 })
+const selectionMode = ref(false)
+const selectedMessageIds = reactive(new Set<string>())
+const attachmentDetailsVisible = ref(false)
+const attachmentDetails = ref<AttachmentDetails>()
+const forwardVisible = ref(false)
+const forwardCandidates = ref<Peer[]>([])
+const forwardSources = ref<ChatMessage[]>([])
+const forwardTargetIds = ref<string[]>([])
 let resizeState: { kind: 'friends' | 'discover' | 'composer'; startX: number; startY: number; startValue: number } | undefined
 let notificationAudio: AudioContext | undefined
 let audioUnlocked = false
@@ -209,6 +236,7 @@ let scrollAnimationToken = 0
 let bottomSettleToken = 0
 let imageViewerLoadToken = 0
 let imageWheelTimer = 0
+let imageTouchStartX = 0
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -219,7 +247,7 @@ const filteredFriends = computed(() => {
 })
 const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
-const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}`).join('|'))
+const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? store.transferProgress[message.attachmentId] : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
 const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && isImageMessage(message) && messagePreviews[message.messageId]))
 const imageViewerName = computed(() => imageMessages.value[imageViewerIndex.value]?.attachmentName || '图片预览')
@@ -481,7 +509,7 @@ async function appendSentMessage(message: any) {
   if (isNewActiveMessage) scheduleScrollToBottom(false, 'animated')
   await nextTick()
 }
-async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessage(activePeer.value.deviceId, draft.value.trim()); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
+async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessageWithMetadata(activePeer.value.deviceId, draft.value.trim(), quoteMessageId.value, quoteContent.value, ''); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; quoteMessageId.value = ''; quoteContent.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
@@ -517,6 +545,7 @@ function preloadViewerImage(index: number): Promise<boolean> {
   })
 }
 async function openImage(message: any) {
+  closeMessageMenu()
   await loadMessagePreview(message)
   const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId)
   if (index < 0) {
@@ -551,6 +580,15 @@ function handleImageViewerWheel(event: WheelEvent) {
   if (Math.abs(delta) < 8 || imageWheelTimer) return
   imageWheelTimer = window.setTimeout(() => { imageWheelTimer = 0 }, 180)
   void moveImage(delta > 0 ? 1 : -1)
+}
+function handleImageViewerPointerDown(event: PointerEvent) {
+  if (event.pointerType === 'touch') imageTouchStartX = event.clientX
+}
+function handleImageViewerPointerUp(event: PointerEvent) {
+  if (event.pointerType !== 'touch' || !imageTouchStartX) return
+  const delta = event.clientX - imageTouchStartX
+  imageTouchStartX = 0
+  if (Math.abs(delta) >= 48) void moveImage(delta < 0 ? 1 : -1)
 }
 function handleImageViewerKey(event: KeyboardEvent) {
   if (!imageViewerOpen.value) return
@@ -711,9 +749,48 @@ function imageTransferActive(message: any): boolean {
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
 }
+const messageMenuStyle = computed(() => ({ left: `${messageMenu.x}px`, top: `${messageMenu.y}px` }))
+function closeMessageMenu() { messageMenu.visible = false; messageMenu.message = undefined }
+function openMessageMenu(event: MouseEvent, message: ChatMessage) {
+  closePeerInfo()
+  messageMenu.message = message
+  messageMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 190))
+  messageMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 300))
+  messageMenu.visible = true
+}
+function attachmentHasLocalFile(message: any) { return Boolean(message?.attachmentId && message?.attachmentPath && ['sent', 'saved'].includes(message?.attachmentStatus || message?.status)) }
+function attachmentCompletedLocal(message: any) { return attachmentHasLocalFile(message) }
+async function copyTextMessage(message: any) { closeMessageMenu(); try { await Clipboard.SetText(message.content || ''); Message.success('已复制') } catch { Message.error('复制失败') } }
+async function copyImageMessage(message: any) {
+  closeMessageMenu()
+  if (!attachmentHasLocalFile(message)) return
+  try {
+    const source = await ChatService.GetAttachmentPreview(message.attachmentId)
+    const response = await fetch(source)
+    const blob = await response.blob()
+    if (navigator.clipboard && 'ClipboardItem' in window) await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
+    else await navigator.clipboard.writeText(message.attachmentName || '图片')
+    Message.success('已复制图片')
+  } catch { Message.error('复制图片失败') }
+}
+async function saveAttachmentCopy(message: any) { closeMessageMenu(); try { await ChatService.SaveAttachmentCopy(message.attachmentId); Message.success('已另存附件') } catch (error: any) { Message.error(error?.message || '另存附件失败') } }
+async function openAttachment(message: any) { closeMessageMenu(); try { await ChatService.OpenAttachment(message.attachmentId) } catch (error: any) { Message.error(error?.message || '打开附件失败') } }
+async function revealAttachment(message: any) { closeMessageMenu(); try { await ChatService.RevealAttachment(message.attachmentId) } catch (error: any) { Message.error(error?.message || '打开文件夹失败') } }
+async function showAttachmentDetails(message: any) { closeMessageMenu(); try { attachmentDetails.value = await ChatService.GetAttachmentDetails(message.attachmentId); attachmentDetailsVisible.value = true } catch (error: any) { Message.error(error?.message || '读取附件详情失败') } }
+async function toggleFavorite(message: any) { closeMessageMenu(); const next = !message.isFavorite; try { await ChatService.SetMessageFavorite(message.messageId, next); message.isFavorite = next; Message.success(next ? '已收藏' : '已取消收藏') } catch (error: any) { Message.error(error?.message || '收藏失败') } }
+function enterMultiSelect(message: any) { closeMessageMenu(); selectionMode.value = true; selectedMessageIds.add(message.messageId) }
+function exitMultiSelect() { selectionMode.value = false; selectedMessageIds.clear() }
+async function batchFavorite() { const ids = [...selectedMessageIds]; for (const id of ids) { const message = activeMessages.value.find((item) => item.messageId === id); if (message && !message.isFavorite) { await ChatService.SetMessageFavorite(id, true); message.isFavorite = true } } exitMultiSelect(); Message.success('已收藏所选消息') }
+async function batchDelete() { const ids = [...selectedMessageIds]; for (const id of ids) { await ChatService.DeleteMessage(id); delete messagePreviews[id] } if (activePeer.value) await loadConversation(activePeer.value, false, false, false); exitMultiSelect(); Message.success('已删除所选消息') }
+function openForward(messages: ChatMessage[]) { const candidates = store.friends.filter((peer) => peer.deviceId !== activePeer.value?.deviceId); if (!candidates.length) { Message.warning('没有可转发的好友'); return }; forwardSources.value = messages; forwardCandidates.value = candidates; forwardTargetIds.value = []; forwardVisible.value = true }
+async function confirmForward() { if (!forwardTargetIds.value.length) { Message.warning('请选择转发好友'); return }; for (const targetId of forwardTargetIds.value) for (const message of forwardSources.value) await ChatService.SendMessageWithMetadata(targetId, message.content, message.messageId, message.content, message.messageId); Message.success(`已转发给 ${forwardTargetIds.value.length} 位好友`); forwardVisible.value = false; exitMultiSelect() }
+function toggleForwardTarget(deviceId: string) { forwardTargetIds.value = forwardTargetIds.value.includes(deviceId) ? forwardTargetIds.value.filter((id) => id !== deviceId) : [...forwardTargetIds.value, deviceId] }
+function forwardMessage(message: any) { closeMessageMenu(); openForward([message]) }
+function batchForward() { const messages = activeMessages.value.filter((message) => selectedMessageIds.has(message.messageId)); openForward(messages) }
+function quoteMessage(message: any) { closeMessageMenu(); quoteMessageId.value = message.messageId; quoteContent.value = message.content || ''; Message.info('已引用消息，请输入回复') }
 function closePeerInfo() { showPeerInfo.value = false }
 function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value }
-function handleMessageAreaClick() { closePeerInfo(); markActiveRead() }
+function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); markActiveRead() }
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
 function markActiveRead() { if (!conversationVisible.value || !activePeer.value) return; store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) }
 function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (activePeer.value) { if (userNearBottom.value) localStorage.removeItem(chatScrollKey(activePeer.value.deviceId)); else localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, el.scrollTop))) } if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
@@ -803,6 +880,23 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .workspace { flex: 1; display: flex; min-width: 0; }.list-pane { width: 290px; flex: 0 0 290px; background: #fff; border-right: 1px solid #e5e6eb; display: flex; flex-direction: column; }.pane-title { padding: 26px 20px 18px; display: flex; justify-content: space-between; align-items: center; }.pane-title div { display: flex; align-items: baseline; gap: 8px; }.pane-title strong { font-size: 22px; }.pane-title span { color: #86909c; font-size: 13px; }.icon-button { border: 0; background: transparent; cursor: pointer; color: #4e5969; font-size: 22px; }.search { margin: 0 16px 14px; width: calc(100% - 32px); }.list-scroll { flex: 1; overflow: auto; padding: 0 0 20px; }.peer-row, .request-row { width: 100%; box-sizing: border-box; border: 0; background: transparent; text-align: left; display: flex; align-items: center; gap: 12px; padding: 11px 20px; border-radius: 0; cursor: pointer; }.peer-row:hover, .request-row:hover, .peer-row.selected, .request-row.selected { background: #f2f5ff; }.peer-copy, .request-row > div:last-child { display: flex; flex-direction: column; gap: 4px; min-width: 0; }.peer-copy strong, .request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.peer-copy span, .request-row span { font-size: 12px; color: #86909c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.empty-small { text-align: center; color: #86909c; padding: 90px 20px; }.empty-icon, .brand-mark { font-size: 42px; color: #4e7cff; }.conversation, .detail-pane, .blank-state { flex: 1; min-width: 0; display: flex; flex-direction: column; }.conversation-head { height: 76px; flex: 0 0 76px; background: #fff; border-bottom: 1px solid #e5e6eb; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; }.head-peer { display: flex; gap: 12px; align-items: center; }.head-peer > div:last-child { display: flex; flex-direction: column; gap: 4px; }.head-peer span { font-size: 12px; color: #86909c; }.onlineText { color: #00b42a !important; }.message-scroll { flex: 1; overflow: auto; padding: 28px 12%; }.message-line { display: flex; margin: 12px 0; }.message-line.mine { justify-content: flex-end; }.message-bubble { max-width: 65%; padding: 11px 15px; border-radius: 16px 16px 16px 4px; background: #fff; box-shadow: 0 4px 16px rgba(28, 49, 93, .05); white-space: pre-wrap; line-height: 1.55; }.message-line.mine .message-bubble { color: #fff; background: #3767e8; border-radius: 16px 16px 4px 16px; }.message-bubble small { display: block; opacity: .65; font-size: 10px; margin-top: 5px; }.conversation-empty, .blank-state { align-items: center; justify-content: center; color: #86909c; }.conversation-empty h3, .conversation-empty p { margin: 4px; }.blank-state h2, .blank-state p { margin: 7px; }.composer { padding: 12px 24px 18px; background: #fff; border-top: 1px solid #e5e6eb; }.composer-tools { height: 28px; display: flex; align-items: center; gap: 10px; }.composer-tools button { border: 0; background: transparent; color: #4e5969; font-size: 18px; cursor: pointer; }.picked-file { color: #4e7cff; font-size: 12px; }.composer textarea { display: block; width: 100%; min-height: 68px; border: 0; outline: none; resize: none; font-size: 14px; padding: 8px 0; box-sizing: border-box; }.composer-foot { display: flex; align-items: center; justify-content: space-between; color: #86909c; font-size: 12px; }.info-pane { width: 280px; flex: 0 0 280px; background: #fff; border-left: 1px solid #e5e6eb; padding: 24px 20px; }.info-head { display: flex; justify-content: space-between; }.info-profile { text-align: center; padding: 30px 0 24px; }.info-profile .avatar { margin: auto; }.info-profile h3 { margin: 12px 0 4px; }.info-profile span { color: #00b42a; font-size: 12px; }.info-fields, .basic-info, .device-fields { display: flex; flex-direction: column; gap: 18px; }.info-fields label, .basic-info label, .device-fields label { color: #86909c; font-size: 12px; display: flex; flex-direction: column; gap: 5px; }.info-fields strong, .basic-info strong, .device-fields strong { color: #1d2129; font-weight: 500; word-break: break-all; }.mono { font-family: monospace; font-size: 11px; }.discovery-pane { width: 320px; flex-basis: 320px; }.group-title { border: 0; background: transparent; display: flex; justify-content: space-between; width: 100%; padding: 14px 20px 7px; cursor: pointer; color: #4e5969; font-weight: 600; }.group-title b { background: #e8f3ff; color: #165dff; padding: 1px 7px; border-radius: 10px; }.request-row { padding: 12px 18px; }.detail-pane { overflow: auto; align-items: center; justify-content: center; padding: 40px; box-sizing: border-box; }.detail-card { width: min(440px, 100%); background: #fff; border-radius: 20px; padding: 42px; box-sizing: border-box; text-align: center; box-shadow: 0 16px 50px rgba(32, 56, 99, .08); }.detail-card .avatar { margin: auto; }.detail-card h2 { margin: 18px 0 8px; }.detail-card p { color: #4e5969; line-height: 1.6; }.detail-actions { display: flex; justify-content: center; gap: 12px; margin-top: 26px; }.subtle { color: #86909c; font-size: 12px; }.tags { display: flex; justify-content: center; gap: 8px; margin: 16px; }.basic-info { text-align: left; padding: 18px 0 25px; }.settings-shell { flex: 1; overflow: auto; }.settings-head { padding: 30px 52px 0; background: #fff; }.settings-head h2 { margin: 0 0 6px; font-size: 26px; }.settings-head p { color: #86909c; margin: 0 0 24px; }.settings-tabs { display: flex; gap: 25px; }.settings-tabs button { border: 0; background: transparent; padding: 12px 2px; color: #86909c; cursor: pointer; border-bottom: 2px solid transparent; }.settings-tabs button.active { color: #165dff; border-color: #165dff; }.settings-content { max-width: 900px; padding: 28px 52px 60px; }.setting-card { background: #fff; border-radius: 16px; padding: 24px 28px; margin-bottom: 16px; }.setting-card h3 { margin: 0 0 16px; }.profile-card, .device-card { display: flex; gap: 28px; align-items: center; }.profile-edit { flex: 1; }.profile-edit p { color: #86909c; font-size: 12px; }.setting-line { min-height: 58px; border-top: 1px solid #f2f3f5; display: flex; align-items: center; justify-content: space-between; gap: 20px; }.setting-line > div { display: flex; flex-direction: column; gap: 5px; }.setting-line span { color: #86909c; font-size: 12px; }.path { max-width: 550px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.network-summary { display: flex; align-items: center; gap: 14px; }.network-summary > div:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 5px; }.network-summary span { color: #86909c; font-size: 12px; }.network-dot { width: 12px; height: 12px; border-radius: 50%; background: #00b42a; }.network-dot.warning { background: #ff7d00; }.network-dot.error { background: #f53f3f; }.diagnostic-list { margin-top: 24px; border-top: 1px solid #f2f3f5; }.diagnostic-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid #f2f3f5; }.diagnostic-icon { width: 20px; height: 20px; border-radius: 50%; text-align: center; line-height: 20px; color: #fff; background: #00b42a; }.diagnostic-icon.error { background: #f53f3f; }.diagnostic-row div { display: flex; flex-direction: column; gap: 3px; }.diagnostic-row span:last-child { font-size: 12px; color: #86909c; }.about-card { text-align: center; padding: 60px; }.about-card .brand-mark { font-size: 60px; }.about-rows { max-width: 380px; margin: 25px auto; text-align: left; }.about-rows span { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f2f3f5; }.about-rows strong { color: #1d2129; font-weight: 500; }
 .message-scroll { display: flex; flex-direction: column; }
 .message-scroll { position: relative; }
+.message-line.is-selected .message-bubble { outline: 2px solid #3767e8; outline-offset: 3px; }
+.message-bubble.is-favorite::before { content: '★'; position: absolute; right: -18px; top: -8px; color: #ffb400; font-size: 13px; }
+.message-bubble { position: relative; }
+.message-quote { margin: -2px 0 8px; padding: 5px 8px; border-left: 3px solid rgba(128, 145, 180, .7); color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attachment-complete-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid rgba(128, 145, 180, .18); }
+.attachment-complete-actions button, .message-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 12px; padding: 4px 7px; border-radius: 5px; }
+.attachment-complete-actions button:hover, .message-context-menu button:hover { background: rgba(55, 103, 232, .12); }
+.message-context-menu { position: fixed; z-index: 9999; min-width: 150px; padding: 6px; display: flex; flex-direction: column; opacity: 1; pointer-events: auto; background: var(--surface-1); color: var(--text); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
+.message-context-menu button { text-align: left; }
+.message-context-menu button:disabled { opacity: .4; cursor: not-allowed; }
+.message-context-menu button.danger { color: #f53f3f; }
+.selection-toolbar { position: absolute; z-index: 20; left: 50%; top: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface-1); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 7px 20px rgba(20, 30, 60, .12); }
+.attachment-details { display: flex; flex-direction: column; gap: 10px; }
+.attachment-details p { display: flex; gap: 14px; margin: 0; align-items: flex-start; }
+.attachment-details p span { width: 64px; flex: 0 0 64px; color: var(--muted); }
+.attachment-details p strong { min-width: 0; word-break: break-all; }
+.forward-targets { display: flex; flex-direction: column; gap: 12px; }
 .conversation-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; padding: 18px 14px; }
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -844,6 +938,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .chat-app.theme-dark .peer-row.selected,
 .chat-app.theme-dark .request-row.selected { background: #263653; }
 .chat-app.theme-dark .message-bubble { background: #253249; color: #e5e7eb; box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
+.chat-app.theme-dark .message-context-menu { background: #253249; color: #e5e7eb; border-color: #465875; box-shadow: 0 16px 38px rgba(0, 0, 0, .48); }
 .chat-app.theme-dark .composer textarea { background: transparent; color: #e5e7eb; }
 .chat-app.theme-dark .composer textarea::placeholder { color: #8492a6; }
 .chat-app.theme-dark .info-fields strong,

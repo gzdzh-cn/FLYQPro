@@ -9,7 +9,9 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -286,6 +288,115 @@ func (s *ChatService) RetryMessage(messageID string) (chat.Message, error) {
 	return s.engine.RetryMessage(gctx.New(), messageID)
 }
 
+func (s *ChatService) SendMessageWithMetadata(deviceID, content, quoteMessageID, quoteContent, forwardedFrom string) (chat.Message, error) {
+	return s.engine.SendMessageWithMetadata(gctx.New(), deviceID, content, quoteMessageID, quoteContent, forwardedFrom)
+}
+
+func (s *ChatService) SetMessageFavorite(messageID string, favorite bool) error {
+	message, err := chat.GetMessage(gctx.New(), messageID)
+	if err != nil {
+		return err
+	}
+	return chat.UpdateMessageLocalState(gctx.New(), messageID, favorite, message.DeletedAt)
+}
+
+func (s *ChatService) DeleteMessage(messageID string) error {
+	if strings.TrimSpace(messageID) == "" {
+		return fmt.Errorf("消息 ID 不能为空")
+	}
+	return chat.DeleteMessageRecord(gctx.New(), messageID)
+}
+
+func (s *ChatService) attachmentFile(attachmentID string) (chat.Attachment, os.FileInfo, error) {
+	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
+	if err != nil {
+		return attachment, nil, fmt.Errorf("附件不存在")
+	}
+	path := strings.TrimSpace(attachment.LocalPath)
+	if path == "" {
+		return attachment, nil, fmt.Errorf("附件尚未保存在本机")
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return attachment, nil, fmt.Errorf("本地附件不存在")
+	}
+	return attachment, info, nil
+}
+
+func (s *ChatService) OpenAttachment(attachmentID string) error {
+	attachment, _, err := s.attachmentFile(attachmentID)
+	if err != nil {
+		return err
+	}
+	return runAttachmentCommand("open", attachment.LocalPath)
+}
+
+func (s *ChatService) RevealAttachment(attachmentID string) error {
+	attachment, _, err := s.attachmentFile(attachmentID)
+	if err != nil {
+		return err
+	}
+	path := filepath.Clean(attachment.LocalPath)
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", "-R", path).Run()
+	case "windows":
+		return exec.Command("explorer.exe", "/select,"+path).Run()
+	default:
+		return exec.Command("xdg-open", filepath.Dir(path)).Run()
+	}
+}
+
+func runAttachmentCommand(action, path string) error {
+	path = filepath.Clean(path)
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", path).Run()
+	case "windows":
+		return exec.Command("explorer.exe", path).Run()
+	default:
+		return exec.Command("xdg-open", path).Run()
+	}
+}
+
+func (s *ChatService) SaveAttachmentCopy(attachmentID string) error {
+	attachment, _, err := s.attachmentFile(attachmentID)
+	if err != nil {
+		return err
+	}
+	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择附件保存位置").SetFilename(attachment.FileName).PromptForSingleSelection()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(result) == "" {
+		return nil
+	}
+	input, err := os.Open(attachment.LocalPath)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.Create(filepath.Clean(result))
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+	_, err = io.Copy(output, input)
+	return err
+}
+
+func (s *ChatService) GetAttachmentDetails(attachmentID string) (chat.AttachmentDetails, error) {
+	attachment, _, err := s.attachmentFile(attachmentID)
+	if err != nil {
+		return chat.AttachmentDetails{}, err
+	}
+	message, err := chat.GetMessage(gctx.New(), attachment.MessageID)
+	if err != nil {
+		return chat.AttachmentDetails{}, err
+	}
+	return chat.AttachmentDetails{AttachmentID: attachment.AttachmentID, FileName: attachment.FileName, MimeType: attachment.MimeType, FileSize: attachment.FileSize, SHA256: attachment.SHA256, Status: attachment.Status, CreatedAt: message.CreatedAt, LocalPath: attachment.LocalPath}, nil
+}
+
 func (s *ChatService) MarkConversationRead(deviceID string) error {
 	return s.engine.MarkConversationRead(gctx.New(), deviceID)
 }
@@ -330,7 +441,10 @@ func (s *ChatService) GetAttachmentPreview(attachmentID string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("图片预览不可用")
 	}
-	if attachment.LocalPath == "" && attachment.ThumbnailData != "" && attachment.ThumbnailMime != "" {
+	// Prefer the sender-provided/generated thumbnail even when the original
+	// file is local. This keeps previews instant and avoids loading a 25 MB
+	// image into the WebView just to render a chat bubble.
+	if attachment.ThumbnailData != "" && attachment.ThumbnailMime != "" {
 		return "data:" + attachment.ThumbnailMime + ";base64," + attachment.ThumbnailData, nil
 	}
 	if attachment.LocalPath == "" {

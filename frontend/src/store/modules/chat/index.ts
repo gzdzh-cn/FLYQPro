@@ -93,7 +93,15 @@ export const useChatStore = defineStore('chat', {
           if (name === 'chat:message') this.lastMessageEvent = value
         } else {
           const next = list.slice()
-          next[index] = { ...next[index], ...value }
+          // Completion/status events can arrive after the asynchronous image
+          // thumbnail event. Do not let an older payload with an empty preview
+          // erase the thumbnail already shown in the conversation.
+          next[index] = {
+            ...next[index],
+            ...value,
+            attachmentThumbnail: value.attachmentThumbnail || next[index].attachmentThumbnail,
+            attachmentThumbnailMime: value.attachmentThumbnailMime || next[index].attachmentThumbnailMime,
+          }
           this.messages[value.conversationId] = next
         }
       }

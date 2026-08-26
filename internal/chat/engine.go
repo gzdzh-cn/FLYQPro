@@ -518,7 +518,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if exists {
 			return
 		}
-		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: message.Kind, Content: message.Content, Status: "sent", CreatedAt: nowString()}
+		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: message.Kind, Content: message.Content, Status: "sent", CreatedAt: nowString(), QuoteMessageID: message.QuoteMessageID, QuoteContent: message.QuoteContent, ForwardedFrom: message.ForwardedFrom}
 		if err := SaveMessage(context.Background(), messageRecord); err == nil {
 			_ = IncrementConversationUnread(context.Background(), conversationID)
 			e.emit("chat:message", messageRecord)
@@ -1677,6 +1677,10 @@ func (e *Engine) RejectFriendRequest(ctx context.Context, requestID string) erro
 }
 
 func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Message, error) {
+	return e.SendMessageWithMetadata(ctx, deviceID, content, "", "", "")
+}
+
+func (e *Engine) SendMessageWithMetadata(ctx context.Context, deviceID, content, quoteMessageID, quoteContent, forwardedFrom string) (Message, error) {
 	if strings.TrimSpace(content) == "" {
 		return Message{}, fmt.Errorf("消息不能为空")
 	}
@@ -1687,12 +1691,12 @@ func (e *Engine) SendMessage(ctx context.Context, deviceID, content string) (Mes
 	if err != nil {
 		return Message{}, err
 	}
-	message := Message{MessageID: newID(), ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "text", Content: content, Status: "sending", CreatedAt: nowString()}
+	message := Message{MessageID: newID(), ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "text", Content: content, Status: "sending", CreatedAt: nowString(), QuoteMessageID: quoteMessageID, QuoteContent: quoteContent, ForwardedFrom: forwardedFrom}
 	if err := SaveMessage(ctx, message); err != nil {
 		return Message{}, err
 	}
 	e.emit("chat:message", message)
-	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: content}
+	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: content, QuoteMessageID: quoteMessageID, QuoteContent: quoteContent, ForwardedFrom: forwardedFrom}
 	peer, err := e.peer(deviceID)
 	if err != nil {
 		message.Status = "failed"
@@ -1736,7 +1740,7 @@ func (e *Engine) RetryMessage(ctx context.Context, messageID string) (Message, e
 		return Message{}, err
 	}
 	e.emit("chat:message", message)
-	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: message.Content}
+	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: message.Content, QuoteMessageID: message.QuoteMessageID, QuoteContent: message.QuoteContent, ForwardedFrom: message.ForwardedFrom}
 	peer, err := e.peer(deviceID)
 	if err != nil {
 		return e.finishTextRetry(ctx, message, "failed"), err
@@ -1803,23 +1807,30 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return Message{}, err
 	}
 	fileName := safeFileName(filepath.Base(path))
-	thumbnailData, thumbnailMime, _ := buildImageThumbnail(path, mime.TypeByExtension(filepath.Ext(fileName)))
 	conversationID, err := EnsureConversation(ctx, deviceID)
 	if err != nil {
 		return Message{}, err
 	}
 	messageID, attachmentID := newID(), newID()
-	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: "sending", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: mime.TypeByExtension(filepath.Ext(fileName)), AttachmentThumbnail: thumbnailData, AttachmentThumbnailMime: thumbnailMime, AttachmentStatus: "sending", AttachmentPath: path}
+	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: "sending", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: mime.TypeByExtension(filepath.Ext(fileName)), AttachmentStatus: "sending", AttachmentPath: path}
 	if message.AttachmentMime == "" {
 		message.AttachmentMime = "application/octet-stream"
 	}
 	if err := SaveMessage(ctx, message); err != nil {
 		return Message{}, err
 	}
-	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, LocalPath: path, Status: "sending"}); err != nil {
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "sending"}); err != nil {
 		return Message{}, err
 	}
 	e.emit("chat:message", message)
+	// A large image must not block the message from appearing in the history.
+	// The event above is already visible to the user. Wait only before sending
+	// the offer so the remote peer receives the thumbnail together with it.
+	// If decoding fails, the helper returns the original message and transfer
+	// continues normally without a preview.
+	if strings.HasPrefix(message.AttachmentMime, "image/") {
+		message = <-e.generateAttachmentThumbnail(message, path)
+	}
 	if err := e.transferFile(ctx, deviceID, message, path, sum); err != nil {
 		status := "failed"
 		if errors.Is(err, errAttachmentCanceled) {
@@ -2211,12 +2222,39 @@ func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, stat
 	message.Status, message.AttachmentStatus = status, status
 	_ = UpdateMessageStatus(ctx, message.MessageID, status)
 	_ = SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: messageAttachmentSHA(ctx, message), ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime, LocalPath: message.AttachmentPath, Status: status})
+	// Thumbnail generation is asynchronous. Reload it here so the completion
+	// event cannot overwrite a preview that finished while the file was sent.
+	if attachment, err := GetAttachment(ctx, message.AttachmentID); err == nil {
+		message.AttachmentThumbnail = attachment.ThumbnailData
+		message.AttachmentThumbnailMime = attachment.ThumbnailMime
+	}
 	e.emit("chat:message", message)
 	phase := map[string]string{"sent": "completed", "failed": "failed", "canceled": "canceled", "rejected": "rejected"}[status]
 	if phase != "" {
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, strings.TrimPrefix(message.ConversationID, "conv-"), message.AttachmentSize, message.AttachmentSize, "send", phase)
 	}
 	return message
+}
+
+func (e *Engine) generateAttachmentThumbnail(message Message, path string) <-chan Message {
+	ready := make(chan Message, 1)
+	go func() {
+		defer close(ready)
+		thumbnailData, thumbnailMime, err := buildImageThumbnail(path, message.AttachmentMime)
+		if err != nil || thumbnailData == "" {
+			ready <- message
+			return
+		}
+		if err := UpdateAttachmentThumbnail(context.Background(), message.AttachmentID, thumbnailData, thumbnailMime); err != nil {
+			ready <- message
+			return
+		}
+		message.AttachmentThumbnail = thumbnailData
+		message.AttachmentThumbnailMime = thumbnailMime
+		e.emit("chat:message", message)
+		ready <- message
+	}()
+	return ready
 }
 
 func messageAttachmentSHA(ctx context.Context, message Message) string {

@@ -85,6 +85,11 @@ type messageRow struct {
 	Content        string `orm:"content"`
 	Status         string `orm:"status"`
 	CreatedAt      string `orm:"created_at"`
+	IsFavorite     int    `orm:"is_favorite"`
+	DeletedAt      string `orm:"deleted_at"`
+	QuoteMessageID string `orm:"quote_message_id"`
+	QuoteContent   string `orm:"quote_content"`
+	ForwardedFrom  string `orm:"forwarded_from"`
 }
 
 type attachmentRow struct {
@@ -512,7 +517,7 @@ func ListConversations(ctx context.Context) ([]Conversation, error) {
 
 func ListMessages(ctx context.Context, conversationID string) ([]Message, error) {
 	var rows []messageRow
-	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
+	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at, is_favorite, deleted_at, quote_message_id, quote_content, forwarded_from FROM messages WHERE conversation_id=? AND deleted_at='' ORDER BY created_at ASC`, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +526,7 @@ func ListMessages(ctx context.Context, conversationID string) ([]Message, error)
 	}
 	messages := make([]Message, 0, len(rows))
 	for _, row := range rows {
-		message := Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt}
+		message := messageFromRow(row)
 		if row.Kind == "file" {
 			var attachments []attachmentRow
 			if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
@@ -617,7 +622,7 @@ func DeleteConversationRecords(ctx context.Context, peerDeviceID string) (int, i
 
 func GetMessage(ctx context.Context, messageID string) (Message, error) {
 	var rows []messageRow
-	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at FROM messages WHERE message_id=? LIMIT 1`, messageID)
+	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at, is_favorite, deleted_at, quote_message_id, quote_content, forwarded_from FROM messages WHERE message_id=? AND deleted_at='' LIMIT 1`, messageID)
 	if err != nil {
 		return Message{}, err
 	}
@@ -628,7 +633,7 @@ func GetMessage(ctx context.Context, messageID string) (Message, error) {
 		return Message{}, fmt.Errorf("message_not_found")
 	}
 	row := rows[0]
-	message := Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt}
+	message := messageFromRow(row)
 	if row.Kind == "file" {
 		var attachments []attachmentRow
 		if attachmentResult, attachmentErr := query(ctx, `SELECT attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status FROM attachments WHERE message_id=? LIMIT 1`, row.MessageID); attachmentErr == nil && attachmentResult.Structs(&attachments) == nil && len(attachments) > 0 {
@@ -641,10 +646,22 @@ func GetMessage(ctx context.Context, messageID string) (Message, error) {
 }
 
 func SaveMessage(ctx context.Context, message Message) error {
-	if err := exec(ctx, `INSERT INTO messages(message_id, conversation_id, sender_device_id, kind, content, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO NOTHING`, message.MessageID, message.ConversationID, message.SenderDeviceID, message.Kind, message.Content, message.Status, message.CreatedAt); err != nil {
+	if err := exec(ctx, `INSERT INTO messages(message_id, conversation_id, sender_device_id, kind, content, status, created_at, is_favorite, deleted_at, quote_message_id, quote_content, forwarded_from) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET content=excluded.content, status=excluded.status, is_favorite=excluded.is_favorite, deleted_at=excluded.deleted_at, quote_message_id=excluded.quote_message_id, quote_content=excluded.quote_content, forwarded_from=excluded.forwarded_from`, message.MessageID, message.ConversationID, message.SenderDeviceID, message.Kind, message.Content, message.Status, message.CreatedAt, boolInt(message.IsFavorite), message.DeletedAt, message.QuoteMessageID, message.QuoteContent, message.ForwardedFrom); err != nil {
 		return err
 	}
 	return exec(ctx, `UPDATE conversations SET last_message=?, last_message_at=?, updated_at=? WHERE conversation_id=?`, message.Content, message.CreatedAt, nowString(), message.ConversationID)
+}
+
+func messageFromRow(row messageRow) Message {
+	return Message{MessageID: row.MessageID, ConversationID: row.ConversationID, SenderDeviceID: row.SenderDeviceID, Kind: row.Kind, Content: row.Content, Status: row.Status, CreatedAt: row.CreatedAt, IsFavorite: row.IsFavorite != 0, DeletedAt: row.DeletedAt, QuoteMessageID: row.QuoteMessageID, QuoteContent: row.QuoteContent, ForwardedFrom: row.ForwardedFrom}
+}
+
+func UpdateMessageLocalState(ctx context.Context, messageID string, favorite bool, deletedAt string) error {
+	return exec(ctx, `UPDATE messages SET is_favorite=?, deleted_at=? WHERE message_id=?`, boolInt(favorite), deletedAt, messageID)
+}
+
+func DeleteMessageRecord(ctx context.Context, messageID string) error {
+	return exec(ctx, `DELETE FROM messages WHERE message_id=?`, messageID)
 }
 
 func IncrementConversationUnread(ctx context.Context, conversationID string) error {
@@ -701,6 +718,10 @@ func ListAttachmentMigrationRows(ctx context.Context) ([]attachmentMigrationRow,
 
 func UpdateAttachmentLocalPath(ctx context.Context, attachmentID, localPath string) error {
 	return exec(ctx, `UPDATE attachments SET local_path=? WHERE attachment_id=?`, localPath, attachmentID)
+}
+
+func UpdateAttachmentThumbnail(ctx context.Context, attachmentID, thumbnailData, thumbnailMime string) error {
+	return exec(ctx, `UPDATE attachments SET thumbnail_data=?, thumbnail_mime=? WHERE attachment_id=?`, thumbnailData, thumbnailMime, attachmentID)
 }
 
 func AttachmentPeerDeviceID(ctx context.Context, attachmentID string) (string, error) {

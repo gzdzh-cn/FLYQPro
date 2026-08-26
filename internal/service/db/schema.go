@@ -87,6 +87,11 @@ var schemaStatements = []string{
 		content TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'sent',
 		created_at TEXT NOT NULL,
+		is_favorite INTEGER NOT NULL DEFAULT 0,
+		deleted_at TEXT NOT NULL DEFAULT '',
+		quote_message_id TEXT NOT NULL DEFAULT '',
+		quote_content TEXT NOT NULL DEFAULT '',
+		forwarded_from TEXT NOT NULL DEFAULT '',
 		FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at)`,

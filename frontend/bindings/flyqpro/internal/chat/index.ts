@@ -3,6 +3,7 @@
 
 export {
     Attachment,
+    AttachmentDetails,
     AttachmentMigrationResult,
     ClearConversationResult,
     Conversation,

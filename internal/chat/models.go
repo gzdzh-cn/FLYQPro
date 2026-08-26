@@ -112,6 +112,22 @@ type Message struct {
 	AttachmentThumbnailMime string `json:"attachmentThumbnailMime,omitempty"`
 	AttachmentStatus        string `json:"attachmentStatus,omitempty"`
 	AttachmentPath          string `json:"attachmentPath,omitempty"`
+	IsFavorite              bool   `json:"isFavorite,omitempty"`
+	DeletedAt               string `json:"deletedAt,omitempty"`
+	QuoteMessageID          string `json:"quoteMessageId,omitempty"`
+	QuoteContent            string `json:"quoteContent,omitempty"`
+	ForwardedFrom           string `json:"forwardedFrom,omitempty"`
+}
+
+type AttachmentDetails struct {
+	AttachmentID string `json:"attachmentId"`
+	FileName     string `json:"fileName"`
+	MimeType     string `json:"mimeType"`
+	FileSize     int64  `json:"fileSize"`
+	SHA256       string `json:"sha256"`
+	Status       string `json:"status"`
+	CreatedAt    string `json:"createdAt"`
+	LocalPath    string `json:"localPath"`
 }
 
 type Attachment struct {
@@ -210,6 +226,9 @@ type wireMessage struct {
 	PublicKey        string   `json:"publicKey,omitempty"`
 	CertFP           string   `json:"certificateFingerprint,omitempty"`
 	Content          string   `json:"content,omitempty"`
+	QuoteMessageID   string   `json:"quoteMessageId,omitempty"`
+	QuoteContent     string   `json:"quoteContent,omitempty"`
+	ForwardedFrom    string   `json:"forwardedFrom,omitempty"`
 	Kind             string   `json:"kind,omitempty"`
 	Status           string   `json:"status,omitempty"`
 	FileName         string   `json:"fileName,omitempty"`
