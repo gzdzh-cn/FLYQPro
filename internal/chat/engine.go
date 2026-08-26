@@ -374,13 +374,16 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	isFriend := e.isFriend(hello.DeviceID)
 	removedFriend, removalErr := IsFriendRemoved(context.Background(), hello.DeviceID)
 	if removalErr == nil && removedFriend && !isFriend {
-		// Tell an old friend explicitly why its message cannot be delivered.
-		// Returning DISCOVERY_DISABLED here would make a deleted friendship
-		// indistinguishable from a temporary privacy setting on the receiver.
-		_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
-		return
+		// A probe is not an explicit re-add request, so reject it immediately.
+		// For a normal connection we continue to hello_ack: handleWire can then
+		// reject ordinary messages/files while still allowing a new
+		// friend_request to be created after the old relationship was removed.
+		if hello.Probe {
+			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
+			return
+		}
 	}
-	if !isFriend && !e.hasPendingFriendRequest(hello.DeviceID) && !e.Profile().Discoverable {
+	if !(removalErr == nil && removedFriend && !isFriend) && !isFriend && !e.hasPendingFriendRequest(hello.DeviceID) && !e.Profile().Discoverable {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
 		return
 	}
@@ -529,6 +532,22 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", SourceDeviceID: localDeviceID, TargetDeviceID: hello.DeviceID, RestoreVersion: friendRestoreVersion, Status: "accepted"})
 	case "friend_restore_ack":
 		// Control message only; it has no UI or message side effects.
+	case "friend_removed":
+		// A contact removal is an authenticated, one-way relationship change.
+		// Keep the peer record as a discovered device so the next public scan
+		// can refresh its address and show it again when discoverable.
+		if strings.TrimSpace(hello.DeviceID) == "" {
+			return
+		}
+		_ = MarkFriendRemoved(context.Background(), hello.DeviceID)
+		_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
+		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, false)
+		_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
+		_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, "rejected", "")
+		e.updatePeerRelation(hello.DeviceID, DiscoveredState)
+		e.setPeerVisibleInFriends(hello.DeviceID, false)
+		e.setPeerDiscoveryVisible(hello.DeviceID, false)
+		e.emit("chat:peer-updated", e.Peers())
 	case "message":
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
@@ -1870,6 +1889,13 @@ func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) erro
 	if !e.isFriend(deviceID) {
 		return fmt.Errorf("不是好友")
 	}
+	// Opening a friend from Contacts is an explicit user action. A friend may
+	// have been hidden from the main list locally, but that does not remove the
+	// relationship; make it visible again when the conversation is opened.
+	if err := SetPeerVisibleInFriends(ctx, deviceID, true); err == nil {
+		e.setPeerVisibleInFriends(deviceID, true)
+		e.emit("chat:peer-updated", e.Peers())
+	}
 	conversationID, err := EnsureConversation(ctx, deviceID)
 	if err != nil {
 		return err
@@ -2226,6 +2252,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		return fmt.Errorf("对方握手失败")
 	}
 	if response.Type == "error" {
+		if isFriendshipRejection(response.Status) {
+			e.handleRemoteFriendshipRequired(peer.DeviceID)
+		}
 		return fmt.Errorf("对方握手失败: %s", response.Status)
 	}
 	if response.Type != "hello_ack" {
@@ -2593,6 +2622,9 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 				continue
 			}
 			if ack.Type == "error" {
+				if isFriendshipRejection(ack.Status) {
+					e.handleRemoteFriendshipRequired(peer.DeviceID)
+				}
 				return fmt.Errorf("%s", ack.Status)
 			}
 			if ack.Type != "ack" || ack.MessageID != message.MessageID || ack.Status != "sent" {
@@ -2707,6 +2739,9 @@ func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error 
 		return err
 	}
 	if response.Type == "error" {
+		if isFriendshipRejection(response.Status) {
+			e.handleRemoteFriendshipRequired(peer.DeviceID)
+		}
 		return fmt.Errorf("%s", response.Status)
 	}
 	if response.Type != "hello_ack" {
@@ -2875,13 +2910,35 @@ func sendFailureStatus(err error) string {
 	if err == nil {
 		return "failed"
 	}
-	upper := strings.ToUpper(err.Error())
-	if strings.Contains(upper, "FRIENDSHIP_REQUIRED") ||
-		strings.Contains(upper, "FRIENDSHIP_REMOVED") ||
-		strings.Contains(err.Error(), "不是好友") {
+	if isFriendshipRejection(err.Error()) || strings.Contains(err.Error(), "不是好友") {
 		return "not_friend"
 	}
 	return "failed"
+}
+
+func isFriendshipRejection(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.Contains(upper, "FRIENDSHIP_REQUIRED") || strings.Contains(upper, "FRIENDSHIP_REMOVED")
+}
+
+// handleRemoteFriendshipRequired applies the remote deletion only after the
+// remote device has explicitly rejected a message or handshake. This keeps
+// the relationship synchronized even when the local deletion happened while
+// this device was offline.
+func (e *Engine) handleRemoteFriendshipRequired(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return
+	}
+	_ = MarkFriendRemoved(context.Background(), deviceID)
+	_ = SetPeerRelation(context.Background(), deviceID, DiscoveredState)
+	_ = SetPeerVisibleInFriends(context.Background(), deviceID, false)
+	_ = SetPeerDiscoveryVisible(context.Background(), deviceID, false)
+	_ = UpdateFriendRequestsForDevice(context.Background(), deviceID, "rejected", "")
+	e.updatePeerRelation(deviceID, DiscoveredState)
+	e.setPeerVisibleInFriends(deviceID, false)
+	e.setPeerDiscoveryVisible(deviceID, false)
+	e.emit("chat:peer-updated", e.Peers())
 }
 
 func (e *Engine) hasPendingFriendRequest(deviceID string) bool {
