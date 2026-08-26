@@ -55,8 +55,21 @@ export function GetAttachmentDetails(attachmentID: string): $CancellablePromise<
     });
 }
 
+export function GetAttachmentImage(attachmentID: string): $CancellablePromise<string> {
+    return $Call.ByID(3813136653, attachmentID);
+}
+
 export function GetAttachmentPreview(attachmentID: string): $CancellablePromise<string> {
     return $Call.ByID(778582068, attachmentID);
+}
+
+/**
+ * GetAttachmentThumbnail is intentionally separate from GetAttachmentImage.
+ * Chat bubbles should never load a large local original just to render a
+ * preview, while the image viewer must use the original when it is available.
+ */
+export function GetAttachmentThumbnail(attachmentID: string): $CancellablePromise<string> {
+    return $Call.ByID(857806412, attachmentID);
 }
 
 export function GetDeviceInfo(): $CancellablePromise<chat$0.DeviceInfo> {

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	thumbnailMaxEdge = 320
+	thumbnailMaxEdge = 640
 	thumbnailMaxSize = 128 * 1024
 )
 
@@ -34,7 +34,7 @@ func buildImageThumbnail(path, mimeType string) (string, string, error) {
 		return "", "", err
 	}
 	thumbnail := resizeThumbnail(source, thumbnailMaxEdge)
-	for quality := 82; quality >= 35; quality -= 8 {
+	for quality := 90; quality >= 40; quality -= 5 {
 		var buffer bytes.Buffer
 		if err := jpeg.Encode(&buffer, thumbnail, &jpeg.Options{Quality: quality}); err != nil {
 			return "", "", err
@@ -43,7 +43,7 @@ func buildImageThumbnail(path, mimeType string) (string, string, error) {
 			if buffer.Len() > thumbnailMaxSize {
 				thumbnail = resizeThumbnail(thumbnail, thumbnailMaxEdge/2)
 				buffer.Reset()
-				if err := jpeg.Encode(&buffer, thumbnail, &jpeg.Options{Quality: 35}); err != nil {
+				if err := jpeg.Encode(&buffer, thumbnail, &jpeg.Options{Quality: 40}); err != nil {
 					return "", "", err
 				}
 			}

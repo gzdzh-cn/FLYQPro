@@ -316,6 +316,9 @@ func (s *ChatService) attachmentFile(attachmentID string) (chat.Attachment, os.F
 	if path == "" {
 		return attachment, nil, fmt.Errorf("附件尚未保存在本机")
 	}
+	if attachment.Status != "sent" && attachment.Status != "saved" {
+		return attachment, nil, fmt.Errorf("附件尚未接收完成")
+	}
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
 		return attachment, nil, fmt.Errorf("本地附件不存在")
@@ -463,6 +466,39 @@ func (s *ChatService) GetAttachmentPreview(attachmentID string) (string, error) 
 	}
 	if !strings.HasPrefix(mimeType, "image/") {
 		return "", fmt.Errorf("图片预览不可用")
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+// GetAttachmentThumbnail is intentionally separate from GetAttachmentImage.
+// Chat bubbles should never load a large local original just to render a
+// preview, while the image viewer must use the original when it is available.
+func (s *ChatService) GetAttachmentThumbnail(attachmentID string) (string, error) {
+	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
+	if err != nil || attachment.ThumbnailData == "" || attachment.ThumbnailMime == "" {
+		return "", fmt.Errorf("图片缩略图不可用")
+	}
+	return "data:" + attachment.ThumbnailMime + ";base64," + attachment.ThumbnailData, nil
+}
+
+func (s *ChatService) GetAttachmentImage(attachmentID string) (string, error) {
+	attachment, info, err := s.attachmentFile(attachmentID)
+	if err != nil {
+		return "", err
+	}
+	mimeType := attachment.MimeType
+	if !strings.HasPrefix(mimeType, "image/") {
+		mimeType = mime.TypeByExtension(filepath.Ext(attachment.FileName))
+	}
+	if !strings.HasPrefix(mimeType, "image/") {
+		return "", fmt.Errorf("附件不是图片")
+	}
+	if info.Size() <= 0 || info.Size() > 100*1024*1024 {
+		return "", fmt.Errorf("图片大小不支持预览")
+	}
+	data, err := os.ReadFile(attachment.LocalPath)
+	if err != nil || len(data) == 0 {
+		return "", fmt.Errorf("原图读取失败")
 	}
 	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }

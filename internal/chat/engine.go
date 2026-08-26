@@ -37,6 +37,7 @@ type Engine struct {
 	incoming            map[string]*incomingFile
 	pendingIncoming     map[string]*pendingIncomingOffer
 	outgoing            map[string]*outgoingTransfer
+	preparing           map[string]*preparingAttachment
 	lastScan            time.Time
 	lastErr             string
 	started             bool
@@ -154,13 +155,18 @@ type outgoingTransfer struct {
 	createdAt time.Time
 }
 
+type preparingAttachment struct {
+	cancel   chan struct{}
+	canceled bool
+}
+
 var (
 	errAttachmentCanceled = errors.New("attachment transfer canceled")
 	errAttachmentRejected = errors.New("attachment transfer rejected")
 )
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), friendRestoreAt: make(map[string]time.Time)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), friendRestoreAt: make(map[string]time.Time)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -664,6 +670,20 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving")
+	case "file_thumbnail":
+		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
+		if thumbnailData == "" || message.AttachmentID == "" {
+			return
+		}
+		if err := UpdateAttachmentThumbnail(context.Background(), message.AttachmentID, thumbnailData, thumbnailMime); err != nil {
+			return
+		}
+		if record, err := GetMessage(context.Background(), message.MessageID); err == nil {
+			record.AttachmentThumbnail = thumbnailData
+			record.AttachmentThumbnailMime = thumbnailMime
+			_ = SaveMessage(context.Background(), record)
+			e.emit("chat:message", record)
+		}
 	case "file_chunk":
 		e.mu.RLock()
 		transfer := e.incoming[message.AttachmentID]
@@ -1070,9 +1090,29 @@ func (e *Engine) RejectIncomingAttachment(attachmentID string) error {
 func (e *Engine) CancelAttachment(attachmentID string) error {
 	e.mu.RLock()
 	outgoing := e.outgoing[attachmentID]
+	preparing := e.preparing[attachmentID]
 	e.mu.RUnlock()
 	if outgoing != nil {
 		outgoing.session.cancel(attachmentID)
+		return nil
+	}
+	if preparing != nil {
+		e.mu.Lock()
+		if current := e.preparing[attachmentID]; current == preparing {
+			if !current.canceled {
+				current.canceled = true
+				close(current.cancel)
+			}
+		}
+		e.mu.Unlock()
+		if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
+			attachment.Status = "canceled"
+			_ = SaveAttachment(context.Background(), attachment)
+			e.emitAttachmentStatus(attachment.MessageID, "canceled", "")
+		} else {
+			return err
+		}
+		e.emitTransferProgress("", attachmentID, "", 0, 0, "send", "canceled")
 		return nil
 	}
 	e.mu.Lock()
@@ -1802,9 +1842,9 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return Message{}, fmt.Errorf("不是好友")
 	}
 	path = filepath.Clean(path)
-	info, sum, err := inspectTransferFile(path)
-	if err != nil {
-		return Message{}, err
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return Message{}, fmt.Errorf("文件不存在")
 	}
 	fileName := safeFileName(filepath.Base(path))
 	conversationID, err := EnsureConversation(ctx, deviceID)
@@ -1812,25 +1852,57 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return Message{}, err
 	}
 	messageID, attachmentID := newID(), newID()
-	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: "sending", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: mime.TypeByExtension(filepath.Ext(fileName)), AttachmentStatus: "sending", AttachmentPath: path}
-	if message.AttachmentMime == "" {
-		message.AttachmentMime = "application/octet-stream"
+	attachmentMime := mime.TypeByExtension(filepath.Ext(fileName))
+	if attachmentMime == "" {
+		attachmentMime = "application/octet-stream"
+	}
+	isImage := strings.HasPrefix(attachmentMime, "image/")
+	initialStatus := "sending"
+	if isImage {
+		initialStatus = "preparing_thumbnail"
+	}
+	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: initialStatus, CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: attachmentMime, AttachmentStatus: initialStatus, AttachmentPath: path}
+	if err := SaveMessage(ctx, message); err != nil {
+		return Message{}, err
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), LocalPath: path, Status: initialStatus}); err != nil {
+		return Message{}, err
+	}
+	cancel := make(chan struct{})
+	e.mu.Lock()
+	e.preparing[attachmentID] = &preparingAttachment{cancel: cancel}
+	e.mu.Unlock()
+	defer e.removePreparingAttachment(attachmentID)
+	e.emit("chat:message", message)
+	if isImage {
+		e.emitTransferProgress(message.MessageID, attachmentID, deviceID, 0, message.AttachmentSize, "send", "preparing_thumbnail")
+	}
+	sum, thumbnailData, thumbnailMime, prepareErr := e.prepareOutgoingAttachment(path, message.AttachmentMime, cancel)
+	if prepareErr != nil {
+		status := "failed"
+		if errors.Is(prepareErr, errAttachmentCanceled) {
+			status = "canceled"
+		}
+		result := e.finishAttachmentSend(ctx, message, status)
+		if status == "canceled" {
+			return result, nil
+		}
+		return result, prepareErr
+	}
+	message.AttachmentThumbnail, message.AttachmentThumbnailMime = thumbnailData, thumbnailMime
+	message.Status, message.AttachmentStatus = "pending", "pending"
+	if e.isPreparingCanceled(attachmentID) {
+		result := e.finishAttachmentSend(ctx, message, "canceled")
+		return result, nil
 	}
 	if err := SaveMessage(ctx, message); err != nil {
 		return Message{}, err
 	}
-	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, LocalPath: path, Status: "sending"}); err != nil {
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: fileName, MimeType: message.AttachmentMime, FileSize: info.Size(), SHA256: sum, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, LocalPath: path, Status: "pending"}); err != nil {
 		return Message{}, err
 	}
 	e.emit("chat:message", message)
-	// A large image must not block the message from appearing in the history.
-	// The event above is already visible to the user. Wait only before sending
-	// the offer so the remote peer receives the thumbnail together with it.
-	// If decoding fails, the helper returns the original message and transfer
-	// continues normally without a preview.
-	if strings.HasPrefix(message.AttachmentMime, "image/") {
-		message = <-e.generateAttachmentThumbnail(message, path)
-	}
+	e.emitTransferProgress(message.MessageID, attachmentID, deviceID, 0, message.AttachmentSize, "send", "awaiting_acceptance")
 	if err := e.transferFile(ctx, deviceID, message, path, sum); err != nil {
 		status := "failed"
 		if errors.Is(err, errAttachmentCanceled) {
@@ -1845,6 +1917,96 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 		return result, err
 	}
 	return e.finishAttachmentSend(ctx, message, "sent"), nil
+}
+
+type attachmentHashResult struct {
+	sum string
+	err error
+}
+
+type attachmentThumbnailResult struct {
+	data string
+	mime string
+	err  error
+}
+
+func (e *Engine) prepareOutgoingAttachment(path, mimeType string, cancel <-chan struct{}) (string, string, string, error) {
+	hashResult := make(chan attachmentHashResult, 1)
+	go func() {
+		sum, err := hashTransferFile(path, cancel)
+		hashResult <- attachmentHashResult{sum: sum, err: err}
+	}()
+
+	var thumbnailResult attachmentThumbnailResult
+	if strings.HasPrefix(mimeType, "image/") {
+		thumbnailResultChannel := make(chan attachmentThumbnailResult, 1)
+		go func() {
+			data, thumbnailMime, err := buildImageThumbnail(path, mimeType)
+			thumbnailResultChannel <- attachmentThumbnailResult{data: data, mime: thumbnailMime, err: err}
+		}()
+		thumbnailResult = <-thumbnailResultChannel
+	}
+	hash := <-hashResult
+	if hash.err != nil {
+		if errors.Is(hash.err, errAttachmentCanceled) {
+			return "", "", "", errAttachmentCanceled
+		}
+		return "", "", "", hash.err
+	}
+	select {
+	case <-cancel:
+		return "", "", "", errAttachmentCanceled
+	default:
+	}
+	// A thumbnail failure must not prevent the original attachment from being
+	// sent. The receiver will show its normal image placeholder in that case.
+	if thumbnailResult.err != nil {
+		thumbnailResult.data, thumbnailResult.mime = "", ""
+	}
+	return hash.sum, thumbnailResult.data, thumbnailResult.mime, nil
+}
+
+func hashTransferFile(path string, cancel <-chan struct{}) (string, error) {
+	file, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	buffer := make([]byte, 256*1024)
+	for {
+		select {
+		case <-cancel:
+			return "", errAttachmentCanceled
+		default:
+		}
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			if _, err := hash.Write(buffer[:count]); err != nil {
+				return "", err
+			}
+		}
+		if readErr == io.EOF {
+			return hex.EncodeToString(hash.Sum(nil)), nil
+		}
+		if readErr != nil {
+			return "", readErr
+		}
+	}
+}
+
+func (e *Engine) removePreparingAttachment(attachmentID string) {
+	e.mu.Lock()
+	delete(e.preparing, attachmentID)
+	e.mu.Unlock()
+}
+
+func (e *Engine) isPreparingCanceled(attachmentID string) bool {
+	e.mu.RLock()
+	preparing := e.preparing[attachmentID]
+	canceled := preparing != nil && preparing.canceled
+	e.mu.RUnlock()
+	return canceled
 }
 
 func (e *Engine) RetryAttachment(ctx context.Context, messageID string) (Message, error) {
@@ -2008,6 +2170,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	}
 	if err := e.writeFriendRestoreIfNeeded(conn, peer, responseDialect); err != nil {
 		return err
+	}
+	if e.isPreparingCanceled(message.AttachmentID) {
+		return errAttachmentCanceled
 	}
 	if err := session.write(wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum, ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime}); err != nil {
 		return err

@@ -51,7 +51,7 @@
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
-                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message) || attachmentNeedsDecision(message)" @click="openImage(message)">
+                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message)" @click="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
                     <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
@@ -106,10 +106,10 @@
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
         <Transition name="image-viewer">
-          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @wheel.prevent="handleImageViewerWheel" @pointerdown="handleImageViewerPointerDown" @pointerup="handleImageViewerPointerUp" @click.self="closeImageViewer">
+          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @click.self="closeImageViewer">
             <section class="image-viewer-panel" @click.stop>
               <header class="image-viewer-head"><strong>{{ imageViewerName }}</strong><button type="button" aria-label="关闭图片查看器" title="关闭" @click="closeImageViewer"><icon-close /></button></header>
-              <div class="image-viewer"><button aria-label="上一张" title="上一张" :disabled="imageViewerIndex <= 0 || imageViewerLoading" @click="moveImage(-1)"><icon-left /></button><div class="image-viewer-image"><img v-if="imageViewerSource" :src="imageViewerSource" :alt="imageViewerName" /><div v-if="imageViewerLoading" class="image-viewer-loading"><icon-loading /></div></div><button aria-label="下一张" title="下一张" :disabled="imageViewerIndex >= imageMessages.length - 1 || imageViewerLoading" @click="moveImage(1)"><icon-right /></button></div>
+              <div class="image-viewer"><button aria-label="上一张" title="上一张" :disabled="imageViewerIndex <= 0 || imageViewerLoading" @click="moveImage(-1)"><icon-left /></button><div class="image-viewer-image" @wheel.prevent.stop="handleImageViewerWheel" @dblclick.prevent.stop="toggleImageZoom" @pointerdown.stop="handleImageViewerPointerDown" @pointermove.stop="handleImageViewerPointerMove" @pointerup.stop="handleImageViewerPointerUp" @pointercancel.stop="handleImageViewerPointerUp"><img v-if="imageViewerSource" :src="imageViewerSource" :alt="imageViewerName" :style="imageViewerTransform()" draggable="false" /><div v-if="imageViewerLoading" class="image-viewer-loading"><icon-loading /></div></div><button aria-label="下一张" title="下一张" :disabled="imageViewerIndex >= imageMessages.length - 1 || imageViewerLoading" @click="moveImage(1)"><icon-right /></button></div>
               <div v-if="imageMessages.length > 1" class="image-thumbnails"><button v-for="(image, index) in imageMessages" :key="image.messageId" :class="{ active: index === imageViewerIndex }" :title="image.attachmentName || '图片'" :disabled="imageViewerLoading" @click="moveImage(index - imageViewerIndex)"><img :src="messagePreviews[image.messageId]" :alt="image.attachmentName || '图片'" /></button></div>
             </section>
           </div>
@@ -210,6 +210,8 @@ const imageViewerOpen = ref(false)
 const imageViewerIndex = ref(0)
 const imageViewerSource = ref('')
 const imageViewerLoading = ref(false)
+const imageViewerScale = ref(1)
+const imageViewerOffset = reactive({ x: 0, y: 0 })
 const peerRemark = ref('')
 const clearingConversation = ref(false)
 const messageScroll = ref<HTMLElement>()
@@ -235,8 +237,7 @@ let scrollAnimationFrame = 0
 let scrollAnimationToken = 0
 let bottomSettleToken = 0
 let imageViewerLoadToken = 0
-let imageWheelTimer = 0
-let imageTouchStartX = 0
+let imageViewerPointer: { id: number; x: number; y: number; offsetX: number; offsetY: number } | undefined
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -282,7 +283,7 @@ function messageStatusText(status: string, kind = 'text', attachmentStatus = '')
     const fileStatus = attachmentStatus || status
     if (fileStatus === 'sent' || fileStatus === 'delivered') return '发送成功'
     if (fileStatus === 'read') return ''
-    return ({ sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
+    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
   }
   if (status === 'sent') return '已发送'
   return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status
@@ -514,21 +515,41 @@ function handlePaste(event: ClipboardEvent) { const files = Array.from(event.cli
 async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
   const progress = transferProgressFor(message)
+  if (message.attachmentStatus === 'preparing_thumbnail' || progress?.phase === 'preparing_thumbnail') return
   if (message.attachmentStatus === 'receiving' || (progress && progress.direction === 'receive' && progress.phase !== 'completed' && progress.phase !== 'failed')) return
   if (messagePreviews[message.messageId]) return
   try {
     const peerDeviceId = activePeer.value?.deviceId
     const shouldFollowBottom = Boolean(peerDeviceId && !localStorage.getItem(chatScrollKey(peerDeviceId)) && userNearBottom.value)
-    messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId)
+    try {
+      messagePreviews[message.messageId] = await ChatService.GetAttachmentThumbnail(message.attachmentId)
+    } catch {
+      messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId)
+    }
     if (shouldFollowBottom && activePeer.value?.deviceId === peerDeviceId) scheduleScrollToBottom(false, 'instant')
   } catch { /* pending remote image; clicking the image retries */ }
 }
 function preloadViewerImage(index: number): Promise<boolean> {
-  const source = messagePreviews[imageMessages.value[index]?.messageId || '']
-  if (!source) return Promise.resolve(false)
+  const message = imageMessages.value[index]
+  if (!message?.attachmentId) return Promise.resolve(false)
   const token = ++imageViewerLoadToken
   imageViewerLoading.value = true
-  return new Promise((resolve) => {
+  return new Promise(async (resolve) => {
+    let source = ''
+    const completed = attachmentCompletedLocal(message)
+    if (completed) {
+      try { source = await ChatService.GetAttachmentImage(message.attachmentId) } catch { source = '' }
+    } else {
+      source = messagePreviews[message.messageId] || ''
+      if (!source) {
+        try { source = await ChatService.GetAttachmentThumbnail(message.attachmentId) } catch { source = '' }
+      }
+    }
+    if (!source) {
+      if (token === imageViewerLoadToken) imageViewerLoading.value = false
+      resolve(false)
+      return
+    }
     const image = new Image()
     const finish = (loaded: boolean) => {
       if (token !== imageViewerLoadToken) {
@@ -554,6 +575,7 @@ async function openImage(message: any) {
   }
   saveActiveScrollPosition()
   imageViewerIndex.value = index
+  resetImageTransform()
   if (await preloadViewerImage(index)) imageViewerOpen.value = true
   else Message.warning('图片暂时无法读取')
 }
@@ -563,37 +585,50 @@ async function moveImage(direction: number) {
   if (!count) return
   const target = Math.max(0, Math.min(count - 1, imageViewerIndex.value + direction))
   if (target === imageViewerIndex.value) return
-  if (await preloadViewerImage(target)) imageViewerIndex.value = target
+  if (await preloadViewerImage(target)) {
+    imageViewerIndex.value = target
+    resetImageTransform()
+  }
 }
 function closeImageViewer() {
   imageViewerOpen.value = false
   imageViewerLoading.value = false
   imageViewerLoadToken++
-  if (imageWheelTimer) {
-    window.clearTimeout(imageWheelTimer)
-    imageWheelTimer = 0
-  }
+  imageViewerPointer = undefined
+  resetImageTransform()
 }
+function resetImageTransform() { imageViewerScale.value = 1; imageViewerOffset.x = 0; imageViewerOffset.y = 0 }
+function zoomImage(delta: number) { imageViewerScale.value = Math.min(6, Math.max(.5, Number((imageViewerScale.value + delta).toFixed(2)))); if (imageViewerScale.value <= 1) { imageViewerOffset.x = 0; imageViewerOffset.y = 0 } }
+function toggleImageZoom() { if (imageViewerScale.value > 1) resetImageTransform(); else imageViewerScale.value = 2 }
+function imageViewerTransform() { return { transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerScale.value})`, cursor: imageViewerScale.value > 1 ? 'grab' : 'zoom-in' } }
 function handleImageViewerWheel(event: WheelEvent) {
   if (!imageViewerOpen.value) return
   const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-  if (Math.abs(delta) < 8 || imageWheelTimer) return
-  imageWheelTimer = window.setTimeout(() => { imageWheelTimer = 0 }, 180)
-  void moveImage(delta > 0 ? 1 : -1)
+  if (Math.abs(delta) < 2) return
+  zoomImage(delta > 0 ? -.15 : .15)
 }
 function handleImageViewerPointerDown(event: PointerEvent) {
-  if (event.pointerType === 'touch') imageTouchStartX = event.clientX
+  if (event.button !== undefined && event.button !== 0) return
+  imageViewerPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, offsetX: imageViewerOffset.x, offsetY: imageViewerOffset.y }
+  ;(event.currentTarget as HTMLElement)?.setPointerCapture?.(event.pointerId)
+}
+function handleImageViewerPointerMove(event: PointerEvent) {
+  if (!imageViewerPointer || imageViewerPointer.id !== event.pointerId || imageViewerScale.value <= 1) return
+  imageViewerOffset.x = imageViewerPointer.offsetX + event.clientX - imageViewerPointer.x
+  imageViewerOffset.y = imageViewerPointer.offsetY + event.clientY - imageViewerPointer.y
 }
 function handleImageViewerPointerUp(event: PointerEvent) {
-  if (event.pointerType !== 'touch' || !imageTouchStartX) return
-  const delta = event.clientX - imageTouchStartX
-  imageTouchStartX = 0
-  if (Math.abs(delta) >= 48) void moveImage(delta < 0 ? 1 : -1)
+  if (!imageViewerPointer || imageViewerPointer.id !== event.pointerId) return
+  const deltaX = event.clientX - imageViewerPointer.x
+  if (imageViewerScale.value <= 1 && Math.abs(deltaX) >= 48) void moveImage(deltaX < 0 ? 1 : -1)
+  imageViewerPointer = undefined
 }
 function handleImageViewerKey(event: KeyboardEvent) {
   if (!imageViewerOpen.value) return
   if (event.key === 'ArrowLeft') { event.preventDefault(); void moveImage(-1) }
   if (event.key === 'ArrowRight') { event.preventDefault(); void moveImage(1) }
+  if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomImage(.15) }
+  if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomImage(-.15) }
   if (event.key === 'Escape') { event.preventDefault(); closeImageViewer() }
 }
 function unlockNotificationAudio() {
@@ -713,7 +748,6 @@ function attachmentNeedsDecision(message: any): boolean { return message?.sender
 function attachmentAwaitingAcceptance(message: any): boolean {
   if (message?.senderDeviceId !== deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
   const progress = transferProgressFor(message)
-  if (isImageMessage(message)) return !progress
   return !progress || progress.phase === 'awaiting_acceptance'
 }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
@@ -734,6 +768,7 @@ function transferProgressPercent(message: any): number {
 function transferProgressLabel(message: any): string {
   const progress = transferProgressFor(message)
   if (!progress) return ''
+  if (progress.phase === 'preparing_thumbnail') return '图片处理中'
   if (progress.phase === 'failed') return '传输失败'
   if (progress.phase === 'canceled') return '已取消'
   if (progress.phase === 'rejected') return '已拒绝'
@@ -744,7 +779,7 @@ function transferProgressLabel(message: any): string {
 }
 function imageTransferActive(message: any): boolean {
   const progress = transferProgressFor(message)
-  return Boolean(progress && !['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase))
+  return Boolean(progress && ['preparing_thumbnail', 'transferring', 'receiving', 'remote-receive'].includes(progress.phase))
 }
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
@@ -760,12 +795,20 @@ function openMessageMenu(event: MouseEvent, message: ChatMessage) {
 }
 function attachmentHasLocalFile(message: any) { return Boolean(message?.attachmentId && message?.attachmentPath && ['sent', 'saved'].includes(message?.attachmentStatus || message?.status)) }
 function attachmentCompletedLocal(message: any) { return attachmentHasLocalFile(message) }
-async function copyTextMessage(message: any) { closeMessageMenu(); try { await Clipboard.SetText(message.content || ''); Message.success('已复制') } catch { Message.error('复制失败') } }
+async function copyTextMessage(message: any) {
+  closeMessageMenu()
+  const content = String(message?.content || '')
+  if (!content) { Message.warning('没有可复制的文字'); return }
+  try {
+    try { await Clipboard.SetText(content) } catch { await navigator.clipboard.writeText(content) }
+    Message.success('已复制')
+  } catch { Message.error('复制失败，请检查剪贴板权限') }
+}
 async function copyImageMessage(message: any) {
   closeMessageMenu()
   if (!attachmentHasLocalFile(message)) return
   try {
-    const source = await ChatService.GetAttachmentPreview(message.attachmentId)
+    const source = await ChatService.GetAttachmentImage(message.attachmentId)
     const response = await fetch(source)
     const blob = await response.blob()
     if (navigator.clipboard && 'ClipboardItem' in window) await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
@@ -1445,8 +1488,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .image-viewer-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .image-viewer-head button { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; flex: 0 0 30px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
 .image-viewer-head button:hover { background: var(--hover); color: var(--text); }
-.image-viewer-image { position: relative; display: flex; min-width: 0; min-height: 50vh; align-items: center; justify-content: center; }
-.image-viewer-image img { display: block; max-width: calc(100% - 96px); max-height: min(70vh, 680px); object-fit: contain; }
+.image-viewer-image { position: relative; display: flex; min-width: 0; min-height: 50vh; overflow: hidden; align-items: center; justify-content: center; touch-action: none; }
+.image-viewer-image img { display: block; max-width: calc(100% - 96px); max-height: min(70vh, 680px); object-fit: contain; user-select: none; will-change: transform; transition: transform .16s ease-out; }
 .image-viewer-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 30px; pointer-events: none; }
 .image-viewer-loading svg { animation: image-viewer-spin .9s linear infinite; }
 .image-viewer button:disabled { opacity: .35; cursor: default; }
