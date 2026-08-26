@@ -42,7 +42,7 @@
           <div class="head-peer"><strong>{{ activePeer.remark || activePeer.nickname }}</strong><span class="head-status" :class="{ onlineText: activePeer.online }"><i :class="{ online: activePeer.online }" />{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div>
           <a-button type="text" aria-label="好友资料" title="好友资料" @pointerdown.prevent.stop="togglePeerInfo" @keydown.enter.space.prevent="togglePeerInfo"><icon-more /></a-button>
         </header>
-        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @wheel="cancelAutoScroll" @pointerdown="cancelAutoScroll" @touchstart="cancelAutoScroll" @click="handleMessageAreaClick">
+        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
@@ -101,7 +101,7 @@
           <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button></div>
           <div v-if="emojiOpen" class="emoji-panel"><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
-          <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
+          <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
           <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
@@ -881,7 +881,8 @@ function batchForward() { const messages = activeMessages.value.filter((message)
 function quoteMessage(message: any) { closeMessageMenu(); quoteMessageId.value = message.messageId; quoteContent.value = message.content || ''; Message.info('已引用消息，请输入回复') }
 function closePeerInfo() { showPeerInfo.value = false }
 function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value }
-function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu(); markActiveRead() }
+function handleMessageAreaPointerDown() { cancelAutoScroll(); markActiveRead() }
+function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu() }
 function closeContextMenusOnPointerDown(event: PointerEvent) {
   const target = event.target as Element | null
   if (target?.closest('.message-context-menu, .peer-context-menu, .contact-context-menu, .delete-confirm-popover')) return
