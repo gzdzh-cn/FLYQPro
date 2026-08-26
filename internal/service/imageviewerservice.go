@@ -88,18 +88,16 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 		InitialPosition:  application.WindowCentered,
 		BackgroundType:   application.BackgroundTypeSolid,
 		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
-		// Windows uses a fully custom title bar. macOS keeps only the native
-		// traffic lights through MacTitleBarHiddenInsetUnified; its title and
-		// background are rendered by the viewer page.
-		Frameless: runtime.GOOS == "windows",
+		// Both desktop platforms use a fully custom title bar. macOS draws its
+		// traffic-light controls in the viewer page so no native edge can leak
+		// through above the themed header.
+		Frameless: runtime.GOOS == "windows" || runtime.GOOS == "darwin",
 		URL:       viewerURL,
 		Windows: application.WindowsWindow{
 			NonClientRegionSupport: true,
 		},
 		Mac: application.MacWindow{
-			// Hidden keeps the traffic lights over the custom header without
-			// creating an extra native toolbar strip at the top of the window.
-			TitleBar: application.MacTitleBarHidden,
+			CornerType: application.MacWindowCornerTypeSquare,
 		},
 	})
 	window.Show()

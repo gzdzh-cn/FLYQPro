@@ -1,6 +1,11 @@
 <template>
   <main class="image-viewer-app" :class="{ dark: isDark, 'is-macos': isMac, 'is-windows': isWindows }">
     <header class="image-viewer-head" @dblclick="isWindows && toggleWindowMaximise()">
+      <div v-if="isMac" class="image-viewer-mac-controls" aria-label="窗口控制" @dblclick.stop>
+        <button type="button" class="mac-traffic-light mac-traffic-close" aria-label="关闭" title="关闭" @click.stop="closeViewer"></button>
+        <button type="button" class="mac-traffic-light mac-traffic-minimise" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"></button>
+        <button type="button" class="mac-traffic-light mac-traffic-maximise" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"></button>
+      </div>
       <div class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
         <button type="button" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @click="moveImage(-1)"><icon-left /></button>
         <button type="button" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @click="moveImage(1)"><icon-right /></button>
@@ -8,11 +13,9 @@
         <button type="button" aria-label="放大" title="放大" :disabled="loading || scale >= 6" @click="zoomImage(.25)"><icon-zoom-in /></button>
         <button type="button" aria-label="向左旋转90度" title="向左旋转90°" :disabled="loading || !source" @click="rotateImageLeft"><icon-rotate-left /></button>
       </div>
-      <div class="image-viewer-window-actions" @dblclick.stop>
-        <template v-if="isWindows">
-          <button type="button" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"><icon-minus /></button>
-          <button type="button" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"><icon-fullscreen /></button>
-        </template>
+      <div v-if="isWindows" class="image-viewer-window-actions" @dblclick.stop>
+        <button type="button" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"><icon-minus /></button>
+        <button type="button" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"><icon-fullscreen /></button>
         <button type="button" class="window-close" aria-label="关闭图片查看器" title="关闭" @click.stop="closeViewer"><icon-close /></button>
       </div>
     </header>
@@ -397,16 +400,26 @@ onBeforeUnmount(() => {
 .image-viewer-app { --viewer-bg: #111722; --viewer-surface: #f7f8fa; --viewer-text: #20252b; --viewer-muted: #687482; --viewer-line: #cfd6de; width: 100%; height: 100%; min-width: 0; min-height: 0; display: flex; overflow: hidden; flex-direction: column; background: var(--viewer-bg); color: var(--viewer-text); --wails-draggable: no-drag; }
 .image-viewer-app:not(.dark) { --viewer-bg: #edf0f3; }
 .image-viewer-app.dark { --viewer-surface: #15181d; --viewer-text: #f0f2f5; --viewer-muted: #a4adb8; --viewer-line: #39424d; }
-.image-viewer-head { position: relative; display: flex; min-height: 50px; padding: 8px 10px 8px 16px; box-sizing: border-box; align-items: center; justify-content: flex-end; gap: 12px; flex: 0 0 50px; background: var(--viewer-surface); border-bottom: 1px solid var(--viewer-line); cursor: grab; -webkit-app-region: drag; --wails-draggable: drag; }
-.image-viewer-app.is-macos .image-viewer-head { padding-left: 84px; }
+.image-viewer-head { position: relative; display: flex; min-height: 36px; padding: 4px 10px 4px 16px; box-sizing: border-box; align-items: center; justify-content: flex-end; gap: 8px; flex: 0 0 36px; background: var(--viewer-surface); border-bottom: 1px solid var(--viewer-line); cursor: grab; -webkit-app-region: drag; --wails-draggable: drag; }
+.image-viewer-app.is-macos .image-viewer-head { padding-left: 16px; }
+.image-viewer-mac-controls { position: absolute; top: 0; left: 14px; display: flex; height: 100%; align-items: center; gap: 8px; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
+.mac-traffic-light { position: relative; display: inline-flex; width: 13px; height: 13px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; opacity: .96; }
+.mac-traffic-light::after { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(35, 35, 35, .72); content: ''; font-size: 10px; line-height: 1; opacity: 0; transition: opacity .12s ease; }
+.image-viewer-mac-controls:hover .mac-traffic-light::after { opacity: 1; }
+.mac-traffic-close { background: #ff605c; }
+.mac-traffic-close::after { content: '×'; }
+.mac-traffic-minimise { background: #ffbd44; }
+.mac-traffic-minimise::after { content: '−'; }
+.mac-traffic-maximise { background: #00ca4e; }
+.mac-traffic-maximise::after { content: '+'; }
 .image-viewer-toolbar { position: absolute; left: 50%; display: flex; align-items: center; gap: 2px; transform: translateX(-50%); }
 .image-viewer-window-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
 .image-viewer-toolbar,
 .image-viewer-toolbar button,
 .image-viewer-window-actions,
 .image-viewer-window-actions button { -webkit-app-region: no-drag; --wails-draggable: no-drag; --wails-non-client-region: none; }
-.image-viewer-toolbar button { display: inline-flex; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
-.image-viewer-window-actions button { display: inline-flex; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
+.image-viewer-toolbar button { display: inline-flex; width: 28px; height: 28px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
+.image-viewer-window-actions button { display: inline-flex; width: 28px; height: 28px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
 .image-viewer-toolbar button:hover:not(:disabled) { background: color-mix(in srgb, var(--viewer-text) 10%, transparent); color: var(--viewer-text); }
 .image-viewer-window-actions button:hover:not(:disabled) { background: color-mix(in srgb, var(--viewer-text) 10%, transparent); color: var(--viewer-text); }
 .image-viewer-toolbar button:disabled { opacity: .32; cursor: default; }
@@ -425,5 +438,5 @@ onBeforeUnmount(() => {
 .image-viewer-state > svg { font-size: 30px; color: #84a8ff; }
 .image-viewer-state.error { color: #ffb4b4; }
 .image-viewer-state.error > svg { color: #ff8b8b; }
-@media (max-width: 720px), (max-height: 540px) { .image-viewer-head { min-height: 44px; flex-basis: 44px; padding-top: 5px; padding-bottom: 5px; } .image-viewer-app.is-macos .image-viewer-head { padding-left: 76px; } .image-viewer-toolbar button, .image-viewer-window-actions button { width: 28px; height: 28px; } }
+@media (max-width: 720px), (max-height: 540px) { .image-viewer-head { min-height: 34px; flex-basis: 34px; padding-top: 3px; padding-bottom: 3px; } .image-viewer-app.is-macos .image-viewer-head { padding-left: 16px; } .image-viewer-toolbar button, .image-viewer-window-actions button { width: 26px; height: 26px; } .mac-traffic-light { width: 11px; height: 11px; } }
 </style>
