@@ -232,6 +232,10 @@ export function PickFile(): $CancellablePromise<string> {
     return $Call.ByID(2768914208);
 }
 
+export function PickSharedDirectory(): $CancellablePromise<string> {
+    return $Call.ByID(1091777130);
+}
+
 export function RejectAttachment(attachmentID: string): $CancellablePromise<void> {
     return $Call.ByID(2407074389, attachmentID);
 }

@@ -1149,6 +1149,27 @@ func (s *ChatService) PickDirectory() string {
 	return result
 }
 
+func (s *ChatService) PickSharedDirectory() (string, error) {
+	dialog := application.Get().Dialog.OpenFile().
+		SetTitle("选择共享目录").
+		CanChooseDirectories(true).
+		CanChooseFiles(false).
+		CanCreateDirectories(true)
+	if window, ok := application.Get().Window.GetByName(sharedDriveWindowName); ok {
+		dialog.AttachToWindow(window)
+	}
+	if current := strings.TrimSpace(s.engine.Profile().SharedRootPath); current != "" {
+		if info, err := os.Stat(current); err == nil && info.IsDir() {
+			dialog.SetDirectory(current)
+		}
+	}
+	result, err := dialog.PromptForSingleSelection()
+	if err != nil {
+		return "", fmt.Errorf("选择共享目录失败: %w", err)
+	}
+	return strings.TrimSpace(result), nil
+}
+
 func (s *ChatService) NetworkStatus() chat.NetworkStatus { return s.engine.NetworkStatus() }
 
 func (s *ChatService) RunNetworkDiagnostic() chat.DiagnosticResult {
