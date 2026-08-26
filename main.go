@@ -46,10 +46,11 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
+	app.RegisterService(application.NewService(service.NewImageViewerService(app)))
 	configureApplicationMenu(app)
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            "FlyQPro",
+		Title:            "飞秋Pro",
 		Frameless:        runtime.GOOS == "darwin",
 		Width:            1100,
 		Height:           700,

@@ -6,11 +6,11 @@ version: '3'
 # This information is used to generate the build assets.
 info:
   companyName: "DZH"
-  productName: "FlyQPro"
+  productName: "飞秋Pro"
   productIdentifier: "com.dzh.flyqpro"
   description: "局域网点对点聊天工具"
   copyright: "(c) 2026, DZH"
-  comments: "FlyQPro desktop application"
+  comments: "飞秋Pro 桌面应用"
   version: "v0.1.0"
 
 # Dev mode configuration

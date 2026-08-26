@@ -1,6 +1,6 @@
 <template>
   <div class="app-shell">
-    <div v-if="bootError" class="boot-error">FlyQPro 加载失败：{{ bootError }}</div>
+    <div v-if="bootError" class="boot-error">飞秋Pro 加载失败：{{ bootError }}</div>
     <router-view v-else />
   </div>
 </template>

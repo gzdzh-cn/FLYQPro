@@ -51,7 +51,7 @@
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
-                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :disabled="imageTransferActive(message)" @click="openImage(message)">
+                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :aria-busy="imageTransferActive(message)" @click="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
                     <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
@@ -105,17 +105,8 @@
           <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
-        <Transition name="image-viewer">
-          <div v-if="imageViewerOpen" class="image-viewer-backdrop" role="dialog" aria-modal="true" aria-label="图片查看器" @click.self="closeImageViewer">
-            <section class="image-viewer-panel" @click.stop>
-              <header class="image-viewer-head"><strong>{{ imageViewerName }}</strong><button type="button" aria-label="关闭图片查看器" title="关闭" @click="closeImageViewer"><icon-close /></button></header>
-              <div class="image-viewer"><button aria-label="上一张" title="上一张" :disabled="imageViewerIndex <= 0 || imageViewerLoading" @click="moveImage(-1)"><icon-left /></button><div class="image-viewer-image" @wheel.prevent.stop="handleImageViewerWheel" @dblclick.prevent.stop="toggleImageZoom" @pointerdown.stop="handleImageViewerPointerDown" @pointermove.stop="handleImageViewerPointerMove" @pointerup.stop="handleImageViewerPointerUp" @pointercancel.stop="handleImageViewerPointerUp"><img v-if="imageViewerSource" :src="imageViewerSource" :alt="imageViewerName" :style="imageViewerTransform()" draggable="false" /><div v-if="imageViewerLoading" class="image-viewer-loading"><icon-loading /></div></div><button aria-label="下一张" title="下一张" :disabled="imageViewerIndex >= imageMessages.length - 1 || imageViewerLoading" @click="moveImage(1)"><icon-right /></button></div>
-              <div v-if="imageMessages.length > 1" class="image-thumbnails"><button v-for="(image, index) in imageMessages" :key="image.messageId" :class="{ active: index === imageViewerIndex }" :title="image.attachmentName || '图片'" :disabled="imageViewerLoading" @click="moveImage(index - imageViewerIndex)"><img :src="messagePreviews[image.messageId]" :alt="image.attachmentName || '图片'" /></button></div>
-            </section>
-          </div>
-        </Transition>
       </main>
-      <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>FlyQPro</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="openDiscover">发现局域网好友</a-button></main>
+      <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>飞秋Pro</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="openDiscover">发现局域网好友</a-button></main>
     </section>
 
     <section v-show="section === 'discover'" class="workspace">
@@ -166,7 +157,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { Browser, Clipboard, System, Window } from '@wailsio/runtime'
-import { ChatService } from '/#/flyqpro/internal/service'
+import { ChatService, ImageViewerService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
 import type { AttachmentDetails, FriendRequest, Message as ChatMessage, Peer } from '@/store/modules/chat/types'
 
@@ -206,12 +197,6 @@ const pendingImages = ref<string[]>([])
 const messagePreviews = reactive<Record<string, string>>({})
 const retryingMessages = reactive<Record<string, boolean>>({})
 const attachmentActions = reactive<Record<string, boolean>>({})
-const imageViewerOpen = ref(false)
-const imageViewerIndex = ref(0)
-const imageViewerSource = ref('')
-const imageViewerLoading = ref(false)
-const imageViewerScale = ref(1)
-const imageViewerOffset = reactive({ x: 0, y: 0 })
 const peerRemark = ref('')
 const clearingConversation = ref(false)
 const messageScroll = ref<HTMLElement>()
@@ -236,8 +221,6 @@ let scrollScheduleFrame = 0
 let scrollAnimationFrame = 0
 let scrollAnimationToken = 0
 let bottomSettleToken = 0
-let imageViewerLoadToken = 0
-let imageViewerPointer: { id: number; x: number; y: number; offsetX: number; offsetY: number } | undefined
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -250,8 +233,6 @@ const totalUnreadCount = computed(() => store.conversations.reduce((total, conve
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? store.transferProgress[message.attachmentId] : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
-const imageMessages = computed(() => activeMessages.value.filter((message) => message.kind === 'file' && isImageMessage(message) && messagePreviews[message.messageId]))
-const imageViewerName = computed(() => imageMessages.value[imageViewerIndex.value]?.attachmentName || '图片预览')
 const migrationPercent = computed(() => store.attachmentMigration.total ? Math.min(100, Math.round(store.attachmentMigration.current / store.attachmentMigration.total * 100)) : 0)
 const isDefaultPath = computed(() => !editProfile.fileSavePath || editProfile.fileSavePath === defaultAttachmentPath.value)
 const defaultAttachmentPath = ref('')
@@ -352,9 +333,6 @@ function clearCurrentConversation() {
       const peerDeviceId = peer.deviceId
       try {
         const result = await ChatService.ClearConversation(peerDeviceId)
-        imageViewerOpen.value = false
-        imageViewerLoading.value = false
-        imageViewerLoadToken++
         const removedMessages = store.clearConversationLocal(peerDeviceId)
         removedMessages.forEach((message: any) => {
           delete messagePreviews[message.messageId]
@@ -516,7 +494,7 @@ async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
   const progress = transferProgressFor(message)
   if (message.attachmentStatus === 'preparing_thumbnail' || progress?.phase === 'preparing_thumbnail') return
-  if (message.attachmentStatus === 'receiving' || (progress && progress.direction === 'receive' && progress.phase !== 'completed' && progress.phase !== 'failed')) return
+  const receiving = message.attachmentStatus === 'receiving' || Boolean(progress && progress.direction === 'receive' && progress.phase !== 'completed' && progress.phase !== 'failed')
   if (messagePreviews[message.messageId]) return
   try {
     const peerDeviceId = activePeer.value?.deviceId
@@ -524,112 +502,23 @@ async function loadMessagePreview(message: any) {
     try {
       messagePreviews[message.messageId] = await ChatService.GetAttachmentThumbnail(message.attachmentId)
     } catch {
+      if (receiving) return
       messagePreviews[message.messageId] = await ChatService.GetAttachmentPreview(message.attachmentId)
     }
     if (shouldFollowBottom && activePeer.value?.deviceId === peerDeviceId) scheduleScrollToBottom(false, 'instant')
   } catch { /* pending remote image; clicking the image retries */ }
 }
-function preloadViewerImage(index: number): Promise<boolean> {
-  const message = imageMessages.value[index]
-  if (!message?.attachmentId) return Promise.resolve(false)
-  const token = ++imageViewerLoadToken
-  imageViewerLoading.value = true
-  return new Promise(async (resolve) => {
-    let source = ''
-    const completed = attachmentCompletedLocal(message)
-    if (completed) {
-      try { source = await ChatService.GetAttachmentImage(message.attachmentId) } catch { source = '' }
-    } else {
-      source = messagePreviews[message.messageId] || ''
-      if (!source) {
-        try { source = await ChatService.GetAttachmentThumbnail(message.attachmentId) } catch { source = '' }
-      }
-    }
-    if (!source) {
-      if (token === imageViewerLoadToken) imageViewerLoading.value = false
-      resolve(false)
-      return
-    }
-    const image = new Image()
-    const finish = (loaded: boolean) => {
-      if (token !== imageViewerLoadToken) {
-        resolve(false)
-        return
-      }
-      imageViewerLoading.value = false
-      if (loaded) imageViewerSource.value = source
-      resolve(loaded)
-    }
-    image.onload = () => finish(true)
-    image.onerror = () => finish(false)
-    image.src = source
-  })
-}
 async function openImage(message: any) {
   closeMessageMenu()
-  await loadMessagePreview(message)
-  const index = imageMessages.value.findIndex((item) => item.messageId === message.messageId)
-  if (index < 0) {
-    Message.warning('图片仍在接收或暂时无法读取')
+  if (!message?.conversationId || !message?.messageId) {
+    Message.warning('图片消息信息不完整')
     return
   }
-  saveActiveScrollPosition()
-  imageViewerIndex.value = index
-  resetImageTransform()
-  if (await preloadViewerImage(index)) imageViewerOpen.value = true
-  else Message.warning('图片暂时无法读取')
-}
-async function moveImage(direction: number) {
-  if (imageViewerLoading.value) return
-  const count = imageMessages.value.length
-  if (!count) return
-  const target = Math.max(0, Math.min(count - 1, imageViewerIndex.value + direction))
-  if (target === imageViewerIndex.value) return
-  if (await preloadViewerImage(target)) {
-    imageViewerIndex.value = target
-    resetImageTransform()
+  try {
+    await ImageViewerService.OpenImageViewer(message.conversationId, message.messageId)
+  } catch (error: any) {
+    Message.error(error?.message || '打开图片查看器失败')
   }
-}
-function closeImageViewer() {
-  imageViewerOpen.value = false
-  imageViewerLoading.value = false
-  imageViewerLoadToken++
-  imageViewerPointer = undefined
-  resetImageTransform()
-}
-function resetImageTransform() { imageViewerScale.value = 1; imageViewerOffset.x = 0; imageViewerOffset.y = 0 }
-function zoomImage(delta: number) { imageViewerScale.value = Math.min(6, Math.max(.5, Number((imageViewerScale.value + delta).toFixed(2)))); if (imageViewerScale.value <= 1) { imageViewerOffset.x = 0; imageViewerOffset.y = 0 } }
-function toggleImageZoom() { if (imageViewerScale.value > 1) resetImageTransform(); else imageViewerScale.value = 2 }
-function imageViewerTransform() { return { transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerScale.value})`, cursor: imageViewerScale.value > 1 ? 'grab' : 'zoom-in' } }
-function handleImageViewerWheel(event: WheelEvent) {
-  if (!imageViewerOpen.value) return
-  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-  if (Math.abs(delta) < 2) return
-  zoomImage(delta > 0 ? -.15 : .15)
-}
-function handleImageViewerPointerDown(event: PointerEvent) {
-  if (event.button !== undefined && event.button !== 0) return
-  imageViewerPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, offsetX: imageViewerOffset.x, offsetY: imageViewerOffset.y }
-  ;(event.currentTarget as HTMLElement)?.setPointerCapture?.(event.pointerId)
-}
-function handleImageViewerPointerMove(event: PointerEvent) {
-  if (!imageViewerPointer || imageViewerPointer.id !== event.pointerId || imageViewerScale.value <= 1) return
-  imageViewerOffset.x = imageViewerPointer.offsetX + event.clientX - imageViewerPointer.x
-  imageViewerOffset.y = imageViewerPointer.offsetY + event.clientY - imageViewerPointer.y
-}
-function handleImageViewerPointerUp(event: PointerEvent) {
-  if (!imageViewerPointer || imageViewerPointer.id !== event.pointerId) return
-  const deltaX = event.clientX - imageViewerPointer.x
-  if (imageViewerScale.value <= 1 && Math.abs(deltaX) >= 48) void moveImage(deltaX < 0 ? 1 : -1)
-  imageViewerPointer = undefined
-}
-function handleImageViewerKey(event: KeyboardEvent) {
-  if (!imageViewerOpen.value) return
-  if (event.key === 'ArrowLeft') { event.preventDefault(); void moveImage(-1) }
-  if (event.key === 'ArrowRight') { event.preventDefault(); void moveImage(1) }
-  if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomImage(.15) }
-  if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomImage(-.15) }
-  if (event.key === 'Escape') { event.preventDefault(); closeImageViewer() }
 }
 function unlockNotificationAudio() {
   if (audioUnlocked) return
@@ -884,8 +773,8 @@ async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaxim
 function closeWindow() { Window.Close() }
 watch(() => store.profile, (value) => Object.assign(editProfile, value), { deep: true })
 watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
-watch(activeMessageLoadKey, () => activeMessages.value.forEach(loadMessagePreview), { immediate: true })
-watch(activeTransferLoadKey, () => activeMessages.value.forEach(loadMessagePreview))
+watch(activeMessageLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) }, { immediate: true })
+watch(activeTransferLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) })
 watch(() => store.lastMessageEvent, (message) => {
   if (!message) return
   const isActiveConversation = conversationVisible.value && message.conversationId === `conv-${activePeer.value?.deviceId}`
@@ -904,14 +793,13 @@ watch(section, (value, previous) => {
 watch(() => editProfile.theme, (value) => applyTheme(value))
 watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
 onMounted(async () => {
-  window.addEventListener('keydown', handleImageViewerKey)
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
   try { isMac.value = System.IsMac() } catch { isMac.value = false }
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; closeImageViewer(); window.removeEventListener('keydown', handleImageViewerKey); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -1479,30 +1367,6 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .new-message-button { position: absolute; right: 22px; top: -41px; z-index: 8; border: 0; border-radius: 5px; padding: 7px 10px; background: var(--accent); color: #fff; font-size: 12px; cursor: pointer; box-shadow: var(--shadow); }
 .info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .info-fields input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); }
-.image-viewer { display: flex; min-height: 50vh; align-items: center; justify-content: center; gap: 12px; }
-.image-viewer img { max-width: calc(100% - 96px); max-height: 70vh; object-fit: contain; }
-.image-viewer button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--surface-3); color: var(--text); cursor: pointer; }
-.image-viewer-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 28px; box-sizing: border-box; background: rgba(7, 11, 18, .72); backdrop-filter: blur(4px); }
-.image-viewer-panel { width: min(960px, 100%); max-height: min(900px, calc(100vh - 56px)); overflow: hidden; box-sizing: border-box; padding: 14px 18px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-1); color: var(--text); box-shadow: 0 28px 90px rgba(0, 0, 0, .42); }
-.image-viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 30px; color: var(--text); }
-.image-viewer-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
-.image-viewer-head button { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; flex: 0 0 30px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
-.image-viewer-head button:hover { background: var(--hover); color: var(--text); }
-.image-viewer-image { position: relative; display: flex; min-width: 0; min-height: 50vh; overflow: hidden; align-items: center; justify-content: center; touch-action: none; }
-.image-viewer-image img { display: block; max-width: calc(100% - 96px); max-height: min(70vh, 680px); object-fit: contain; user-select: none; will-change: transform; transition: transform .16s ease-out; }
-.image-viewer-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 30px; pointer-events: none; }
-.image-viewer-loading svg { animation: image-viewer-spin .9s linear infinite; }
-.image-viewer button:disabled { opacity: .35; cursor: default; }
-.image-viewer-enter-active, .image-viewer-leave-active { transition: opacity .2s ease; }
-.image-viewer-enter-active .image-viewer-panel, .image-viewer-leave-active .image-viewer-panel { transition: transform .22s cubic-bezier(.22, .8, .28, 1), opacity .2s ease; }
-.image-viewer-enter-from, .image-viewer-leave-to { opacity: 0; }
-.image-viewer-enter-from .image-viewer-panel, .image-viewer-leave-to .image-viewer-panel { transform: translateY(8px) scale(.98); opacity: 0; }
-.image-viewer-enter-to .image-viewer-panel, .image-viewer-leave-from .image-viewer-panel { transform: translateY(0) scale(1); opacity: 1; }
-@keyframes image-viewer-spin { to { transform: rotate(360deg); } }
-.image-thumbnails { display: flex; max-width: 100%; gap: 8px; overflow-x: auto; padding: 14px 4px 0; }
-.image-thumbnails button { width: 56px; height: 56px; flex: 0 0 56px; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 5px; background: transparent; cursor: pointer; }
-.image-thumbnails button.active { border-color: var(--accent); }
-.image-thumbnails img { width: 100%; height: 100%; object-fit: cover; }
 .pane-title { height: 52px; flex: 0 0 52px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .discovery-pane > .pane-title { justify-content: flex-end; }
 .friend-pane-title > div { flex: 0 0 auto; }
@@ -1571,9 +1435,6 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 
 @media (prefers-reduced-motion: reduce) {
   .message-line { animation: none !important; }
-  .image-viewer-enter-active, .image-viewer-leave-active,
-  .image-viewer-enter-active .image-viewer-panel, .image-viewer-leave-active .image-viewer-panel { transition: none !important; }
-  .image-viewer-loading svg { animation: none !important; }
 }
 
 @media (max-width: 760px) {
