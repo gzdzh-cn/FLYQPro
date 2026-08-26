@@ -538,6 +538,7 @@ export class Peer {
     "discoveryMagic"?: string;
     "capabilities"?: string[];
     "discoveryVisible": boolean;
+    "visibleInFriends": boolean;
     "online": boolean;
     "lastSeen": string;
     "updatedAt": string;
@@ -579,6 +580,9 @@ export class Peer {
         }
         if (!("discoveryVisible" in $$source)) {
             this["discoveryVisible"] = false;
+        }
+        if (!("visibleInFriends" in $$source)) {
+            this["visibleInFriends"] = false;
         }
         if (!("online" in $$source)) {
             this["online"] = false;

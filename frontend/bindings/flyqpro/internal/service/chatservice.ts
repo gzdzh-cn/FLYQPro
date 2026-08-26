@@ -84,6 +84,10 @@ export function GetProfile(): $CancellablePromise<chat$0.Profile> {
     });
 }
 
+export function HideFriendAndClearLocalData(deviceID: string): $CancellablePromise<void> {
+    return $Call.ByID(2603092040, deviceID);
+}
+
 export function ListConversations(): $CancellablePromise<chat$0.Conversation[]> {
     return $Call.ByID(225306197).then(($result: any) => {
         return $$createType6($result);
@@ -118,6 +122,10 @@ export function MarkConversationRead(deviceID: string): $CancellablePromise<void
     return $Call.ByID(997042317, deviceID);
 }
 
+export function MarkConversationUnread(deviceID: string): $CancellablePromise<void> {
+    return $Call.ByID(2857409466, deviceID);
+}
+
 export function MigrateAttachmentStorage(targetRoot: string): $CancellablePromise<chat$0.AttachmentMigrationResult> {
     return $Call.ByID(3167525510, targetRoot).then(($result: any) => {
         return $$createType13($result);
@@ -148,6 +156,10 @@ export function RejectAttachment(attachmentID: string): $CancellablePromise<void
 
 export function RejectFriendRequest(requestID: string): $CancellablePromise<void> {
     return $Call.ByID(143154017, requestID);
+}
+
+export function RemoveFriendAndClearLocalData(deviceID: string): $CancellablePromise<void> {
+    return $Call.ByID(419947236, deviceID);
 }
 
 export function ResetAvatar(): $CancellablePromise<chat$0.Profile> {
@@ -236,6 +248,10 @@ export function SetAvatar(sourcePath: string): $CancellablePromise<chat$0.Profil
     return $Call.ByID(1280700672, sourcePath).then(($result: any) => {
         return $$createType4($result);
     });
+}
+
+export function SetConversationPinned(deviceID: string, pinned: boolean): $CancellablePromise<void> {
+    return $Call.ByID(1378522980, deviceID, pinned);
 }
 
 export function SetDiscoverable(value: boolean): $CancellablePromise<chat$0.Profile> {

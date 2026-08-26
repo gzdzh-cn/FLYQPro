@@ -31,6 +31,7 @@ export interface Peer {
   discoveryMagic?: string
   capabilities?: string[]
   discoveryVisible: boolean
+  visibleInFriends?: boolean
   online: boolean
   lastSeen: string
 }

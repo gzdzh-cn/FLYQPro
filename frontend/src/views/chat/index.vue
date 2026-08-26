@@ -29,9 +29,9 @@
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
         <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="openDiscover" title="发现好友"><icon-plus /></button></div>
         <div class="list-scroll">
-          <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId }" @click="selectPeer(peer)">
+          <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId, pinned: conversationForPeer(peer.deviceId)?.pinned }" @click="selectPeer(peer)" @contextmenu.prevent.stop="openPeerMenu($event, peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
-            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}</strong><span class="peer-preview">{{ conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线') }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
+            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}<i v-if="conversationForPeer(peer.deviceId)?.pinned" class="pin-mark">置顶</i></strong><span class="peer-preview">{{ conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线') }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
           </button>
           <div v-if="!filteredFriends.length" class="empty-small"><div class="empty-icon">⌁</div><p>还没有好友</p><a-button type="primary" size="small" @click="openDiscover">去发现好友</a-button></div>
         </div>
@@ -107,13 +107,26 @@
         </footer>
       </main>
       <main v-else class="blank-state"><div class="brand-mark">✦</div><h2>飞秋Pro</h2><p>选择一位好友开始聊天</p><a-button type="primary" @click="openDiscover">发现局域网好友</a-button></main>
+      <div v-if="peerMenu.visible && peerMenu.peer" class="peer-context-menu" :style="peerMenuStyle" @click.stop @pointerdown.stop>
+        <button @click="markPeerUnread(peerMenu.peer)">标记未读</button>
+        <button @click="togglePeerPinned(peerMenu.peer)">{{ conversationForPeer(peerMenu.peer.deviceId)?.pinned ? '取消置顶' : '置顶' }}</button>
+        <button class="danger" @click="hidePeerAndClear(peerMenu.peer)">删除</button>
+      </div>
+      <div v-if="deleteConfirm.visible && deleteConfirm.kind === 'hide' && deleteConfirm.peer" class="delete-confirm-popover" :style="deleteConfirmStyle" @click.stop @pointerdown.stop>
+        <strong>隐藏“{{ deleteConfirm.peer.remark || deleteConfirm.peer.nickname }}”</strong>
+        <p>仅隐藏本机好友列表并清除本机聊天记录，不会删除好友关系。对方再次发送文字消息时，会重新显示在列表中。</p>
+        <div class="delete-confirm-actions"><button @click="closeDeleteConfirm">取消</button><button class="danger" @click="confirmPendingDelete">确认删除</button></div>
+      </div>
     </section>
 
     <section v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
-        <div class="discover-group"><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已是好友 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
+        <div class="discovery-scroll">
+          <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
+          <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已是好友 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
+          <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.remark || peer.nickname }}</strong><span>已是好友 · {{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
+        </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
         <main class="detail-pane" v-if="selectedRequest" @click="clearDiscoverySelection">
@@ -123,6 +136,15 @@
         <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag color="green">{{ selectedDiscovery.relation === 'friend' ? '已是好友' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.relation === 'friend' ? '已是好友，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
       </main>
       <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" :loading="scanning" :disabled="scanning" @click="refreshPeers">立即扫描</a-button></main>
+      <div v-if="contactMenu.visible && contactMenu.peer" class="contact-context-menu" :style="contactMenuStyle" @click.stop @pointerdown.stop>
+        <button @click="chatFromContact(contactMenu.peer)">聊天</button>
+        <button class="danger" @click="requestRemoveContact(contactMenu.peer)">删除</button>
+      </div>
+      <div v-if="deleteConfirm.visible && deleteConfirm.kind === 'remove' && deleteConfirm.peer" class="delete-confirm-popover" :style="deleteConfirmStyle" @click.stop @pointerdown.stop>
+        <strong>删除“{{ deleteConfirm.peer.remark || deleteConfirm.peer.nickname }}”</strong>
+        <p>将删除好友关系、本机聊天记录、接收附件和相关本地数据，删除后需要重新建立好友关系。确定删除吗？</p>
+        <div class="delete-confirm-actions"><button @click="closeDeleteConfirm">取消</button><button class="danger" @click="confirmPendingDelete">确认删除</button></div>
+      </div>
     </section>
 
     <section v-show="section === 'settings'" class="settings-shell">
@@ -179,7 +201,7 @@ const appVersion = ref('')
 const isDark = ref(false)
 const isMac = ref(false)
 const editProfile = reactive({ ...store.profile })
-const groups = reactive({ requests: true, discovered: true })
+const groups = reactive({ requests: false, contacts: false, discovered: false })
 function storedSize(key: string, fallback: number, min: number, max: number) {
 	const legacyKey = key.replace('flyqpro.', 'popchat.')
 	const stored = localStorage.getItem(key)
@@ -205,6 +227,9 @@ const userNearBottom = ref(true)
 const migrationResultVisible = ref(false)
 const scanning = ref(false)
 const messageMenu = reactive<{ visible: boolean; x: number; y: number; message?: ChatMessage }>({ visible: false, x: 0, y: 0 })
+const peerMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
+const contactMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
+const deleteConfirm = reactive<{ visible: boolean; kind: 'hide' | 'remove'; x: number; y: number; peer?: Peer }>({ visible: false, kind: 'hide', x: 0, y: 0 })
 const selectionMode = ref(false)
 const selectedMessageIds = reactive(new Set<string>())
 const attachmentDetailsVisible = ref(false)
@@ -224,10 +249,25 @@ let bottomSettleToken = 0
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
+const orderedFriends = computed(() => [...store.friends].sort((left, right) => {
+  const leftConversation = conversationForPeer(left.deviceId)
+  const rightConversation = conversationForPeer(right.deviceId)
+  if (Boolean(leftConversation?.pinned) !== Boolean(rightConversation?.pinned)) return leftConversation?.pinned ? -1 : 1
+  const leftHasTime = Boolean(leftConversation?.lastMessageAt)
+  const rightHasTime = Boolean(rightConversation?.lastMessageAt)
+  if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1
+  if (leftHasTime && rightHasTime) {
+    const timeDifference = new Date(rightConversation?.lastMessageAt || '').getTime() - new Date(leftConversation?.lastMessageAt || '').getTime()
+    if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference
+  }
+  const leftName = (left.remark || left.nickname || '').toLocaleLowerCase()
+  const rightName = (right.remark || right.nickname || '').toLocaleLowerCase()
+  return leftName.localeCompare(rightName, 'zh-Hans') || left.deviceId.localeCompare(right.deviceId)
+}))
 const filteredFriends = computed(() => {
   const keyword = friendSearch.value.trim().toLowerCase()
-  if (!keyword) return store.friends
-  return store.friends.filter((peer) => `${peer.remark || ''} ${peer.nickname}`.toLowerCase().includes(keyword))
+  if (!keyword) return orderedFriends.value
+  return orderedFriends.value.filter((peer) => `${peer.remark || ''} ${peer.nickname}`.toLowerCase().includes(keyword))
 })
 const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
@@ -393,7 +433,7 @@ async function loadConversation(peer: Peer, markRead: boolean, preserveViewport 
     if (markRead) await ChatService.MarkConversationRead(peer.deviceId)
   } catch { /* the conversation can still be restored from the live store */ }
 }
-function selectPeer(peer: Peer) { void loadConversation(peer, true, false, true) }
+function selectPeer(peer: Peer) { closePeerMenu(); closeContactMenu(); closeDeleteConfirm(); void loadConversation(peer, true, false, true) }
 function openDiscover() {
   if (store.attachmentMigration.active) return
   saveActiveScrollPosition()
@@ -450,7 +490,7 @@ async function resetAttachmentPath() { if (defaultAttachmentPath.value) await mi
 async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
 async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme) } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
 async function refreshPeers() { if (scanning.value) return; scanning.value = true; try { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') } catch (error: any) { Message.error(error?.message || '扫描失败') } finally { scanning.value = false } }
-function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined; showPeerInfo.value = false }
+function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined; showPeerInfo.value = false; closeContactMenu(); closeDeleteConfirm() }
 function selectRequest(request: FriendRequest) {
   if (selectedRequest.value?.deviceId === request.deviceId) {
     clearDiscoverySelection()
@@ -459,13 +499,15 @@ function selectRequest(request: FriendRequest) {
   selectedRequest.value = request
   selectedDiscovery.value = undefined
 }
-function isFriend(deviceId: string): boolean { return store.friends.some((peer) => peer.deviceId === deviceId) }
+function isFriend(deviceId: string): boolean { return store.contacts.some((peer) => peer.deviceId === deviceId) }
 function openFriendChat(deviceId: string) {
-  const peer = store.friends.find((item) => item.deviceId === deviceId)
+  const peer = store.contacts.find((item) => item.deviceId === deviceId)
   if (!peer) {
     Message.warning('好友信息尚未同步，请稍后重试')
     return
   }
+  closeContactMenu()
+  closeDeleteConfirm()
   selectedRequest.value = undefined
   selectedDiscovery.value = undefined
   section.value = 'friends'
@@ -478,6 +520,10 @@ function selectDiscovery(peer: Peer) {
   }
   selectedDiscovery.value = peer
   selectedRequest.value = undefined
+}
+function selectContact(peer: Peer) {
+  selectedRequest.value = undefined
+  selectedDiscovery.value = peer
 }
 async function addPeer() { if (!selectedDiscovery.value || isFriend(selectedDiscovery.value.deviceId)) return; try { const request = await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); store.requests = [request, ...store.requests.filter((item) => item.deviceId !== request.deviceId)]; Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
 async function acceptRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
@@ -674,13 +720,115 @@ function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
 }
 const messageMenuStyle = computed(() => ({ left: `${messageMenu.x}px`, top: `${messageMenu.y}px` }))
+const peerMenuStyle = computed(() => ({ left: `${peerMenu.x}px`, top: `${peerMenu.y}px` }))
+const contactMenuStyle = computed(() => ({ left: `${contactMenu.x}px`, top: `${contactMenu.y}px` }))
+const deleteConfirmStyle = computed(() => ({ left: `${deleteConfirm.x}px`, top: `${deleteConfirm.y}px` }))
 function closeMessageMenu() { messageMenu.visible = false; messageMenu.message = undefined }
+function closePeerMenu() { peerMenu.visible = false; peerMenu.peer = undefined }
+function closeContactMenu() { contactMenu.visible = false; contactMenu.peer = undefined }
+function closeDeleteConfirm() { deleteConfirm.visible = false; deleteConfirm.peer = undefined }
 function openMessageMenu(event: MouseEvent, message: ChatMessage) {
-  closePeerInfo()
+  closePeerMenu()
+	closeContactMenu()
+	closePeerInfo()
   messageMenu.message = message
   messageMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 190))
   messageMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 300))
-  messageMenu.visible = true
+	messageMenu.visible = true
+}
+function openPeerMenu(event: MouseEvent, peer: Peer) {
+  closeMessageMenu()
+  closeContactMenu()
+  closeDeleteConfirm()
+  peerMenu.peer = peer
+  peerMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 180))
+  peerMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 150))
+  peerMenu.visible = true
+}
+function openContactMenu(event: MouseEvent, peer: Peer) {
+  closeMessageMenu()
+  closePeerMenu()
+  closeDeleteConfirm()
+  contactMenu.peer = peer
+  contactMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 180))
+  contactMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 110))
+  contactMenu.visible = true
+}
+function requestHidePeerDelete(peer: Peer) {
+  const x = peerMenu.x
+  const y = peerMenu.y
+  closePeerMenu()
+  deleteConfirm.kind = 'hide'
+  deleteConfirm.peer = peer
+  deleteConfirm.x = Math.min(x, Math.max(8, window.innerWidth - 330))
+  deleteConfirm.y = Math.min(y, Math.max(8, window.innerHeight - 190))
+  deleteConfirm.visible = true
+}
+function requestRemoveContact(peer: Peer) {
+  const x = contactMenu.x
+  const y = contactMenu.y
+  closeContactMenu()
+  deleteConfirm.kind = 'remove'
+  deleteConfirm.peer = peer
+  deleteConfirm.x = Math.min(x, Math.max(8, window.innerWidth - 330))
+  deleteConfirm.y = Math.min(y, Math.max(8, window.innerHeight - 190))
+  deleteConfirm.visible = true
+}
+function chatFromContact(peer: Peer) {
+  closeContactMenu()
+  openFriendChat(peer.deviceId)
+}
+async function reloadPeerData() {
+  store.peers = await ChatService.ListPeers()
+  store.conversations = await ChatService.ListConversations()
+}
+async function markPeerUnread(peer: Peer) {
+  closePeerMenu()
+  try {
+    await ChatService.MarkConversationUnread(peer.deviceId)
+    const conversation = conversationForPeer(peer.deviceId)
+    if (conversation) conversation.unreadCount = Math.max(1, conversation.unreadCount || 0)
+    else store.conversations = await ChatService.ListConversations()
+    Message.success('已标记为未读')
+  } catch (error: any) {
+    Message.error(error?.message || '标记未读失败')
+  }
+}
+async function togglePeerPinned(peer: Peer) {
+  const next = !conversationForPeer(peer.deviceId)?.pinned
+  closePeerMenu()
+  try {
+    await ChatService.SetConversationPinned(peer.deviceId, next)
+    await reloadPeerData()
+    Message.success(next ? '已置顶' : '已取消置顶')
+  } catch (error: any) {
+    Message.error(error?.message || '更新置顶状态失败')
+  }
+}
+function hidePeerAndClear(peer: Peer) { requestHidePeerDelete(peer) }
+async function confirmPendingDelete() {
+  const peer = deleteConfirm.peer
+  const kind = deleteConfirm.kind
+  closeDeleteConfirm()
+  if (!peer) return
+  try {
+    if (kind === 'hide') await ChatService.HideFriendAndClearLocalData(peer.deviceId)
+    else await ChatService.RemoveFriendAndClearLocalData(peer.deviceId)
+    for (const message of store.messages[`conv-${peer.deviceId}`] || []) {
+      delete messagePreviews[message.messageId]
+      if (message.attachmentId) delete store.transferProgress[message.attachmentId]
+    }
+    delete store.messages[`conv-${peer.deviceId}`]
+    if (store.activePeerId === peer.deviceId) {
+      store.selectPeer('')
+      showPeerInfo.value = false
+    }
+    await reloadPeerData()
+    if (kind === 'remove') store.requests = await ChatService.ListFriendRequests()
+    Message.success(kind === 'hide' ? '已隐藏好友并清除本机聊天记录' : '已删除好友关系及本机数据')
+  } catch (error: any) {
+    Message.error(error?.message || (kind === 'hide' ? '删除失败' : '删除好友失败'))
+  }
 }
 function attachmentHasLocalFile(message: any) { return Boolean(message?.attachmentId && message?.attachmentPath && ['sent', 'saved'].includes(message?.attachmentStatus || message?.status)) }
 function attachmentCompletedLocal(message: any) { return attachmentHasLocalFile(message) }
@@ -722,7 +870,15 @@ function batchForward() { const messages = activeMessages.value.filter((message)
 function quoteMessage(message: any) { closeMessageMenu(); quoteMessageId.value = message.messageId; quoteContent.value = message.content || ''; Message.info('已引用消息，请输入回复') }
 function closePeerInfo() { showPeerInfo.value = false }
 function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value }
-function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); markActiveRead() }
+function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu(); markActiveRead() }
+function closeContextMenusOnPointerDown(event: PointerEvent) {
+  const target = event.target as Element | null
+  if (target?.closest('.message-context-menu, .peer-context-menu, .contact-context-menu, .delete-confirm-popover')) return
+  closeMessageMenu()
+  closePeerMenu()
+  closeContactMenu()
+  closeDeleteConfirm()
+}
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
 function markActiveRead() { if (!conversationVisible.value || !activePeer.value) return; store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) }
 function onMessageScroll() { const el = messageScroll.value; if (!el) return; userNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80; if (activePeer.value) { if (userNearBottom.value) localStorage.removeItem(chatScrollKey(activePeer.value.deviceId)); else localStorage.setItem(chatScrollKey(activePeer.value.deviceId), String(Math.max(0, el.scrollTop))) } if (userNearBottom.value) { newMessageCount.value = 0; if (performance.now() >= suppressScrollReadUntil) markActiveRead() } }
@@ -791,15 +947,16 @@ watch(section, (value, previous) => {
   if (value !== 'friends') closePeerInfo()
 })
 watch(() => editProfile.theme, (value) => applyTheme(value))
-watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
+watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId) && !store.contacts.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
 onMounted(async () => {
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
+  window.addEventListener('pointerdown', closeContextMenusOnPointerDown)
   try { isMac.value = System.IsMac() } catch { isMac.value = false }
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -818,8 +975,11 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .attachment-complete-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid rgba(128, 145, 180, .18); }
 .attachment-complete-actions button, .message-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 12px; padding: 4px 7px; border-radius: 5px; }
 .attachment-complete-actions button:hover, .message-context-menu button:hover { background: rgba(55, 103, 232, .12); }
-.message-context-menu { position: fixed; z-index: 9999; min-width: 150px; padding: 6px; display: flex; flex-direction: column; opacity: 1; pointer-events: auto; background: var(--surface-1); color: var(--text); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
+.message-context-menu, .peer-context-menu { position: fixed; z-index: 9999; min-width: 150px; padding: 6px; display: flex; flex-direction: column; opacity: 1; pointer-events: auto; background: var(--surface-1); color: var(--text); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
 .message-context-menu button { text-align: left; }
+.peer-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; font-size: 13px; padding: 8px 10px; border-radius: 6px; }
+.peer-context-menu button:hover { background: rgba(55, 103, 232, .12); }
+.peer-context-menu button.danger { color: #f53f3f; }
 .message-context-menu button:disabled { opacity: .4; cursor: not-allowed; }
 .message-context-menu button.danger { color: #f53f3f; }
 .selection-toolbar { position: absolute; z-index: 20; left: 50%; top: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface-1); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 7px 20px rgba(20, 30, 60, .12); }
@@ -869,7 +1029,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .chat-app.theme-dark .peer-row.selected,
 .chat-app.theme-dark .request-row.selected { background: #263653; }
 .chat-app.theme-dark .message-bubble { background: #253249; color: #e5e7eb; box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
-.chat-app.theme-dark .message-context-menu { background: #253249; color: #e5e7eb; border-color: #465875; box-shadow: 0 16px 38px rgba(0, 0, 0, .48); }
+.chat-app.theme-dark .message-context-menu, .chat-app.theme-dark .peer-context-menu { background: #253249; color: #e5e7eb; border-color: #465875; box-shadow: 0 16px 38px rgba(0, 0, 0, .48); }
 .chat-app.theme-dark .composer textarea { background: transparent; color: #e5e7eb; }
 .chat-app.theme-dark .composer textarea::placeholder { color: #8492a6; }
 .chat-app.theme-dark .info-fields strong,
@@ -1427,6 +1587,40 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; width: 174px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); }
 .pending-images { flex: 0 0 auto; max-height: 50px; overflow-x: auto; flex-wrap: nowrap; padding: 3px 0; }
 .pending-image { width: 44px; height: 44px; flex: 0 0 44px; }
+
+/* Discovery keeps its scan control fixed while long groups scroll independently. */
+.discovery-pane { min-height: 0; overflow: hidden; }
+.discovery-scroll { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: 20px; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) var(--scroll-track); }
+.discovery-scroll::-webkit-scrollbar { width: 8px; }
+.discovery-scroll::-webkit-scrollbar-track { background: var(--scroll-track); }
+.discovery-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 999px; }
+
+/* Pinned conversations remain visibly distinct without changing the stable sort. */
+.chat-app:not(.theme-dark) .list-pane .peer-row.pinned { background: #e9e6e1; }
+.chat-app:not(.theme-dark) .list-pane .peer-row.pinned:hover,
+.chat-app:not(.theme-dark) .list-pane .peer-row.pinned.selected { background: #ded9d1; }
+.chat-app.theme-dark .list-pane .peer-row.pinned { background: #252d39; }
+.chat-app.theme-dark .list-pane .peer-row.pinned:hover,
+.chat-app.theme-dark .list-pane .peer-row.pinned.selected { background: #303b4c; }
+.pin-mark { display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 10px; font-style: normal; font-weight: 600; vertical-align: middle; }
+
+/* Context actions and confirmations are opaque, anchored surfaces so the app remains visible. */
+.message-context-menu,
+.peer-context-menu,
+.contact-context-menu { background: var(--surface-1); color: var(--text); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
+.contact-context-menu { position: fixed; z-index: 9999; min-width: 150px; padding: 6px; display: flex; flex-direction: column; border-radius: 9px; }
+.contact-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; font-size: 13px; padding: 8px 10px; border-radius: 6px; }
+.contact-context-menu button:hover { background: rgba(55, 103, 232, .12); }
+.contact-context-menu button.danger { color: #f53f3f; }
+.delete-confirm-popover { position: fixed; z-index: 10000; width: min(310px, calc(100vw - 24px)); box-sizing: border-box; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); color: var(--text); box-shadow: 0 14px 34px rgba(20, 30, 60, .25); }
+.delete-confirm-popover strong { display: block; font-size: 13px; }
+.delete-confirm-popover p { margin: 9px 0 13px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.delete-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.delete-confirm-actions button { border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 12px; }
+.delete-confirm-actions button:hover { background: var(--hover); }
+.delete-confirm-actions button.danger { border-color: color-mix(in srgb, #f53f3f 40%, var(--line)); background: #f53f3f; color: #fff; }
+.chat-app.theme-dark .contact-context-menu,
+.chat-app.theme-dark .delete-confirm-popover { background: #253249; color: #e5e7eb; border-color: #465875; box-shadow: 0 16px 38px rgba(0, 0, 0, .48); }
 
 @keyframes message-enter {
   from { opacity: 0; transform: translateY(5px) scale(.99); }

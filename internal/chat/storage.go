@@ -52,6 +52,7 @@ type peerRow struct {
 	DiscoveryMagic         string `orm:"discovery_magic"`
 	Capabilities           string `orm:"capabilities"`
 	DiscoveryVisible       int    `orm:"discovery_visible"`
+	VisibleInFriends       int    `orm:"visible_in_friends"`
 	LastSeen               string `orm:"last_seen"`
 	UpdatedAt              string `orm:"updated_at"`
 }
@@ -240,14 +241,22 @@ func SaveIdentity(ctx context.Context, identity DeviceInfo, privateKeyPEM, certi
 }
 
 func UpsertPeer(ctx context.Context, peer Peer) error {
-	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, last_seen, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, ?, ?, ?)
+	visibleInFriends := peer.VisibleInFriends
+	if peer.Relation == PeerRelation {
+		visibleInFriends = true
+	}
+	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, last_seen, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.LastSeen, nowString(), nowString())
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.LastSeen, nowString(), nowString())
 }
 
 func SetPeerDiscoveryVisible(ctx context.Context, deviceID string, visible bool) error {
 	return exec(ctx, `UPDATE peers SET discovery_visible=?, updated_at=? WHERE device_id=?`, boolInt(visible), nowString(), deviceID)
+}
+
+func SetPeerVisibleInFriends(ctx context.Context, deviceID string, visible bool) error {
+	return exec(ctx, `UPDATE peers SET visible_in_friends=?, updated_at=? WHERE device_id=?`, boolInt(visible), nowString(), deviceID)
 }
 
 func SetPeerRelation(ctx context.Context, deviceID, relation string) error {
@@ -267,7 +276,7 @@ func SetPeerAvatar(ctx context.Context, deviceID, avatarPath, avatarHash string,
 }
 
 func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
-	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, last_seen, updated_at FROM peers`
+	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, last_seen, updated_at FROM peers`
 	args := []any{}
 	if relation != "" {
 		sql += ` WHERE relation=?`
@@ -284,7 +293,7 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 	}
 	peers := make([]Peer, 0, len(rows))
 	for _, row := range rows {
-		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
+		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, VisibleInFriends: row.VisibleInFriends != 0, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
 	}
 	return peers, nil
 }
@@ -620,6 +629,51 @@ func DeleteConversationRecords(ctx context.Context, peerDeviceID string) (int, i
 	return messageCount, attachmentCount, nil
 }
 
+func DeletePeerAndFriendRecords(ctx context.Context, deviceID string) error {
+	database := db.DB()
+	if database == nil {
+		return fmt.Errorf("数据库尚未初始化")
+	}
+	return database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`INSERT INTO friend_removals(device_id, removed_at) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at`, deviceID, nowString()); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM friend_requests WHERE device_id=?`, deviceID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM peers WHERE device_id=?`, deviceID)
+		return err
+	})
+}
+
+func IsFriendRemoved(ctx context.Context, deviceID string) (bool, error) {
+	// Some in-memory protocol tests construct an Engine without opening the
+	// database. In a running application the database is always initialized;
+	// preserve the engine's in-memory behavior for those callers.
+	if db.DB() == nil {
+		return false, nil
+	}
+	rows, err := query(ctx, `SELECT device_id FROM friend_removals WHERE device_id=? LIMIT 1`, deviceID)
+	if err != nil {
+		return false, err
+	}
+	var values []struct {
+		DeviceID string `orm:"device_id"`
+	}
+	if err := rows.Structs(&values); err != nil {
+		return false, err
+	}
+	return len(values) > 0, nil
+}
+
+func MarkFriendRemoved(ctx context.Context, deviceID string) error {
+	return exec(ctx, `INSERT INTO friend_removals(device_id, removed_at) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at`, deviceID, nowString())
+}
+
+func ClearFriendRemoval(ctx context.Context, deviceID string) error {
+	return exec(ctx, `DELETE FROM friend_removals WHERE device_id=?`, deviceID)
+}
+
 func GetMessage(ctx context.Context, messageID string) (Message, error) {
 	var rows []messageRow
 	result, err := query(ctx, `SELECT message_id, conversation_id, sender_device_id, kind, content, status, created_at, is_favorite, deleted_at, quote_message_id, quote_content, forwarded_from FROM messages WHERE message_id=? AND deleted_at='' LIMIT 1`, messageID)
@@ -670,6 +724,14 @@ func IncrementConversationUnread(ctx context.Context, conversationID string) err
 
 func ClearConversationUnread(ctx context.Context, conversationID string) error {
 	return exec(ctx, `UPDATE conversations SET unread_count=0, updated_at=? WHERE conversation_id=?`, nowString(), conversationID)
+}
+
+func MarkConversationUnread(ctx context.Context, conversationID string) error {
+	return exec(ctx, `UPDATE conversations SET unread_count=CASE WHEN unread_count < 1 THEN 1 ELSE unread_count END, updated_at=? WHERE conversation_id=?`, nowString(), conversationID)
+}
+
+func SetConversationPinned(ctx context.Context, conversationID string, pinned bool) error {
+	return exec(ctx, `UPDATE conversations SET pinned=?, updated_at=? WHERE conversation_id=?`, boolInt(pinned), nowString(), conversationID)
 }
 
 func UpdateMessageStatus(ctx context.Context, messageID, status string) error {

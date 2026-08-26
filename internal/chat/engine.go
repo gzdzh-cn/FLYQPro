@@ -465,6 +465,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		status := message.Status
 		acceptedAt := ""
 		if status == "accepted" {
+			_ = ClearFriendRemoval(context.Background(), hello.DeviceID)
 			acceptedAt = message.AcceptedAt
 			if requests, listErr := listFriendRequestRows(context.Background(), ""); listErr == nil {
 				localAcceptedAt := earliestAcceptedAt(requests, hello.DeviceID)
@@ -491,6 +492,11 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		e.emit("chat:peer-updated", e.Peers())
 	case "friend_restore":
+		removed, removedErr := IsFriendRemoved(context.Background(), hello.DeviceID)
+		if removedErr != nil || removed {
+			_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", Status: "rejected", Reason: "FRIENDSHIP_REMOVED"})
+			return
+		}
 		e.mu.RLock()
 		localDeviceID := e.identity.DeviceID
 		e.mu.RUnlock()
@@ -523,6 +529,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = writeWire(conn, wireMessage{Type: "ack", MessageID: message.MessageID, Status: "sent"})
 		if exists {
 			return
+		}
+		if peer, peerErr := e.peer(hello.DeviceID); peerErr == nil && !peer.VisibleInFriends {
+			if err := SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true); err == nil {
+				e.setPeerVisibleInFriends(hello.DeviceID, true)
+				e.emit("chat:peer-updated", e.Peers())
+			}
 		}
 		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: message.Kind, Content: message.Content, Status: "sent", CreatedAt: nowString(), QuoteMessageID: message.QuoteMessageID, QuoteContent: message.QuoteContent, ForwardedFrom: message.ForwardedFrom}
 		if err := SaveMessage(context.Background(), messageRecord); err == nil {
@@ -1462,6 +1474,7 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 			peer.CertificateFingerprint = existing.CertificateFingerprint
 		}
 		peer.Relation, peer.Remark, peer.AvatarPath = existing.Relation, existing.Remark, existing.AvatarPath
+		peer.VisibleInFriends = existing.VisibleInFriends
 		if !discoveryVisible {
 			peer.DiscoveryVisible = existing.DiscoveryVisible
 		}
@@ -1480,6 +1493,7 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 	e.mu.Lock()
 	if old, exists := e.peers[peer.DeviceID]; exists {
 		peer.Relation, peer.Remark = old.Relation, old.Remark
+		peer.VisibleInFriends = old.VisibleInFriends
 		peer.AvatarPath = old.AvatarPath
 		if !discoveryVisible {
 			peer.DiscoveryVisible = old.DiscoveryVisible
@@ -1627,6 +1641,9 @@ func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string
 	if err := e.sendToPeer(peer, wireMessage{Type: "friend_request", RequestID: request.RequestID, Content: request.Message}); err != nil {
 		return request, err
 	}
+	// A new request is an explicit re-add action. Do not clear the removal
+	// marker before the request has reached the other device.
+	_ = ClearFriendRemoval(ctx, deviceID)
 	_ = UpdateFriendRequest(ctx, request.RequestID, "sent")
 	if aggregated, ok := e.friendRequestForDevice(deviceID); ok {
 		e.emit("chat:friend-request-updated", aggregated)
@@ -1652,10 +1669,17 @@ func (e *Engine) AcceptFriendRequest(ctx context.Context, requestID string) erro
 	if target == nil {
 		return fmt.Errorf("好友申请不存在")
 	}
+	if err := ClearFriendRemoval(ctx, target.DeviceID); err != nil {
+		return err
+	}
 	if err := SetPeerRelation(ctx, target.DeviceID, PeerRelation); err != nil {
 		return err
 	}
+	if err := SetPeerVisibleInFriends(ctx, target.DeviceID, true); err != nil {
+		return err
+	}
 	e.updatePeerRelation(target.DeviceID, PeerRelation)
+	e.setPeerVisibleInFriends(target.DeviceID, true)
 	acceptedAt := earliestAcceptedAt(requests, target.DeviceID)
 	if acceptedAt == "" {
 		acceptedAt = nowString()
@@ -2782,6 +2806,13 @@ func (e *Engine) peer(deviceID string) (Peer, error) {
 }
 
 func (e *Engine) isFriend(deviceID string) bool {
+	removed, removalErr := IsFriendRemoved(context.Background(), deviceID)
+	if removalErr != nil || removed {
+		// The database removal marker is authoritative. This also closes the
+		// small race where an already accepted connection still has a stale
+		// friend entry in memory while the local removal is being completed.
+		return false
+	}
 	peer, err := e.peer(deviceID)
 	return err == nil && peer.Relation == PeerRelation
 }
@@ -2837,6 +2868,34 @@ func (e *Engine) setPeerDiscoveryVisible(deviceID string, visible bool) {
 		e.peers[deviceID] = peer
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) setPeerVisibleInFriends(deviceID string, visible bool) {
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.VisibleInFriends = visible
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) SetPeerVisibleInFriends(ctx context.Context, deviceID string, visible bool) error {
+	if !e.isFriend(deviceID) {
+		return fmt.Errorf("不是好友")
+	}
+	if err := SetPeerVisibleInFriends(ctx, deviceID, visible); err != nil {
+		return err
+	}
+	e.setPeerVisibleInFriends(deviceID, visible)
+	e.emit("chat:peer-updated", e.Peers())
+	return nil
+}
+
+func (e *Engine) RemovePeerFromMemory(deviceID string) {
+	e.mu.Lock()
+	delete(e.peers, deviceID)
+	e.mu.Unlock()
+	e.emit("chat:peer-updated", e.Peers())
 }
 
 func (e *Engine) updatePeerRelation(deviceID, relation string) {

@@ -17,7 +17,8 @@ export const useChatStore = defineStore('chat', {
     attachmentMigration: { active: false, phase: '', sourceRoot: '', targetRoot: '', current: 0, total: 0, fileName: '', peerDeviceId: '', migrated: 0, skipped: 0, failed: 0, unclassified: 0, errorMessage: '' } as AttachmentMigrationProgress & { active: boolean },
   }),
   getters: {
-    friends: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
+    contacts: (state) => state.peers.filter((peer) => peer.relation === 'friend'),
+    friends: (state) => state.peers.filter((peer) => peer.relation === 'friend' && peer.visibleInFriends !== false),
     discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online),
     pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),

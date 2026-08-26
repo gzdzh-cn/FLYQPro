@@ -70,6 +70,7 @@ type Peer struct {
 	DiscoveryMagic         string    `json:"discoveryMagic,omitempty"`
 	Capabilities           []string  `json:"capabilities,omitempty"`
 	DiscoveryVisible       bool      `json:"discoveryVisible"`
+	VisibleInFriends       bool      `json:"visibleInFriends"`
 	Online                 bool      `json:"online"`
 	LastSeen               string    `json:"lastSeen"`
 	UpdatedAt              time.Time `json:"updatedAt"`

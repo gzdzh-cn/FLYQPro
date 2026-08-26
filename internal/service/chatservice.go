@@ -403,6 +403,42 @@ func (s *ChatService) GetAttachmentDetails(attachmentID string) (chat.Attachment
 func (s *ChatService) MarkConversationRead(deviceID string) error {
 	return s.engine.MarkConversationRead(gctx.New(), deviceID)
 }
+func (s *ChatService) requireFriend(deviceID string) error {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return fmt.Errorf("好友设备 ID 不能为空")
+	}
+	peers, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
+	if err != nil {
+		return err
+	}
+	for _, peer := range peers {
+		if peer.DeviceID == deviceID {
+			return nil
+		}
+	}
+	return fmt.Errorf("不是好友")
+}
+func (s *ChatService) MarkConversationUnread(deviceID string) error {
+	if err := s.requireFriend(deviceID); err != nil {
+		return err
+	}
+	conversationID, err := chat.EnsureConversation(gctx.New(), deviceID)
+	if err != nil {
+		return err
+	}
+	return chat.MarkConversationUnread(gctx.New(), conversationID)
+}
+func (s *ChatService) SetConversationPinned(deviceID string, pinned bool) error {
+	if err := s.requireFriend(deviceID); err != nil {
+		return err
+	}
+	conversationID, err := chat.EnsureConversation(gctx.New(), deviceID)
+	if err != nil {
+		return err
+	}
+	return chat.SetConversationPinned(gctx.New(), conversationID, pinned)
+}
 func (s *ChatService) SendFile(deviceID, path string) (chat.Message, error) {
 	return s.engine.SendFile(gctx.New(), deviceID, path)
 }
@@ -673,6 +709,52 @@ func (s *ChatService) ClearConversation(deviceID string) (chat.ClearConversation
 	result.DeletedAttachments = deletedAttachments
 	_ = os.RemoveAll(trashRoot)
 	return result, nil
+}
+
+func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
+	deviceID = strings.TrimSpace(deviceID)
+	if err := s.requireFriend(deviceID); err != nil {
+		return err
+	}
+	conversations, err := chat.ListConversations(gctx.New())
+	if err != nil {
+		return err
+	}
+	pinned := false
+	for _, conversation := range conversations {
+		if conversation.PeerDeviceID == deviceID {
+			pinned = conversation.Pinned
+			break
+		}
+	}
+	if _, err := s.ClearConversation(deviceID); err != nil {
+		return err
+	}
+	conversationID, err := chat.EnsureConversation(gctx.New(), deviceID)
+	if err != nil {
+		return err
+	}
+	if pinned {
+		if err := chat.SetConversationPinned(gctx.New(), conversationID, true); err != nil {
+			return err
+		}
+	}
+	return s.engine.SetPeerVisibleInFriends(gctx.New(), deviceID, false)
+}
+
+func (s *ChatService) RemoveFriendAndClearLocalData(deviceID string) error {
+	deviceID = strings.TrimSpace(deviceID)
+	if err := s.requireFriend(deviceID); err != nil {
+		return err
+	}
+	if _, err := s.ClearConversation(deviceID); err != nil {
+		return err
+	}
+	if err := chat.DeletePeerAndFriendRecords(gctx.New(), deviceID); err != nil {
+		return err
+	}
+	s.engine.RemovePeerFromMemory(deviceID)
+	return nil
 }
 
 func (s *ChatService) PickFile() string {

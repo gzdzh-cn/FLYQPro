@@ -52,6 +52,7 @@ var schemaStatements = []string{
 		discovery_magic TEXT NOT NULL DEFAULT '',
 		capabilities TEXT NOT NULL DEFAULT '',
 		discovery_visible INTEGER NOT NULL DEFAULT 0,
+		visible_in_friends INTEGER NOT NULL DEFAULT 1,
 		last_seen TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
@@ -69,6 +70,10 @@ var schemaStatements = []string{
 		updated_at TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_friend_requests_status ON friend_requests(status)`,
+	`CREATE TABLE IF NOT EXISTS friend_removals (
+		device_id TEXT PRIMARY KEY,
+		removed_at TEXT NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS conversations (
 		conversation_id TEXT PRIMARY KEY,
 		peer_device_id TEXT NOT NULL UNIQUE,
