@@ -38,6 +38,7 @@ type Engine struct {
 	pendingIncoming     map[string]*pendingIncomingOffer
 	outgoing            map[string]*outgoingTransfer
 	preparing           map[string]*preparingAttachment
+	sharedTransfers     map[string]*sharedTransferSession
 	lastScan            time.Time
 	lastErr             string
 	started             bool
@@ -166,7 +167,7 @@ var (
 )
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), friendRestoreAt: make(map[string]time.Time)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -548,6 +549,10 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		e.setPeerVisibleInFriends(hello.DeviceID, false)
 		e.setPeerDiscoveryVisible(hello.DeviceID, false)
 		e.emit("chat:peer-updated", e.Peers())
+	case "share_list_request":
+		e.handleSharedListRequest(conn, hello, message)
+	case "share_download_request":
+		e.handleSharedDownloadRequest(conn, hello, message, session)
 	case "message":
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
@@ -1501,6 +1506,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	if dialect.Major >= 2 {
 		capabilities = append(capabilities, "file-progress-v1", "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
 	}
+	capabilities = append(capabilities, sharedDriveCapability)
 	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 }
 

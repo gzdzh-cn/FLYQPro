@@ -21,6 +21,8 @@ type profileRow struct {
 	Discoverable    int    `orm:"discoverable"`
 	AutoSave        int    `orm:"auto_save"`
 	FileSavePath    string `orm:"file_save_path"`
+	SharedRootPath  string `orm:"shared_root_path"`
+	SharedEnabled   int    `orm:"shared_enabled"`
 	Theme           string `orm:"theme"`
 	LaunchAtStartup int    `orm:"launch_at_startup"`
 }
@@ -162,7 +164,7 @@ func randomIndex(size int) int {
 
 func GetProfile(ctx context.Context) (Profile, error) {
 	var rows []profileRow
-	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, theme, launch_at_startup FROM profiles WHERE id = 1`)
+	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, shared_root_path, shared_enabled, theme, launch_at_startup FROM profiles WHERE id = 1`)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -173,7 +175,7 @@ func GetProfile(ctx context.Context) (Profile, error) {
 		return Profile{}, fmt.Errorf("个人资料不存在")
 	}
 	row := rows[0]
-	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
 	if strings.TrimSpace(profile.Nickname) == "" || strings.TrimSpace(profile.Nickname) == "新用户" {
 		profile.Nickname = randomChineseNickname()
 		if err := SaveProfile(ctx, profile); err != nil {
@@ -214,8 +216,8 @@ func migrateLegacyAttachmentPath(path string) string {
 }
 
 func SaveProfile(ctx context.Context, profile Profile) error {
-	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
-		strings.TrimSpace(profile.Nickname), profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
+	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, shared_root_path=?, shared_enabled=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
+		strings.TrimSpace(profile.Nickname), profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.SharedRootPath, boolInt(profile.SharedEnabled), profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
 }
 
 func GetIdentity(ctx context.Context) (identityRow, error) {

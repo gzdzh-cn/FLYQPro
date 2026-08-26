@@ -107,6 +107,8 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"profiles", "discoverable", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "auto_save", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "file_save_path", "TEXT NOT NULL DEFAULT ''"},
+		{"profiles", "shared_root_path", "TEXT NOT NULL DEFAULT ''"},
+		{"profiles", "shared_enabled", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "theme", "TEXT NOT NULL DEFAULT 'system'"},
 		{"profiles", "launch_at_startup", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "created_at", "TEXT NOT NULL DEFAULT ''"},

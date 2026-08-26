@@ -67,6 +67,13 @@ func (s *ChatService) UpdateProfile(profile chat.Profile) (chat.Profile, error) 
 	if profile.FileSavePath == "" {
 		profile.FileSavePath = chat.DefaultAttachmentDir()
 	}
+	if profile.SharedEnabled {
+		root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+		if err != nil {
+			return chat.Profile{}, fmt.Errorf("共享目录不可用")
+		}
+		profile.SharedRootPath = root
+	}
 	if s.engine.IsAttachmentMigrationActive() {
 		current := s.engine.Profile()
 		if filepath.Clean(profile.FileSavePath) != filepath.Clean(current.FileSavePath) || profile.AutoSave != current.AutoSave {
@@ -165,6 +172,375 @@ func (s *ChatService) SetTheme(theme string) (chat.Profile, error) {
 	}
 	profile.Theme = theme
 	return s.UpdateProfile(profile)
+}
+
+func (s *ChatService) GetSharedFolderSettings() (chat.SharedFolderStatus, error) {
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	status := chat.SharedFolderStatus{SharedFolderSettings: chat.SharedFolderSettings{Enabled: profile.SharedEnabled, RootPath: profile.SharedRootPath}, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	if strings.TrimSpace(profile.SharedRootPath) == "" {
+		status.Enabled = false
+		return status, nil
+	}
+	root, rootErr := chat.ValidateSharedRoot(profile.SharedRootPath)
+	if rootErr != nil {
+		if profile.SharedEnabled {
+			profile.SharedEnabled = false
+			if saveErr := chat.SaveProfile(gctx.New(), profile); saveErr == nil {
+				s.engine.UpdateProfile(profile)
+			}
+		}
+		status.Enabled = false
+		return status, nil
+	}
+	status.FileCount, status.FolderCount = sharedRootCounts(root)
+	if available, availableErr := chat.AvailableDiskBytes(root); availableErr == nil && available >= 0 {
+		status.AvailableBytes = uint64(available)
+	}
+	return status, nil
+}
+
+func sharedRootCounts(root string) (files, folders int) {
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || path == root {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			folders++
+		} else {
+			files++
+		}
+		return nil
+	})
+	return files, folders
+}
+
+func (s *ChatService) SetSharedFolder(path string, enabled bool) (chat.SharedFolderStatus, error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || path == "" {
+		return chat.SharedFolderStatus{}, fmt.Errorf("共享目录不能为空")
+	}
+	root, err := chat.ValidateSharedRoot(path)
+	if err != nil {
+		return chat.SharedFolderStatus{}, fmt.Errorf("共享目录不可用")
+	}
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	profile.SharedRootPath = root
+	profile.SharedEnabled = enabled
+	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	s.engine.UpdateProfile(profile)
+	return s.GetSharedFolderSettings()
+}
+
+func (s *ChatService) SetSharedEnabled(enabled bool) (chat.SharedFolderStatus, error) {
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	if enabled {
+		if _, err := chat.ValidateSharedRoot(profile.SharedRootPath); err != nil {
+			return chat.SharedFolderStatus{}, fmt.Errorf("请先选择有效的共享目录")
+		}
+	}
+	profile.SharedEnabled = enabled
+	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	s.engine.UpdateProfile(profile)
+	return s.GetSharedFolderSettings()
+}
+
+func (s *ChatService) DisableSharedFolder() error {
+	_, err := s.SetSharedEnabled(false)
+	return err
+}
+
+func (s *ChatService) ListSharedEntries(relativePath string) ([]chat.SharedEntry, error) {
+	profile := s.engine.Profile()
+	return chat.ListSharedEntries(profile.SharedRootPath, relativePath)
+}
+
+func (s *ChatService) GetSharedEntryDetails(relativePath string) (chat.SharedEntry, error) {
+	profile := s.engine.Profile()
+	entry, _, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, true)
+	return entry, err
+}
+
+func (s *ChatService) OpenSharedEntry(relativePath string) error {
+	profile := s.engine.Profile()
+	_, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return err
+	}
+	return runAttachmentCommand("open", path)
+}
+
+func (s *ChatService) RevealSharedEntry(relativePath string) error {
+	profile := s.engine.Profile()
+	_, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return err
+	}
+	path = filepath.Clean(path)
+	if runtime.GOOS == "darwin" {
+		return exec.Command("open", "-R", path).Run()
+	}
+	if runtime.GOOS == "windows" {
+		return exec.Command("explorer.exe", "/select,"+path).Run()
+	}
+	return exec.Command("xdg-open", filepath.Dir(path)).Run()
+}
+
+func (s *ChatService) OpenSharedDownload(targetPath string) error {
+	root := filepath.Clean(chat.DefaultSharedDownloadDir())
+	target := filepath.Clean(strings.TrimSpace(targetPath))
+	if target == "" || !sharedServicePathWithin(root, target) {
+		return fmt.Errorf("下载文件路径无效")
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.IsDir() {
+		return fmt.Errorf("下载文件不存在")
+	}
+	return runAttachmentCommand("open", target)
+}
+
+func (s *ChatService) RevealSharedDownload(targetPath string) error {
+	root := filepath.Clean(chat.DefaultSharedDownloadDir())
+	target := filepath.Clean(strings.TrimSpace(targetPath))
+	if target == "" || !sharedServicePathWithin(root, target) {
+		return fmt.Errorf("下载文件路径无效")
+	}
+	if _, err := os.Stat(target); err != nil {
+		return fmt.Errorf("下载文件不存在")
+	}
+	if runtime.GOOS == "darwin" {
+		return exec.Command("open", "-R", target).Run()
+	}
+	if runtime.GOOS == "windows" {
+		return exec.Command("explorer.exe", "/select,"+target).Run()
+	}
+	return exec.Command("xdg-open", filepath.Dir(target)).Run()
+}
+
+func sharedServicePathWithin(root, target string) bool {
+	resolvedRoot, rootErr := filepath.EvalSymlinks(root)
+	resolvedTarget, targetErr := filepath.EvalSymlinks(target)
+	if rootErr != nil || targetErr != nil {
+		return false
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedTarget)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func (s *ChatService) CreateSharedFolder(relativePath, name string) (chat.SharedEntry, error) {
+	profile := s.engine.Profile()
+	return chat.CreateSharedFolder(profile.SharedRootPath, relativePath, name)
+}
+
+func (s *ChatService) RenameSharedEntry(relativePath, newName string) error {
+	profile := s.engine.Profile()
+	return chat.RenameSharedEntry(profile.SharedRootPath, relativePath, newName)
+}
+
+func (s *ChatService) MoveSharedEntry(relativePath, targetDirectory string) error {
+	profile := s.engine.Profile()
+	return chat.MoveSharedEntry(profile.SharedRootPath, relativePath, targetDirectory)
+}
+
+func (s *ChatService) CopySharedEntry(relativePath, targetDirectory string) error {
+	profile := s.engine.Profile()
+	return chat.CopySharedEntry(profile.SharedRootPath, relativePath, targetDirectory)
+}
+
+func (s *ChatService) DeleteSharedEntry(relativePath string) error {
+	profile := s.engine.Profile()
+	return chat.DeleteSharedEntry(profile.SharedRootPath, relativePath)
+}
+
+func (s *ChatService) ListFriendSharedEntries(deviceID, relativePath string) ([]chat.SharedEntry, error) {
+	return s.engine.ListFriendSharedEntries(gctx.New(), strings.TrimSpace(deviceID), relativePath)
+}
+
+func (s *ChatService) DownloadFriendSharedEntry(deviceID, relativePath string) (chat.SharedTransfer, error) {
+	targetRoot := chat.DefaultSharedDownloadDir()
+	if err := os.MkdirAll(targetRoot, 0o700); err != nil {
+		return chat.SharedTransfer{}, err
+	}
+	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), relativePath, filepath.Join(targetRoot, filepath.Base(filepath.FromSlash(relativePath))))
+}
+
+func (s *ChatService) SaveFriendSharedEntryAs(deviceID, relativePath string) (chat.SharedTransfer, error) {
+	name := filepath.Base(filepath.FromSlash(relativePath))
+	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择共享文件保存位置").SetFilename(name).PromptForSingleSelection()
+	if err != nil || strings.TrimSpace(result) == "" {
+		return chat.SharedTransfer{}, err
+	}
+	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), relativePath, filepath.Clean(result))
+}
+
+func (s *ChatService) CancelSharedTransfer(transferID string) error {
+	return s.engine.CancelSharedTransfer(transferID)
+}
+
+func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string) (chat.SharedEntry, error) {
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
+	if clean == "." {
+		clean = ""
+	}
+	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(clean)))
+	if parent == "." {
+		parent = ""
+	}
+	entries, err := s.ListFriendSharedEntries(deviceID, parent)
+	if err != nil {
+		return chat.SharedEntry{}, err
+	}
+	for _, entry := range entries {
+		if entry.RelativePath == clean {
+			return entry, nil
+		}
+	}
+	return chat.SharedEntry{}, fmt.Errorf("共享文件不存在")
+}
+
+func (s *ChatService) ImportSharedFiles(relativePath string) ([]chat.SharedEntry, error) {
+	profile := s.engine.Profile()
+	if !profile.SharedEnabled {
+		return nil, fmt.Errorf("%s", chat.SharedDisabledError)
+	}
+	root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+	if err != nil {
+		return nil, err
+	}
+	target, normalized, err := resolveSharedDirectory(root, relativePath)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := application.Get().Dialog.OpenFile().SetTitle("选择要导入的文件").CanChooseFiles(true).CanChooseDirectories(false).PromptForMultipleSelection()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range paths {
+		if err := importSharedPath(source, target); err != nil {
+			return nil, err
+		}
+	}
+	return chat.ListSharedEntries(root, normalized)
+}
+
+func (s *ChatService) ImportSharedFolder(relativePath string) ([]chat.SharedEntry, error) {
+	profile := s.engine.Profile()
+	if !profile.SharedEnabled {
+		return nil, fmt.Errorf("%s", chat.SharedDisabledError)
+	}
+	root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+	if err != nil {
+		return nil, err
+	}
+	target, normalized, err := resolveSharedDirectory(root, relativePath)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := application.Get().Dialog.OpenFile().SetTitle("选择要导入的文件夹").CanChooseDirectories(true).CanChooseFiles(false).PromptForMultipleSelection()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range paths {
+		if err := importSharedPath(source, target); err != nil {
+			return nil, err
+		}
+	}
+	return chat.ListSharedEntries(root, normalized)
+}
+
+func resolveSharedDirectory(root, relative string) (string, string, error) {
+	entries, err := chat.ListSharedEntries(root, relative)
+	if err != nil {
+		return "", "", err
+	}
+	_ = entries
+	path, normalized, err := resolveSharedPathForService(root, relative)
+	return path, normalized, err
+}
+
+func resolveSharedPathForService(root, relative string) (string, string, error) {
+	// Reusing the public listing validates the path without exposing the
+	// unexported resolver outside the chat package; the final Stat is still
+	// checked before copying.
+	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(relative)))
+	if clean == "." {
+		clean = ""
+	}
+	if strings.Contains(relative, `\`) || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("%s", chat.SharedPathInvalidError)
+	}
+	root, err := chat.ValidateSharedRoot(root)
+	if err != nil {
+		return "", "", err
+	}
+	path := filepath.Join(root, clean)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return "", "", fmt.Errorf("%s", chat.SharedPathInvalidError)
+	}
+	return path, filepath.ToSlash(clean), nil
+}
+
+func importSharedPath(source, targetDirectory string) error {
+	info, err := os.Stat(source)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("导入文件不可用")
+	}
+	target := filepath.Join(targetDirectory, filepath.Base(source))
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("目标名称已存在")
+	}
+	if info.IsDir() {
+		return copyDirectoryForImport(source, target)
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	return output.Close()
+}
+
+func copyDirectoryForImport(source, target string) error {
+	if err := os.Mkdir(target, 0o700); err != nil {
+		return err
+	}
+	items, err := os.ReadDir(source)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := importSharedPath(filepath.Join(source, item.Name()), target); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *ChatService) SetFileSavePath(path string) (chat.Profile, error) {
 	profile, err := s.GetProfile()

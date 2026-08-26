@@ -619,6 +619,8 @@ export class Profile {
     "discoverable": boolean;
     "autoSave": boolean;
     "fileSavePath": string;
+    "sharedRootPath": string;
+    "sharedEnabled": boolean;
     "theme": string;
     "launchAtStartup": boolean;
 
@@ -639,6 +641,12 @@ export class Profile {
         if (!("fileSavePath" in $$source)) {
             this["fileSavePath"] = "";
         }
+        if (!("sharedRootPath" in $$source)) {
+            this["sharedRootPath"] = "";
+        }
+        if (!("sharedEnabled" in $$source)) {
+            this["sharedEnabled"] = false;
+        }
         if (!("theme" in $$source)) {
             this["theme"] = "";
         }
@@ -655,6 +663,146 @@ export class Profile {
     static createFrom($$source: any = {}): Profile {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         return new Profile($$parsedSource as Partial<Profile>);
+    }
+}
+
+export class SharedEntry {
+    "entryId": string;
+    "name": string;
+    "relativePath": string;
+    "isDirectory": boolean;
+    "size": number;
+    "mimeType": string;
+    "modifiedAt": string;
+    "sha256"?: string;
+
+    /** Creates a new SharedEntry instance. */
+    constructor($$source: Partial<SharedEntry> = {}) {
+        if (!("entryId" in $$source)) {
+            this["entryId"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("relativePath" in $$source)) {
+            this["relativePath"] = "";
+        }
+        if (!("isDirectory" in $$source)) {
+            this["isDirectory"] = false;
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("mimeType" in $$source)) {
+            this["mimeType"] = "";
+        }
+        if (!("modifiedAt" in $$source)) {
+            this["modifiedAt"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedEntry instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedEntry {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedEntry($$parsedSource as Partial<SharedEntry>);
+    }
+}
+
+export class SharedFolderStatus {
+    "enabled": boolean;
+    "rootPath": string;
+    "fileCount": number;
+    "folderCount": number;
+    "availableBytes": number;
+    "updatedAt": string;
+
+    /** Creates a new SharedFolderStatus instance. */
+    constructor($$source: Partial<SharedFolderStatus> = {}) {
+        if (!("enabled" in $$source)) {
+            this["enabled"] = false;
+        }
+        if (!("rootPath" in $$source)) {
+            this["rootPath"] = "";
+        }
+        if (!("fileCount" in $$source)) {
+            this["fileCount"] = 0;
+        }
+        if (!("folderCount" in $$source)) {
+            this["folderCount"] = 0;
+        }
+        if (!("availableBytes" in $$source)) {
+            this["availableBytes"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            this["updatedAt"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedFolderStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedFolderStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedFolderStatus($$parsedSource as Partial<SharedFolderStatus>);
+    }
+}
+
+export class SharedTransfer {
+    "transferId": string;
+    "deviceId": string;
+    "relativePath": string;
+    "fileName": string;
+    "fileSize": number;
+    "transferred": number;
+    "status": string;
+    "direction": string;
+    "targetPath": string;
+
+    /** Creates a new SharedTransfer instance. */
+    constructor($$source: Partial<SharedTransfer> = {}) {
+        if (!("transferId" in $$source)) {
+            this["transferId"] = "";
+        }
+        if (!("deviceId" in $$source)) {
+            this["deviceId"] = "";
+        }
+        if (!("relativePath" in $$source)) {
+            this["relativePath"] = "";
+        }
+        if (!("fileName" in $$source)) {
+            this["fileName"] = "";
+        }
+        if (!("fileSize" in $$source)) {
+            this["fileSize"] = 0;
+        }
+        if (!("transferred" in $$source)) {
+            this["transferred"] = 0;
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("direction" in $$source)) {
+            this["direction"] = "";
+        }
+        if (!("targetPath" in $$source)) {
+            this["targetPath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedTransfer instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedTransfer {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedTransfer($$parsedSource as Partial<SharedTransfer>);
     }
 }
 

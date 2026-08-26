@@ -33,6 +33,8 @@ type Profile struct {
 	Discoverable    bool   `json:"discoverable"`
 	AutoSave        bool   `json:"autoSave"`
 	FileSavePath    string `json:"fileSavePath"`
+	SharedRootPath  string `json:"sharedRootPath"`
+	SharedEnabled   bool   `json:"sharedEnabled"`
 	Theme           string `json:"theme"`
 	LaunchAtStartup bool   `json:"launchAtStartup"`
 }
@@ -190,6 +192,42 @@ type NetworkStatus struct {
 	LastError     string   `json:"lastError"`
 }
 
+type SharedFolderSettings struct {
+	Enabled  bool   `json:"enabled"`
+	RootPath string `json:"rootPath"`
+}
+
+type SharedFolderStatus struct {
+	SharedFolderSettings
+	FileCount      int    `json:"fileCount"`
+	FolderCount    int    `json:"folderCount"`
+	AvailableBytes uint64 `json:"availableBytes"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+type SharedEntry struct {
+	EntryID      string `json:"entryId"`
+	Name         string `json:"name"`
+	RelativePath string `json:"relativePath"`
+	IsDirectory  bool   `json:"isDirectory"`
+	Size         int64  `json:"size"`
+	MimeType     string `json:"mimeType"`
+	ModifiedAt   string `json:"modifiedAt"`
+	SHA256       string `json:"sha256,omitempty"`
+}
+
+type SharedTransfer struct {
+	TransferID   string `json:"transferId"`
+	DeviceID     string `json:"deviceId"`
+	RelativePath string `json:"relativePath"`
+	FileName     string `json:"fileName"`
+	FileSize     int64  `json:"fileSize"`
+	Transferred  int64  `json:"transferred"`
+	Status       string `json:"status"`
+	Direction    string `json:"direction"`
+	TargetPath   string `json:"targetPath"`
+}
+
 type DiagnosticItem struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
@@ -204,60 +242,63 @@ type DiagnosticResult struct {
 }
 
 type wireMessage struct {
-	Magic            string   `json:"magic,omitempty"`
-	Type             string   `json:"type"`
-	Protocol         string   `json:"protocol,omitempty"`
-	Major            int      `json:"major,omitempty"`
-	Minor            int      `json:"minor,omitempty"`
-	MinMajor         int      `json:"minMajor,omitempty"`
-	MinMinor         int      `json:"minMinor,omitempty"`
-	RequestID        string   `json:"requestId,omitempty"`
-	DiscoveryScope   string   `json:"discoveryScope,omitempty"`
-	MessageID        string   `json:"messageId,omitempty"`
-	DeviceID         string   `json:"deviceId,omitempty"`
-	Nickname         string   `json:"nickname,omitempty"`
-	AvatarHash       string   `json:"avatarHash,omitempty"`
-	AvatarVersion    int64    `json:"avatarVersion,omitempty"`
-	AvatarData       string   `json:"avatarData,omitempty"`
-	AvatarMime       string   `json:"avatarMime,omitempty"`
-	Platform         string   `json:"platform,omitempty"`
-	OSVersion        string   `json:"osVersion,omitempty"`
-	IP               string   `json:"ip,omitempty"`
-	Port             int      `json:"port,omitempty"`
-	PublicKey        string   `json:"publicKey,omitempty"`
-	CertFP           string   `json:"certificateFingerprint,omitempty"`
-	Content          string   `json:"content,omitempty"`
-	QuoteMessageID   string   `json:"quoteMessageId,omitempty"`
-	QuoteContent     string   `json:"quoteContent,omitempty"`
-	ForwardedFrom    string   `json:"forwardedFrom,omitempty"`
-	Kind             string   `json:"kind,omitempty"`
-	Status           string   `json:"status,omitempty"`
-	FileName         string   `json:"fileName,omitempty"`
-	MimeType         string   `json:"mimeType,omitempty"`
-	ThumbnailData    string   `json:"thumbnailData,omitempty"`
-	ThumbnailMime    string   `json:"thumbnailMime,omitempty"`
-	FileSize         int64    `json:"fileSize,omitempty"`
-	SHA256           string   `json:"sha256,omitempty"`
-	AttachmentID     string   `json:"attachmentId,omitempty"`
-	MessageIDs       []string `json:"messageIds,omitempty"`
-	ChunkIndex       int      `json:"chunkIndex,omitempty"`
-	Transferred      int64    `json:"transferred,omitempty"`
-	Payload          string   `json:"payload,omitempty"`
-	Capabilities     []string `json:"capabilities,omitempty"`
-	SyncSince        string   `json:"syncSince,omitempty"`
-	SyncUntil        string   `json:"syncUntil,omitempty"`
-	SyncToken        string   `json:"syncToken,omitempty"`
-	ReadAt           string   `json:"readAt,omitempty"`
-	Probe            bool     `json:"probe,omitempty"`
-	AcceptedAt       string   `json:"acceptedAt,omitempty"`
-	TargetDeviceID   string   `json:"targetDeviceId,omitempty"`
-	SourceDeviceID   string   `json:"sourceDeviceId,omitempty"`
-	SourcePublicKey  string   `json:"sourcePublicKey,omitempty"`
-	RestoreVersion   int      `json:"restoreVersion,omitempty"`
-	RestoreSignature string   `json:"restoreSignature,omitempty"`
-	Reason           string   `json:"reason,omitempty"`
-	AvailableBytes   int64    `json:"availableBytes,omitempty"`
-	RequiredBytes    int64    `json:"requiredBytes,omitempty"`
+	Magic            string        `json:"magic,omitempty"`
+	Type             string        `json:"type"`
+	Protocol         string        `json:"protocol,omitempty"`
+	Major            int           `json:"major,omitempty"`
+	Minor            int           `json:"minor,omitempty"`
+	MinMajor         int           `json:"minMajor,omitempty"`
+	MinMinor         int           `json:"minMinor,omitempty"`
+	RequestID        string        `json:"requestId,omitempty"`
+	DiscoveryScope   string        `json:"discoveryScope,omitempty"`
+	MessageID        string        `json:"messageId,omitempty"`
+	DeviceID         string        `json:"deviceId,omitempty"`
+	Nickname         string        `json:"nickname,omitempty"`
+	AvatarHash       string        `json:"avatarHash,omitempty"`
+	AvatarVersion    int64         `json:"avatarVersion,omitempty"`
+	AvatarData       string        `json:"avatarData,omitempty"`
+	AvatarMime       string        `json:"avatarMime,omitempty"`
+	Platform         string        `json:"platform,omitempty"`
+	OSVersion        string        `json:"osVersion,omitempty"`
+	IP               string        `json:"ip,omitempty"`
+	Port             int           `json:"port,omitempty"`
+	PublicKey        string        `json:"publicKey,omitempty"`
+	CertFP           string        `json:"certificateFingerprint,omitempty"`
+	Content          string        `json:"content,omitempty"`
+	QuoteMessageID   string        `json:"quoteMessageId,omitempty"`
+	QuoteContent     string        `json:"quoteContent,omitempty"`
+	ForwardedFrom    string        `json:"forwardedFrom,omitempty"`
+	Kind             string        `json:"kind,omitempty"`
+	Status           string        `json:"status,omitempty"`
+	FileName         string        `json:"fileName,omitempty"`
+	MimeType         string        `json:"mimeType,omitempty"`
+	ThumbnailData    string        `json:"thumbnailData,omitempty"`
+	ThumbnailMime    string        `json:"thumbnailMime,omitempty"`
+	FileSize         int64         `json:"fileSize,omitempty"`
+	SHA256           string        `json:"sha256,omitempty"`
+	AttachmentID     string        `json:"attachmentId,omitempty"`
+	MessageIDs       []string      `json:"messageIds,omitempty"`
+	ChunkIndex       int           `json:"chunkIndex,omitempty"`
+	Transferred      int64         `json:"transferred,omitempty"`
+	Payload          string        `json:"payload,omitempty"`
+	Capabilities     []string      `json:"capabilities,omitempty"`
+	SyncSince        string        `json:"syncSince,omitempty"`
+	SyncUntil        string        `json:"syncUntil,omitempty"`
+	SyncToken        string        `json:"syncToken,omitempty"`
+	ReadAt           string        `json:"readAt,omitempty"`
+	Probe            bool          `json:"probe,omitempty"`
+	AcceptedAt       string        `json:"acceptedAt,omitempty"`
+	TargetDeviceID   string        `json:"targetDeviceId,omitempty"`
+	SourceDeviceID   string        `json:"sourceDeviceId,omitempty"`
+	SourcePublicKey  string        `json:"sourcePublicKey,omitempty"`
+	RestoreVersion   int           `json:"restoreVersion,omitempty"`
+	RestoreSignature string        `json:"restoreSignature,omitempty"`
+	Reason           string        `json:"reason,omitempty"`
+	AvailableBytes   int64         `json:"availableBytes,omitempty"`
+	RequiredBytes    int64         `json:"requiredBytes,omitempty"`
+	RelativePath     string        `json:"relativePath,omitempty"`
+	TransferID       string        `json:"transferId,omitempty"`
+	Entries          []SharedEntry `json:"entries,omitempty"`
 }
 
 func protocolDialectForMessage(message wireMessage) (ProtocolDialect, bool) {

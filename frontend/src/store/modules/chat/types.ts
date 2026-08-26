@@ -9,6 +9,8 @@ export interface Profile {
   fileSavePath: string
   theme: string
   launchAtStartup: boolean
+  sharedRootPath?: string
+  sharedEnabled?: boolean
 }
 
 export interface Peer {

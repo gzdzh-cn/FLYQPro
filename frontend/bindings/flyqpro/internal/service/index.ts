@@ -3,7 +3,9 @@
 
 import * as ChatService from "./chatservice.js";
 import * as ImageViewerService from "./imageviewerservice.js";
+import * as SharedDriveWindowService from "./shareddrivewindowservice.js";
 export {
     ChatService,
-    ImageViewerService
+    ImageViewerService,
+    SharedDriveWindowService
 };

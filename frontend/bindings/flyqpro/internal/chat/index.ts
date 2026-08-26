@@ -14,5 +14,8 @@ export {
     Message,
     NetworkStatus,
     Peer,
-    Profile
+    Profile,
+    SharedEntry,
+    SharedFolderStatus,
+    SharedTransfer
 } from "./models.js";

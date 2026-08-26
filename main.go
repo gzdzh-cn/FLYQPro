@@ -47,10 +47,12 @@ func main() {
 		},
 	})
 	app.RegisterService(application.NewService(service.NewImageViewerService(app)))
+	app.RegisterService(application.NewService(service.NewSharedDriveWindowService(app, chatService)))
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Name:             "flyqpro-main",
 		Title:            "飞秋Pro",
 		Frameless:        runtime.GOOS == "darwin",
 		Width:            1100,

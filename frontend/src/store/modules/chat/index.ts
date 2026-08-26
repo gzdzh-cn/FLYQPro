@@ -3,7 +3,7 @@ import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message,
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
-    profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false } as Profile,
+    profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false, sharedRootPath: '', sharedEnabled: false } as Profile,
     deviceId: '',
     peers: [] as Peer[],
     conversations: [] as Conversation[],

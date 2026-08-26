@@ -13,6 +13,7 @@
       <nav class="rail-nav">
         <button :class="{ active: section === 'friends' }" @click="enterFriends" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small><b v-if="totalUnreadCount" class="rail-unread-badge">{{ unreadLabel(totalUnreadCount) }}</b></button>
         <button :class="{ active: section === 'discover' }" @click="openDiscover" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button>
+        <button @click="openSharedDrive" :disabled="store.attachmentMigration.active" aria-label="共享"><icon-cloud /><small>共享</small></button>
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
     </aside>
@@ -98,7 +99,7 @@
         <a-modal v-model:visible="attachmentDetailsVisible" title="附件详情" :footer="false"><div v-if="attachmentDetails" class="attachment-details"><p><span>文件名</span><strong>{{ attachmentDetails.fileName }}</strong></p><p><span>类型</span><strong>{{ attachmentDetails.mimeType || '未知' }}</strong></p><p><span>大小</span><strong>{{ formatBytes(attachmentDetails.fileSize) }}</strong></p><p><span>状态</span><strong>{{ attachmentDetails.status }}</strong></p><p><span>时间</span><strong>{{ formatTime(attachmentDetails.createdAt) }}</strong></p><p><span>路径</span><strong>{{ attachmentDetails.localPath }}</strong></p><p><span>SHA256</span><strong class="mono">{{ attachmentDetails.sha256 || '未知' }}</strong></p></div></a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :style="{ height: `${composerHeight}px` }">
-          <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button></div>
+          <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button><button title="打开好友共享盘" @click="openFriendSharedDrive"><icon-cloud /></button></div>
           <div v-if="emojiOpen" class="emoji-panel"><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
           <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
@@ -177,9 +178,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
+import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconCloud, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { Browser, Clipboard, System, Window } from '@wailsio/runtime'
-import { ChatService, ImageViewerService } from '/#/flyqpro/internal/service'
+import { ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
 import type { AttachmentDetails, FriendRequest, Message as ChatMessage, Peer } from '@/store/modules/chat/types'
 
@@ -936,6 +937,13 @@ function stopResize() { if (!resizeState) return; localStorage.setItem('flyqpro.
 async function savePeerRemark() { if (!activePeer.value || peerRemark.value === activePeer.value.remark) return; try { await ChatService.SetPeerRemark(activePeer.value.deviceId, peerRemark.value.trim()); const peer = store.peers.find((item) => item.deviceId === activePeer.value?.deviceId); if (peer) peer.remark = peerRemark.value.trim() } catch (error: any) { Message.error(error?.message || '备注保存失败') } }
 async function runDiagnostic() { diagnostic.value = await ChatService.RunNetworkDiagnostic() }
 function openRepository() { void Browser.OpenURL('https://github.com/gzdzh-cn/FlyQPro') }
+async function openSharedDrive() {
+  try { await SharedDriveWindowService.OpenSharedDrive() } catch (error: any) { Message.error(error?.message || '打开共享窗口失败') }
+}
+async function openFriendSharedDrive() {
+  if (!activePeer.value) return
+  try { await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId) } catch (error: any) { Message.error(error?.message || '打开好友共享盘失败') }
+}
 function minimiseWindow() { Window.Minimise() }
 async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
 function closeWindow() { Window.Close() }
