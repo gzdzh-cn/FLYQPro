@@ -372,6 +372,14 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	// been disabled. Friends and peers with an active friend request still need
 	// a direct connection for messaging and request responses.
 	isFriend := e.isFriend(hello.DeviceID)
+	removedFriend, removalErr := IsFriendRemoved(context.Background(), hello.DeviceID)
+	if removalErr == nil && removedFriend && !isFriend {
+		// Tell an old friend explicitly why its message cannot be delivered.
+		// Returning DISCOVERY_DISABLED here would make a deleted friendship
+		// indistinguishable from a temporary privacy setting on the receiver.
+		_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
+		return
+	}
 	if !isFriend && !e.hasPendingFriendRequest(hello.DeviceID) && !e.Profile().Discoverable {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
 		return
@@ -453,6 +461,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: status, Direction: "received", CreatedAt: nowString(), AcceptedAt: acceptedAt}
 		if err := SaveFriendRequest(context.Background(), request); err == nil {
 			if status == "accepted" {
+				_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
+				e.setPeerVisibleInFriends(hello.DeviceID, true)
 				_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, "accepted", acceptedAt)
 				_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: message.RequestID, Status: "accepted", AcceptedAt: acceptedAt})
 			} else if !duplicate {
@@ -478,6 +488,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			}
 			if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err == nil {
 				e.updatePeerRelation(hello.DeviceID, PeerRelation)
+			}
+			// The requester may have discovered this device with
+			// visible_in_friends=false. Accepting the request is an explicit
+			// action that must make the new friend appear in the main list.
+			if err := SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true); err == nil {
+				e.setPeerVisibleInFriends(hello.DeviceID, true)
 			}
 			_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, status, acceptedAt)
 		} else if status == "rejected" {
@@ -1769,7 +1785,7 @@ func (e *Engine) SendMessageWithMetadata(ctx context.Context, deviceID, content,
 		return message, nil
 	}
 	if err := e.sendToPeer(peer, wire); err != nil {
-		message.Status = "failed"
+		message.Status = sendFailureStatus(err)
 	} else {
 		message.Status = "sent"
 	}
@@ -1807,10 +1823,20 @@ func (e *Engine) RetryMessage(ctx context.Context, messageID string) (Message, e
 	wire := wireMessage{Type: "message", MessageID: message.MessageID, Kind: "text", Content: message.Content, QuoteMessageID: message.QuoteMessageID, QuoteContent: message.QuoteContent, ForwardedFrom: message.ForwardedFrom}
 	peer, err := e.peer(deviceID)
 	if err != nil {
-		return e.finishTextRetry(ctx, message, "failed"), err
+		status := sendFailureStatus(err)
+		result := e.finishTextRetry(ctx, message, status)
+		if status == "not_friend" {
+			return result, nil
+		}
+		return result, err
 	}
 	if err := e.sendToPeer(peer, wire); err != nil {
-		return e.finishTextRetry(ctx, message, "failed"), err
+		status := sendFailureStatus(err)
+		result := e.finishTextRetry(ctx, message, status)
+		if status == "not_friend" {
+			return result, nil
+		}
+		return result, err
 	}
 	return e.finishTextRetry(ctx, message, "sent"), nil
 }
@@ -1928,13 +1954,16 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 	e.emit("chat:message", message)
 	e.emitTransferProgress(message.MessageID, attachmentID, deviceID, 0, message.AttachmentSize, "send", "awaiting_acceptance")
 	if err := e.transferFile(ctx, deviceID, message, path, sum); err != nil {
-		status := "failed"
+		status := sendFailureStatus(err)
 		if errors.Is(err, errAttachmentCanceled) {
 			status = "canceled"
 		} else if errors.Is(err, errAttachmentRejected) {
 			status = "rejected"
 		}
 		result := e.finishAttachmentSend(ctx, message, status)
+		if status == "not_friend" {
+			return result, nil
+		}
 		if status != "failed" {
 			return result, nil
 		}
@@ -2078,13 +2107,16 @@ func (e *Engine) RetryAttachment(ctx context.Context, messageID string) (Message
 	}
 	e.emit("chat:message", message)
 	if err := e.transferFile(ctx, strings.TrimPrefix(message.ConversationID, "conv-"), message, message.AttachmentPath, sum); err != nil {
-		status := "failed"
+		status := sendFailureStatus(err)
 		if errors.Is(err, errAttachmentCanceled) {
 			status = "canceled"
 		} else if errors.Is(err, errAttachmentRejected) {
 			status = "rejected"
 		}
 		result := e.finishAttachmentSend(ctx, message, status)
+		if status == "not_friend" {
+			return result, nil
+		}
 		if status != "failed" {
 			return result, nil
 		}
@@ -2418,7 +2450,7 @@ func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, stat
 		message.AttachmentThumbnailMime = attachment.ThumbnailMime
 	}
 	e.emit("chat:message", message)
-	phase := map[string]string{"sent": "completed", "failed": "failed", "canceled": "canceled", "rejected": "rejected"}[status]
+	phase := map[string]string{"sent": "completed", "failed": "failed", "not_friend": "failed", "canceled": "canceled", "rejected": "rejected"}[status]
 	if phase != "" {
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, strings.TrimPrefix(message.ConversationID, "conv-"), message.AttachmentSize, message.AttachmentSize, "send", phase)
 	}
@@ -2815,6 +2847,23 @@ func (e *Engine) isFriend(deviceID string) bool {
 	}
 	peer, err := e.peer(deviceID)
 	return err == nil && peer.Relation == PeerRelation
+}
+
+// sendFailureStatus keeps a remote friendship rejection distinguishable from
+// transport failures. The status is persisted with the outgoing message so
+// the UI can explain why a message was not delivered after a friend was
+// removed, instead of showing the generic "发送失败" text.
+func sendFailureStatus(err error) string {
+	if err == nil {
+		return "failed"
+	}
+	upper := strings.ToUpper(err.Error())
+	if strings.Contains(upper, "FRIENDSHIP_REQUIRED") ||
+		strings.Contains(upper, "FRIENDSHIP_REMOVED") ||
+		strings.Contains(err.Error(), "不是好友") {
+		return "not_friend"
+	}
+	return "failed"
 }
 
 func (e *Engine) hasPendingFriendRequest(deviceID string) bool {

@@ -304,10 +304,10 @@ function messageStatusText(status: string, kind = 'text', attachmentStatus = '')
     const fileStatus = attachmentStatus || status
     if (fileStatus === 'sent' || fileStatus === 'delivered') return '发送成功'
     if (fileStatus === 'read') return ''
-    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
+    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', not_friend: '对方不是你好友', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
   }
   if (status === 'sent') return '已发送'
-  return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status
+  return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', not_friend: '对方不是你好友', failed: '发送失败' } as Record<string, string>)[status] || status
 }
 function conversationForPeer(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId) }
 function unreadCount(deviceId: string) { return conversationForPeer(deviceId)?.unreadCount || 0 }
@@ -675,6 +675,7 @@ function notifyAttachmentResult(message: any) {
     case 'sent': Message.success('文件已发送'); break
     case 'rejected': Message.warning('对方已拒绝接收文件'); break
     case 'canceled': Message.info('文件传输已取消'); break
+    case 'not_friend': Message.warning('对方不是你好友'); break
     case 'failed': Message.error('文件发送失败'); break
     default: Message.info('文件正在等待对方接收')
   }
