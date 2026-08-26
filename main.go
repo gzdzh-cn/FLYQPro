@@ -48,6 +48,7 @@ func main() {
 	})
 	app.RegisterService(application.NewService(service.NewImageViewerService(app)))
 	configureApplicationMenu(app)
+	configureNativeApplicationName(app)
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "飞秋Pro",

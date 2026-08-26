@@ -1,23 +1,30 @@
 <template>
-  <main class="image-viewer-app" :class="{ dark: isDark }">
-    <header class="image-viewer-head">
-      <div class="image-viewer-title">
-        <strong>{{ imageViewerName }}</strong>
-        <span v-if="imageMessages.length">{{ currentIndex + 1 }} / {{ imageMessages.length }} · {{ sourceType === 'original' ? '原图' : '预览图' }}</span>
-      </div>
-      <div class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏">
+  <main class="image-viewer-app" :class="{ dark: isDark, 'is-macos': isMac, 'is-windows': isWindows }">
+    <header class="image-viewer-head" @dblclick="isWindows && toggleWindowMaximise()">
+      <div class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
         <button type="button" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @click="moveImage(-1)"><icon-left /></button>
         <button type="button" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @click="moveImage(1)"><icon-right /></button>
         <button type="button" aria-label="缩小" title="缩小" :disabled="loading || scale <= .5" @click="zoomImage(-.25)"><icon-zoom-out /></button>
         <button type="button" aria-label="放大" title="放大" :disabled="loading || scale >= 6" @click="zoomImage(.25)"><icon-zoom-in /></button>
         <button type="button" aria-label="向左旋转90度" title="向左旋转90°" :disabled="loading || !source" @click="rotateImageLeft"><icon-rotate-left /></button>
-        <i aria-hidden="true"></i>
-        <button type="button" aria-label="关闭图片查看器" title="关闭" @click="closeViewer"><icon-close /></button>
+      </div>
+      <div class="image-viewer-window-actions" @dblclick.stop>
+        <template v-if="isWindows">
+          <button type="button" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"><icon-minus /></button>
+          <button type="button" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"><icon-fullscreen /></button>
+        </template>
+        <button type="button" class="window-close" aria-label="关闭图片查看器" title="关闭" @click.stop="closeViewer"><icon-close /></button>
       </div>
     </header>
 
     <section class="image-viewer-canvas" @wheel.prevent.stop="handleWheel" @dblclick.prevent.stop="toggleZoom" @pointerdown.stop="handlePointerDown" @pointermove.stop="handlePointerMove" @pointerup.stop="handlePointerUp" @pointercancel.stop="handlePointerUp">
+      <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-prev">
+        <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
+      </div>
       <img v-if="source" :src="source" :alt="imageViewerName" :style="imageTransform" draggable="false" />
+      <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-next">
+        <button type="button" class="image-nav-arrow" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @pointerdown.stop @click.stop="moveImage(1)"><icon-right /></button>
+      </div>
       <div v-if="loading" class="image-viewer-state"><icon-loading /><span>正在读取图片</span></div>
       <div v-else-if="error" class="image-viewer-state error"><icon-close-circle /><strong>{{ error }}</strong></div>
       <div v-else-if="!imageMessages.length" class="image-viewer-state"><icon-close-circle /><strong>没有可预览的图片</strong></div>
@@ -30,7 +37,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Events, Window } from '@wailsio/runtime'
 import { ChatService } from '/#/flyqpro/internal/service'
-import { IconClose, IconCloseCircle, IconLeft, IconLoading, IconRight, IconRotateLeft, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
+import { IconClose, IconCloseCircle, IconFullscreen, IconLeft, IconLoading, IconMinus, IconRight, IconRotateLeft, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
 
 const route = useRoute()
 const conversationId = computed(() => String(route.query.conversationId || ''))
@@ -46,6 +53,8 @@ const scale = ref(1)
 const rotation = ref(0)
 const offset = ref({ x: 0, y: 0 })
 const isDark = ref(false)
+const isMac = /Macintosh|Mac OS X|MacIntel/i.test(`${navigator.platform || ''} ${navigator.userAgent || ''}`)
+const isWindows = /Win32|Windows/i.test(`${navigator.platform || ''} ${navigator.userAgent || ''}`)
 const cache = new Map<string, { source: string; type: 'thumbnail' | 'original' }>()
 const imageMessages = computed(() => messages.value.filter((message) => message.kind === 'file' && message.attachmentId && isImageMessage(message)))
 const currentMessage = computed(() => imageMessages.value[currentIndex.value])
@@ -86,8 +95,14 @@ function thumbnailDataURL(message: any) {
 function applyTheme(theme: string) {
   const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
   isDark.value = Boolean(dark)
-  document.documentElement.style.setProperty('--window-corner-bg', dark ? '#0f1115' : '#edf0f3')
-  document.body.style.backgroundColor = dark ? '#0f1115' : '#edf0f3'
+  // Keep the native window background in sync with the in-page title bar.
+  // This is important for the area occupied by the platform title bar on
+  // macOS, and also prevents a light/dark strip from appearing while the
+  // viewer is open on Windows and Linux.
+  const surface = dark ? { hex: '#15181d', rgb: [21, 24, 29] } : { hex: '#f7f8fa', rgb: [247, 248, 250] }
+  document.documentElement.style.setProperty('--window-corner-bg', surface.hex)
+  document.body.style.backgroundColor = surface.hex
+  void Window.SetBackgroundColour(surface.rgb[0], surface.rgb[1], surface.rgb[2], 255).catch(() => undefined)
   if (dark) document.body.setAttribute('arco-theme', 'dark')
   else document.body.removeAttribute('arco-theme')
 }
@@ -227,6 +242,7 @@ async function moveImage(direction: number) {
 }
 
 function closeViewer() { void Window.Close() }
+function toggleWindowMaximise() { void Window.ToggleMaximise() }
 
 function handleWheel(event: WheelEvent) {
   // Chromium exposes macOS trackpad pinch as a ctrl+wheel stream. Applying
@@ -259,9 +275,13 @@ function handleWheel(event: WheelEvent) {
     }
     return
   }
-  // A normal vertical two-finger scroll is only scrolling the trackpad. It
-  // must not zoom the image; zooming remains available through pinch,
-  // toolbar buttons, double-click and keyboard shortcuts.
+  // Windows' regular mouse wheel is reported as a large, discrete vertical
+  // delta. Smooth, small deltas are normally a two-finger trackpad scroll and
+  // remain inert; pinch is handled by the ctrl+wheel branch above.
+  if (Math.abs(event.deltaY) >= 80 || event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    const steps = Math.max(1, Math.min(3, Math.round(Math.abs(event.deltaY) / 120)))
+    setZoomTarget(zoomTarget + (event.deltaY < 0 ? 0.25 : -0.25) * steps)
+  }
 }
 
 function pointerCentroid() {
@@ -353,6 +373,11 @@ onMounted(async () => {
   await loadTheme()
   window.addEventListener('keydown', handleKey)
   for (const name of ['chat:message', 'chat:message-status', 'chat:attachment', 'chat:transfer-progress']) eventCancels.push(Events.On(name, handleEvent))
+  eventCancels.push(Events.On('chat:profile-updated', (event: any) => {
+    const theme = event?.data?.theme ?? event?.theme
+    if (theme) applyTheme(theme)
+    else void loadTheme()
+  }))
 })
 
 onBeforeUnmount(() => {
@@ -368,22 +393,37 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped lang="less">
-.image-viewer-app { --viewer-bg: #111722; --viewer-surface: #f7f8fa; --viewer-text: #20252b; --viewer-muted: #687482; --viewer-line: #cfd6de; width: 100%; height: 100%; min-width: 0; min-height: 0; display: flex; overflow: hidden; flex-direction: column; background: var(--viewer-bg); color: var(--viewer-text); }
+:global(html), :global(body), :global(#app) { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: var(--window-corner-bg, #15181d); }
+.image-viewer-app { --viewer-bg: #111722; --viewer-surface: #f7f8fa; --viewer-text: #20252b; --viewer-muted: #687482; --viewer-line: #cfd6de; width: 100%; height: 100%; min-width: 0; min-height: 0; display: flex; overflow: hidden; flex-direction: column; background: var(--viewer-bg); color: var(--viewer-text); --wails-draggable: no-drag; }
+.image-viewer-app:not(.dark) { --viewer-bg: #edf0f3; }
 .image-viewer-app.dark { --viewer-surface: #15181d; --viewer-text: #f0f2f5; --viewer-muted: #a4adb8; --viewer-line: #39424d; }
-.image-viewer-head { display: flex; min-height: 50px; padding: 8px 10px 8px 16px; box-sizing: border-box; align-items: center; justify-content: space-between; gap: 12px; flex: 0 0 50px; background: var(--viewer-surface); border-bottom: 1px solid var(--viewer-line); }
-.image-viewer-title { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
-.image-viewer-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
-.image-viewer-title span { color: var(--viewer-muted); font-size: 10px; }
-.image-viewer-toolbar { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
+.image-viewer-head { position: relative; display: flex; min-height: 50px; padding: 8px 10px 8px 16px; box-sizing: border-box; align-items: center; justify-content: flex-end; gap: 12px; flex: 0 0 50px; background: var(--viewer-surface); border-bottom: 1px solid var(--viewer-line); cursor: grab; -webkit-app-region: drag; --wails-draggable: drag; }
+.image-viewer-app.is-macos .image-viewer-head { padding-left: 84px; }
+.image-viewer-toolbar { position: absolute; left: 50%; display: flex; align-items: center; gap: 2px; transform: translateX(-50%); }
+.image-viewer-window-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
+.image-viewer-toolbar,
+.image-viewer-toolbar button,
+.image-viewer-window-actions,
+.image-viewer-window-actions button { -webkit-app-region: no-drag; --wails-draggable: no-drag; --wails-non-client-region: none; }
 .image-viewer-toolbar button { display: inline-flex; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
+.image-viewer-window-actions button { display: inline-flex; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--viewer-muted); cursor: pointer; }
 .image-viewer-toolbar button:hover:not(:disabled) { background: color-mix(in srgb, var(--viewer-text) 10%, transparent); color: var(--viewer-text); }
+.image-viewer-window-actions button:hover:not(:disabled) { background: color-mix(in srgb, var(--viewer-text) 10%, transparent); color: var(--viewer-text); }
 .image-viewer-toolbar button:disabled { opacity: .32; cursor: default; }
-.image-viewer-toolbar > i { width: 1px; height: 18px; margin: 0 4px; background: var(--viewer-line); }
-.image-viewer-canvas { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; overflow: hidden; align-items: center; justify-content: center; }
+.image-viewer-window-actions button:disabled { opacity: .32; cursor: default; }
+.image-viewer-window-actions .window-close:hover:not(:disabled) { background: #e5484d; color: #fff; }
+.image-viewer-canvas { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; overflow: hidden; align-items: center; justify-content: center; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-viewer-canvas img { display: block; max-width: calc(100% - 24px); max-height: calc(100% - 24px); object-fit: contain; user-select: none; will-change: transform; transition: transform .08s linear; }
+.image-nav-side { position: absolute; z-index: 2; top: 0; bottom: 0; display: flex; width: 88px; align-items: center; opacity: 0; pointer-events: auto; transition: opacity .18s ease; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
+.image-nav-side-prev { left: 0; justify-content: flex-start; padding-left: 14px; }
+.image-nav-side-next { right: 0; justify-content: flex-end; padding-right: 14px; }
+.image-nav-side:hover { opacity: 1; }
+.image-nav-arrow { display: inline-flex; width: 42px; height: 72px; padding: 0; align-items: center; justify-content: center; border: 1px solid color-mix(in srgb, var(--viewer-line) 80%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--viewer-surface) 88%, transparent); color: var(--viewer-text); cursor: pointer; }
+.image-nav-arrow:hover:not(:disabled) { background: color-mix(in srgb, var(--viewer-text) 12%, var(--viewer-surface)); }
+.image-nav-arrow:disabled { opacity: .25; cursor: default; }
 .image-viewer-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; color: #d8e2f2; font-size: 13px; pointer-events: none; }
 .image-viewer-state > svg { font-size: 30px; color: #84a8ff; }
 .image-viewer-state.error { color: #ffb4b4; }
 .image-viewer-state.error > svg { color: #ff8b8b; }
-@media (max-width: 720px), (max-height: 540px) { .image-viewer-head { min-height: 44px; flex-basis: 44px; padding-top: 5px; padding-bottom: 5px; } .image-viewer-title span { display: none; } .image-viewer-toolbar button { width: 28px; height: 28px; } }
+@media (max-width: 720px), (max-height: 540px) { .image-viewer-head { min-height: 44px; flex-basis: 44px; padding-top: 5px; padding-bottom: 5px; } .image-viewer-app.is-macos .image-viewer-head { padding-left: 76px; } .image-viewer-toolbar button, .image-viewer-window-actions button { width: 28px; height: 28px; } }
 </style>

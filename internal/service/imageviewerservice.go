@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -60,10 +61,9 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 	query.Set("conversationId", conversationID)
 	query.Set("messageId", messageID)
 	viewerURL := "/#/image-viewer?" + query.Encode()
+	// The viewer uses a custom title bar on Windows and macOS, so do not put
+	// the attachment name in the native window title either.
 	title := "图片预览"
-	if name := strings.TrimSpace(message.AttachmentName); name != "" {
-		title += " - " + name
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,10 +88,18 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 		InitialPosition:  application.WindowCentered,
 		BackgroundType:   application.BackgroundTypeSolid,
 		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
-		Frameless:        false,
-		URL:              viewerURL,
+		// Windows uses a fully custom title bar. macOS keeps only the native
+		// traffic lights through MacTitleBarHiddenInsetUnified; its title and
+		// background are rendered by the viewer page.
+		Frameless: runtime.GOOS == "windows",
+		URL:       viewerURL,
+		Windows: application.WindowsWindow{
+			NonClientRegionSupport: true,
+		},
 		Mac: application.MacWindow{
-			TitleBar: application.MacTitleBarDefault,
+			// Hidden keeps the traffic lights over the custom header without
+			// creating an extra native toolbar strip at the top of the window.
+			TitleBar: application.MacTitleBarHidden,
 		},
 	})
 	window.Show()
