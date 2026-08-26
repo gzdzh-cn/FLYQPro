@@ -45,6 +45,9 @@ func (s *SharedDriveWindowService) OpenFriendSharedDrive(deviceID string) error 
 	}
 	for _, peer := range friends {
 		if peer.DeviceID == deviceID {
+			if !peer.Online {
+				return fmt.Errorf("好友不在线，暂不支持打开共享盘")
+			}
 			return s.open("friend", deviceID)
 		}
 	}
@@ -64,8 +67,14 @@ func (s *SharedDriveWindowService) open(mode, deviceID string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	title := "共享"
+	if mode == "friend" {
+		title = "好友共享"
+	}
 	if existing, ok := s.app.Window.GetByName(sharedDriveWindowName); ok {
 		existing.SetURL(windowURL)
+		existing.SetTitle(title)
+		existing.ForceReload()
 		existing.Show()
 		existing.Focus()
 		return nil
@@ -81,7 +90,7 @@ func (s *SharedDriveWindowService) open(mode, deviceID string) error {
 	}
 	window := s.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             sharedDriveWindowName,
-		Title:            "共享",
+		Title:            title,
 		Width:            1100,
 		Height:           700,
 		MinWidth:         980,
@@ -94,8 +103,9 @@ func (s *SharedDriveWindowService) open(mode, deviceID string) error {
 		BackgroundColour: application.NewRGBA(245, 245, 245, 255),
 		Windows:          application.WindowsWindow{NonClientRegionSupport: true},
 		Mac: application.MacWindow{
+			Backdrop:     application.MacBackdropTransparent,
 			CornerType:   application.MacWindowCornerTypeRounded,
-			CornerRadius: 16,
+			CornerRadius: 18,
 			TitleBar:     application.MacTitleBarHiddenInsetUnified,
 		},
 		URL: windowURL,
