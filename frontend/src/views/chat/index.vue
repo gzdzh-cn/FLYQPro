@@ -64,7 +64,7 @@
                 </template>
                 <template v-else>
                   <strong><icon-file /> {{ message.attachmentName || message.content }}</strong>
-                  <span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }} · {{ message.attachmentStatus || message.status }}</span>
+                  <span class="attachment-meta">{{ formatBytes(message.attachmentSize || 0) }}</span>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
                     <a-button size="mini" type="primary" :loading="attachmentActionBusy(message)" @click.stop.prevent="acceptAttachment(message)">接收</a-button>
                     <a-button size="mini" :loading="attachmentActionBusy(message)" @click.stop.prevent="saveAttachmentAs(message)">另存</a-button>
@@ -72,11 +72,10 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
-                <div v-if="attachmentTerminalStatus(message)" class="attachment-terminal-status" :class="`is-${attachmentTerminalStatus(message)}`">{{ attachmentTerminalLabel(message) }}</div>
                 <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
               </template>
               <template v-else>{{ message.content }}</template>
-              <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId"> <span class="message-status">{{ messageStatusText(message.status, message.kind) }}</span></template></small>
+              <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId && messageStatusText(message.status, message.kind, message.attachmentStatus)"> <span class="message-status">{{ messageStatusText(message.status, message.kind, message.attachmentStatus) }}</span></template></small>
             </div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
@@ -250,7 +249,16 @@ function formatTime(value: string) {
   return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
 }
 function formatLastSeen(value: string) { return value ? formatTime(value) : '未知' }
-function messageStatusText(status: string, kind = 'text') { if (status === 'sent') return kind === 'file' ? '发送成功' : '已发送'; return ({ sending: '发送中', pending: '等待接收', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败', rejected: '对方拒绝', canceled: '已取消' } as Record<string, string>)[status] || status }
+function messageStatusText(status: string, kind = 'text', attachmentStatus = '') {
+  if (kind === 'file') {
+    const fileStatus = attachmentStatus || status
+    if (fileStatus === 'sent' || fileStatus === 'delivered') return '发送成功'
+    if (fileStatus === 'read') return ''
+    return ({ sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
+  }
+  if (status === 'sent') return '已发送'
+  return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', failed: '发送失败' } as Record<string, string>)[status] || status
+}
 function conversationForPeer(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId) }
 function unreadCount(deviceId: string) { return conversationForPeer(deviceId)?.unreadCount || 0 }
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
@@ -645,10 +653,11 @@ async function cancelAttachment(message: any) {
   if (attachmentActionBusy(message)) return
   const previousStatus = message.attachmentStatus
   const previousMessageStatus = message.status
+  const isOutgoing = message.senderDeviceId === deviceInfo.value?.deviceId
   attachmentActions[message.attachmentId] = true
   message.attachmentStatus = 'canceled'
   message.status = 'canceled'
-  try { await nextTick(); await ChatService.CancelAttachment(message.attachmentId); delete store.transferProgress[message.attachmentId]; Message.info('文件传输已取消')
+  try { await nextTick(); await ChatService.CancelAttachment(message.attachmentId); delete store.transferProgress[message.attachmentId]; if (!isOutgoing) Message.info('文件传输已取消')
   } catch (error: any) { message.attachmentStatus = previousStatus; message.status = previousMessageStatus; Message.error(error?.message || '取消传输失败')
   } finally { delete attachmentActions[message.attachmentId] }
 }
@@ -661,15 +670,6 @@ function notifyAttachmentResult(message: any) {
     case 'failed': Message.error('文件发送失败'); break
     default: Message.info('文件正在等待对方接收')
   }
-}
-function attachmentTerminalStatus(message: any): string {
-  const status = message?.attachmentStatus || message?.status
-  return ['canceled', 'rejected', 'failed'].includes(status) ? status : ''
-}
-function attachmentTerminalLabel(message: any): string {
-  const status = attachmentTerminalStatus(message)
-  if (status === 'rejected') return message?.senderDeviceId === deviceInfo.value?.deviceId ? '对方已拒绝' : '已拒绝'
-  return ({ canceled: '已取消', failed: '传输失败' } as Record<string, string>)[status] || ''
 }
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
 function attachmentAwaitingAcceptance(message: any): boolean {
@@ -807,9 +807,6 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
-.attachment-terminal-status { margin-top: 7px; font-size: 12px; font-weight: 500; color: var(--muted-text); }
-.attachment-terminal-status.is-canceled { color: var(--muted-text); }
-.attachment-terminal-status.is-rejected, .attachment-terminal-status.is-failed { color: var(--danger); }
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
 .request-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 .attachment-pending { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }
