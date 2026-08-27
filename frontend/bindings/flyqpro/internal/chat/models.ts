@@ -539,6 +539,8 @@ export class Peer {
     "capabilities"?: string[];
     "discoveryVisible": boolean;
     "visibleInFriends": boolean;
+    "relationshipVersion"?: string;
+    "friendshipState"?: string;
     "online": boolean;
     "lastSeen": string;
     "updatedAt": string;
@@ -621,6 +623,7 @@ export class Profile {
     "fileSavePath": string;
     "sharedRootPath": string;
     "sharedEnabled": boolean;
+    "sharedDriveMultiWindow": boolean;
     "theme": string;
     "launchAtStartup": boolean;
 
@@ -647,6 +650,9 @@ export class Profile {
         if (!("sharedEnabled" in $$source)) {
             this["sharedEnabled"] = false;
         }
+        if (!("sharedDriveMultiWindow" in $$source)) {
+            this["sharedDriveMultiWindow"] = false;
+        }
         if (!("theme" in $$source)) {
             this["theme"] = "";
         }
@@ -663,6 +669,38 @@ export class Profile {
     static createFrom($$source: any = {}): Profile {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         return new Profile($$parsedSource as Partial<Profile>);
+    }
+}
+
+/**
+ * SharedEntriesPage keeps large shared folders responsive. Offsets refer to
+ * the directory enumeration rather than an in-memory, fully sorted listing.
+ * That lets peers render the first page without waiting for every entry.
+ */
+export class SharedEntriesPage {
+    "entries": SharedEntry[];
+    "nextOffset"?: number;
+    "hasMore"?: boolean;
+
+    /** Creates a new SharedEntriesPage instance. */
+    constructor($$source: Partial<SharedEntriesPage> = {}) {
+        if (!("entries" in $$source)) {
+            this["entries"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedEntriesPage instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedEntriesPage {
+        const $$createField0_0 = $$createType4;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("entries" in $$parsedSource) {
+            $$parsedSource["entries"] = $$createField0_0($$parsedSource["entries"]);
+        }
+        return new SharedEntriesPage($$parsedSource as Partial<SharedEntriesPage>);
     }
 }
 
@@ -820,3 +858,5 @@ export class SharedTransfer {
 const $$createType0 = DiagnosticItem.createFrom;
 const $$createType1 = $Create.Array($$createType0);
 const $$createType2 = $Create.Array($Create.Any);
+const $$createType3 = SharedEntry.createFrom;
+const $$createType4 = $Create.Array($$createType3);

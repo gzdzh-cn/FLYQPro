@@ -15,6 +15,7 @@ export {
     NetworkStatus,
     Peer,
     Profile,
+    SharedEntriesPage,
     SharedEntry,
     SharedFolderStatus,
     SharedTransfer

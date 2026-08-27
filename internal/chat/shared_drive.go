@@ -169,6 +169,93 @@ func ListSharedEntries(root, relative string) ([]SharedEntry, error) {
 	return entries, nil
 }
 
+const defaultSharedEntriesPageSize = 100
+const maxSharedEntriesPageSize = 200
+
+// ListSharedEntriesPage reads only one bounded page from a directory. Unlike
+// os.ReadDir it does not materialise a large directory before returning.
+func ListSharedEntriesPage(root, relative string, offset, limit int) (SharedEntriesPage, error) {
+	directory, normalized, err := resolveSharedPath(root, relative, true)
+	if err != nil {
+		return SharedEntriesPage{}, err
+	}
+	info, err := os.Stat(directory)
+	if err != nil || !info.IsDir() {
+		return SharedEntriesPage{}, fmt.Errorf("%s", SharedPathInvalidError)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = defaultSharedEntriesPageSize
+	}
+	if limit > maxSharedEntriesPageSize {
+		limit = maxSharedEntriesPageSize
+	}
+	dir, err := os.Open(directory)
+	if err != nil {
+		return SharedEntriesPage{}, fmt.Errorf("无法读取共享目录: %w", err)
+	}
+	defer dir.Close()
+
+	// Readdir(1) deliberately keeps memory bounded, including directories with
+	// hundreds of thousands of files. Offset counts raw directory entries so
+	// skipped symbolic links do not make a later page repeat earlier items.
+	cursor := 0
+	for cursor < offset {
+		items, readErr := dir.ReadDir(1)
+		if len(items) > 0 {
+			cursor++
+		}
+		if readErr == io.EOF || len(items) == 0 {
+			return SharedEntriesPage{Entries: []SharedEntry{}, NextOffset: cursor}, nil
+		}
+		if readErr != nil {
+			return SharedEntriesPage{}, fmt.Errorf("无法读取共享目录: %w", readErr)
+		}
+	}
+
+	entries := make([]SharedEntry, 0, limit)
+	for len(entries) < limit {
+		items, readErr := dir.ReadDir(1)
+		if len(items) == 0 {
+			if readErr == io.EOF {
+				return SharedEntriesPage{Entries: entries, NextOffset: cursor}, nil
+			}
+			if readErr != nil {
+				return SharedEntriesPage{}, fmt.Errorf("无法读取共享目录: %w", readErr)
+			}
+			continue
+		}
+		item := items[0]
+		cursor++
+		itemInfo, infoErr := item.Info()
+		if infoErr != nil || itemInfo.Mode()&os.ModeSymlink != 0 {
+			if readErr != nil && readErr != io.EOF {
+				return SharedEntriesPage{}, fmt.Errorf("无法读取共享目录: %w", readErr)
+			}
+			continue
+		}
+		itemRelative := item.Name()
+		if normalized != "" {
+			itemRelative = filepath.Join(filepath.FromSlash(normalized), item.Name())
+		}
+		entry, entryErr := sharedEntryFromPath(root, filepath.ToSlash(itemRelative), filepath.Join(directory, item.Name()), itemInfo, false)
+		if entryErr == nil {
+			entries = append(entries, entry)
+		}
+		if readErr != nil && readErr != io.EOF {
+			return SharedEntriesPage{}, fmt.Errorf("无法读取共享目录: %w", readErr)
+		}
+	}
+
+	// Probe one raw entry to learn whether a subsequent page exists, but keep
+	// the returned next offset before the probe so the next request re-reads it.
+	nextOffset := cursor
+	items, _ := dir.ReadDir(1)
+	return SharedEntriesPage{Entries: entries, NextOffset: nextOffset, HasMore: len(items) > 0}, nil
+}
+
 func GetSharedEntry(root, relative string, includeHash bool) (SharedEntry, string, error) {
 	path, normalized, err := resolveSharedPath(root, relative, true)
 	if err != nil {
@@ -190,6 +277,33 @@ func GetSharedEntry(root, relative string, includeHash bool) (SharedEntry, strin
 		entry.Size = size
 	}
 	return entry, path, nil
+}
+
+// GetSharedEntryThumbnail returns a bounded JPEG preview for an image in the
+// shared root. It deliberately never returns the original file bytes, so the
+// shared-drive grid can render previews without downloading large originals.
+func GetSharedEntryThumbnail(root, relative string) (string, string, error) {
+	entry, path, err := GetSharedEntry(root, relative, false)
+	if err != nil {
+		return "", "", err
+	}
+	if entry.IsDirectory || !isSharedImageEntry(entry) {
+		return "", "", fmt.Errorf("该文件不是图片")
+	}
+	return buildImageThumbnail(path, entry.MimeType)
+}
+
+func isSharedImageEntry(entry SharedEntry) bool {
+	mimeType := strings.ToLower(strings.TrimSpace(entry.MimeType))
+	if strings.HasPrefix(mimeType, "image/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(entry.Name)) {
+	case ".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp":
+		return true
+	default:
+		return false
+	}
 }
 
 // sharedDirectorySize reports the total byte size of regular files below a

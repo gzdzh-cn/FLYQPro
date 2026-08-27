@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"os"
@@ -25,32 +26,46 @@ import (
 )
 
 type Engine struct {
-	mu                  sync.RWMutex
-	profile             Profile
-	identity            Identity
-	listener            net.Listener
-	discoveryTCP        net.Listener
-	udp                 *net.UDPConn
-	stop                chan struct{}
-	done                chan struct{}
-	peers               map[string]Peer
-	incoming            map[string]*incomingFile
-	pendingIncoming     map[string]*pendingIncomingOffer
-	outgoing            map[string]*outgoingTransfer
-	preparing           map[string]*preparingAttachment
-	sharedTransfers     map[string]*sharedTransferSession
-	lastScan            time.Time
-	lastErr             string
-	started             bool
-	serviceStopped      bool
-	attachmentMigration bool
-	friendRestoreAt     map[string]time.Time
-	discoveryMisses     map[string]int
-	presenceMu          sync.Mutex
-	discoveryScanMu     sync.Mutex
-	discoveryMu         sync.Mutex
-	activeDiscoveryIDs  map[string]struct{}
-	activeDiscoverySeen map[string]struct{}
+	mu                      sync.RWMutex
+	profile                 Profile
+	identity                Identity
+	listener                net.Listener
+	discoveryTCP            net.Listener
+	udp                     *net.UDPConn
+	stop                    chan struct{}
+	done                    chan struct{}
+	peers                   map[string]Peer
+	incoming                map[string]*incomingFile
+	pendingIncoming         map[string]*pendingIncomingOffer
+	outgoing                map[string]*outgoingTransfer
+	preparing               map[string]*preparingAttachment
+	sharedTransfers         map[string]*sharedTransferSession
+	lastScan                time.Time
+	lastErr                 string
+	started                 bool
+	serviceStopped          bool
+	attachmentMigration     bool
+	friendRestoreAt         map[string]time.Time
+	discoveryMisses         map[string]int
+	locallyHiddenFriends    map[string]struct{}
+	friendRemovalSyncAt     map[string]time.Time
+	friendRemovalSyncMu     sync.Mutex
+	presenceMu              sync.Mutex
+	discoveryScanMu         sync.Mutex
+	discoveryMu             sync.Mutex
+	activeDiscoveryIDs      map[string]struct{}
+	activeDiscoverySeen     map[string]struct{}
+	sharedThumbnailProvider func(root, relativePath string) (encoded, mimeType string, err error)
+}
+
+// SetSharedThumbnailProvider lets the desktop service supply a persistent
+// cache for thumbnails served to remote friends. The protocol layer remains
+// independent from the service package; without a provider it keeps the
+// legacy on-demand generation path.
+func (e *Engine) SetSharedThumbnailProvider(provider func(root, relativePath string) (encoded, mimeType string, err error)) {
+	e.mu.Lock()
+	e.sharedThumbnailProvider = provider
+	e.mu.Unlock()
 }
 
 func (e *Engine) SetAttachmentMigrationActive(active bool) {
@@ -170,7 +185,7 @@ var (
 const discoveryMissThreshold = 3
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -202,6 +217,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("设备身份初始化: status=%s, device=%s", identity.IdentityStatus, identity.DeviceID[:minInt(len(identity.DeviceID), 12)])
 	if err := RecoverSendingMessages(ctx, identity.DeviceID); err != nil {
 		return err
 	}
@@ -378,6 +394,15 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	isFriend := e.isFriend(hello.DeviceID)
 	removedFriend, removalErr := IsFriendRemoved(context.Background(), hello.DeviceID)
 	if removalErr == nil && removedFriend && !isFriend {
+		_, trustedPublicKey, trustedCertFP, _, _ := FriendRemovalInfo(context.Background(), hello.DeviceID)
+		if trustedPublicKey != "" && !strings.EqualFold(trustedPublicKey, hello.PublicKey) {
+			_ = writeWire(conn, wireMessage{Type: "error", Status: "DEVICE_KEY_CHANGED"})
+			return
+		}
+		if trustedCertFP != "" && !strings.EqualFold(trustedCertFP, hello.CertFP) {
+			_ = writeWire(conn, wireMessage{Type: "error", Status: "DEVICE_CERT_CHANGED"})
+			return
+		}
 		// A probe is not an explicit re-add request, so reject it immediately.
 		// For a normal connection we continue to hello_ack: handleWire can then
 		// reject ordinary messages/files while still allowing a new
@@ -425,7 +450,9 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	e.touchPeer(hello.DeviceID)
-	_ = writeWire(conn, e.helloMessageForDialect("hello_ack", dialect))
+	ack := e.helloMessageForDialect("hello_ack", dialect)
+	ack.FriendshipState, ack.RelationshipVersion = e.friendshipStateForPeer(hello.DeviceID)
+	_ = writeWire(conn, ack)
 	session := newWireSession(conn)
 	defer e.cleanupAttachmentSession(session)
 	_ = conn.SetDeadline(time.Time{})
@@ -447,77 +474,105 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		_ = writeWire(conn, wireMessage{Type: "pong", Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor})
 	case "friend_request":
-		// A known peer may send a request even when discovery is disabled. The
-		// discoverable flag controls presence broadcasts, not direct requests
-		// received over an already authenticated connection.
-		status := "pending"
-		acceptedAt := ""
+		// A request is a new relationship proposal, even when an old friend
+		// record still exists because the remote removal notification was lost.
+		// Only an identical request_id is idempotent; an old accepted request
+		// must never auto-accept or hide a new request.
+		requests, listErr := listFriendRequestRows(context.Background(), "")
+		if listErr != nil {
+			if conn != nil {
+				_ = writeWire(conn, wireMessage{Type: "error", Status: "REQUEST_STORAGE_UNAVAILABLE"})
+			}
+			return
+		}
+		for _, existing := range requests {
+			if existing.RequestID != message.RequestID {
+				continue
+			}
+			if conn != nil {
+				_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: existing.RequestID, Status: existing.Status, AcceptedAt: existing.AcceptedAt})
+			}
+			return
+		}
+		// Re-adding a friend is intentionally subject to the same privacy
+		// boundary as discovering a stranger. This also prevents a stale
+		// authenticated connection from bypassing the discoverable switch.
+		if !e.Profile().Discoverable {
+			if conn != nil {
+				_ = writeWire(conn, wireMessage{Type: "error", Status: "DISCOVERY_DISABLED"})
+			}
+			log.Printf("好友申请被拒绝: device=%s, reason=DISCOVERY_DISABLED", hello.DeviceID)
+			return
+		}
+		// A fresh request supersedes only older in-flight received requests.
+		// Terminal history, especially an earlier accepted request, remains
+		// visible to the user.
+		_ = SupersedeActiveFriendRequests(context.Background(), hello.DeviceID, "received")
 		if e.isFriend(hello.DeviceID) {
-			status = "accepted"
-			acceptedAt = nowString()
+			version := e.currentRelationshipVersion(hello.DeviceID)
+			known, _ := e.peer(hello.DeviceID)
+			_ = MarkFriendRemovedWithVersion(context.Background(), hello.DeviceID, version, known.PublicKeyPEM, known.CertificateFingerprint)
+			_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
+			e.updatePeerRelation(hello.DeviceID, DiscoveredState)
+			e.setPeerFriendshipState(hello.DeviceID, "removed")
+			_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
+			e.setPeerDiscoveryVisible(hello.DeviceID, false)
 		}
-		duplicate := false
-		if requests, listErr := listFriendRequestRows(context.Background(), ""); listErr == nil {
-			for _, existing := range requests {
-				if existing.RequestID == message.RequestID {
-					duplicate = true
-					break
-				}
-			}
+		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
+		if err := SaveFriendRequest(context.Background(), request); err != nil {
+			return
 		}
-		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: status, Direction: "received", CreatedAt: nowString(), AcceptedAt: acceptedAt}
-		if err := SaveFriendRequest(context.Background(), request); err == nil {
-			if status == "accepted" {
-				_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
-				e.setPeerVisibleInFriends(hello.DeviceID, true)
-				_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, "accepted", acceptedAt)
-				_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: message.RequestID, Status: "accepted", AcceptedAt: acceptedAt})
-			} else if !duplicate {
-				if aggregated, ok := e.friendRequestForDevice(hello.DeviceID); ok {
-					e.emit("chat:friend-request", aggregated)
-				}
-			}
+		e.emit("chat:friend-request", request)
+		e.emit("chat:peer-updated", e.Peers())
+		if conn != nil {
+			_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "pending"})
 		}
+		log.Printf("收到新的好友申请并已保存: device=%s, request=%s", hello.DeviceID, message.RequestID)
 	case "friend_request_response":
 		status := message.Status
-		acceptedAt := ""
+		request, ok := friendRequestByID(message.RequestID)
+		if !ok || request.DeviceID != hello.DeviceID || !isActiveFriendRequest(request.Status) {
+			// Responses for deleted, superseded, or historical requests must not
+			// resurrect a friendship or overwrite a newer request.
+			return
+		}
+		acceptedAt := message.AcceptedAt
 		if status == "accepted" {
-			_ = ClearFriendRemoval(context.Background(), hello.DeviceID)
-			acceptedAt = message.AcceptedAt
-			if requests, listErr := listFriendRequestRows(context.Background(), ""); listErr == nil {
-				localAcceptedAt := earliestAcceptedAt(requests, hello.DeviceID)
-				if localAcceptedAt != "" && (acceptedAt == "" || requestTimeBefore(localAcceptedAt, acceptedAt)) {
-					acceptedAt = localAcceptedAt
-				}
-			}
 			if acceptedAt == "" {
 				acceptedAt = nowString()
 			}
+			_ = ClearFriendRemoval(context.Background(), hello.DeviceID)
 			if err := SetPeerRelation(context.Background(), hello.DeviceID, PeerRelation); err == nil {
 				e.updatePeerRelation(hello.DeviceID, PeerRelation)
 			}
-			// The requester may have discovered this device with
-			// visible_in_friends=false. Accepting the request is an explicit
-			// action that must make the new friend appear in the main list.
-			if err := SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true); err == nil {
-				e.setPeerVisibleInFriends(hello.DeviceID, true)
+			version := message.RelationshipVersion
+			if version == "" {
+				version = newID()
 			}
-			_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, status, acceptedAt)
-		} else if status == "rejected" {
-			_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, status, "")
+			_ = SetPeerRelationshipVersion(context.Background(), hello.DeviceID, version)
+			e.setPeerRelationshipVersion(hello.DeviceID, version)
+			_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
+			e.clearLocallyHiddenFriend(hello.DeviceID)
+			e.setPeerVisibleInFriends(hello.DeviceID, true)
+			e.setPeerFriendshipState(hello.DeviceID, "")
+			_ = UpdateFriendRequestAccepted(context.Background(), request.RequestID, acceptedAt)
+		} else if status == "rejected" || status == "pending" || status == "sent" || status == "queued" {
+			_ = UpdateFriendRequest(context.Background(), request.RequestID, status)
 		} else {
-			_ = UpdateFriendRequest(context.Background(), message.RequestID, status)
+			return
 		}
-		if aggregated, ok := e.friendRequestForDevice(hello.DeviceID); ok {
-			e.emit("chat:friend-request-updated", aggregated)
-		} else {
-			e.emit("chat:friend-request-updated", map[string]any{"requestId": message.RequestID, "status": status, "deviceId": hello.DeviceID, "acceptedAt": acceptedAt})
+		updated, _ := friendRequestByID(request.RequestID)
+		if updated.RequestID == "" {
+			updated = request
+			updated.Status = status
+			updated.AcceptedAt = acceptedAt
 		}
+		e.emit("chat:friend-request-updated", updated)
 		e.emit("chat:peer-updated", e.Peers())
 	case "friend_restore":
 		removed, removedErr := IsFriendRemoved(context.Background(), hello.DeviceID)
 		if removedErr != nil || removed {
-			_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", Status: "rejected", Reason: "FRIENDSHIP_REMOVED"})
+			_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", Status: "rejected", Reason: "FRIENDSHIP_REQUIRED"})
 			return
 		}
 		e.mu.RLock()
@@ -532,6 +587,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		e.updatePeerRelation(hello.DeviceID, PeerRelation)
+		e.setPeerFriendshipState(hello.DeviceID, "")
 		e.emit("chat:peer-updated", e.Peers())
 		_ = writeWire(conn, wireMessage{Type: "friend_restore_ack", SourceDeviceID: localDeviceID, TargetDeviceID: hello.DeviceID, RestoreVersion: friendRestoreVersion, Status: "accepted"})
 	case "friend_restore_ack":
@@ -543,17 +599,33 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if strings.TrimSpace(hello.DeviceID) == "" {
 			return
 		}
-		_ = MarkFriendRemoved(context.Background(), hello.DeviceID)
+		knownPeer, peerErr := e.peer(hello.DeviceID)
+		knownRemoval, _ := IsFriendRemoved(context.Background(), hello.DeviceID)
+		if peerErr != nil || (knownPeer.Relation != PeerRelation && !knownRemoval) {
+			log.Printf("忽略未知设备的解除好友关系通知: device=%s", hello.DeviceID)
+			return
+		}
+		if !e.shouldApplyFriendRemoval(hello.DeviceID, message.RelationshipVersion) {
+			return
+		}
+		version := message.RelationshipVersion
+		if version == "" {
+			version = e.currentRelationshipVersion(hello.DeviceID)
+		}
+		_ = MarkFriendRemovedWithVersion(context.Background(), hello.DeviceID, version, knownPeer.PublicKeyPEM, knownPeer.CertificateFingerprint)
 		_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
-		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, false)
+		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
 		_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
-		_ = UpdateFriendRequestsForDevice(context.Background(), hello.DeviceID, "rejected", "")
+		_ = SupersedeActiveFriendRequests(context.Background(), hello.DeviceID, "")
 		e.updatePeerRelation(hello.DeviceID, DiscoveredState)
-		e.setPeerVisibleInFriends(hello.DeviceID, false)
+		e.setPeerVisibleInFriends(hello.DeviceID, true)
+		e.setPeerFriendshipState(hello.DeviceID, "removed")
 		e.setPeerDiscoveryVisible(hello.DeviceID, false)
 		e.emit("chat:peer-updated", e.Peers())
 	case "share_list_request":
 		e.handleSharedListRequest(conn, hello, message)
+	case "share_thumbnail_request":
+		e.handleSharedThumbnailRequest(conn, hello, message)
 	case "share_download_request":
 		e.handleSharedDownloadRequest(conn, hello, message, session)
 	case "message":
@@ -575,6 +647,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		if peer, peerErr := e.peer(hello.DeviceID); peerErr == nil && !peer.VisibleInFriends {
 			if err := SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true); err == nil {
+				e.clearLocallyHiddenFriend(hello.DeviceID)
 				e.setPeerVisibleInFriends(hello.DeviceID, true)
 				e.emit("chat:peer-updated", e.Peers())
 			}
@@ -1485,6 +1558,14 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 			e.resetDiscoveryMiss(peer.DeviceID)
 			continue
 		}
+		// A removed friendship remains in both local lists so the user can see
+		// the relationship state and start a fresh request after rediscovery.
+		// Discovery cleanup must not delete that trusted peer row.
+		if peer.FriendshipState == "removed" {
+			e.setPeerDiscoveryVisible(peer.DeviceID, false)
+			e.resetDiscoveryMiss(peer.DeviceID)
+			continue
+		}
 		if e.hasPendingFriendRequest(peer.DeviceID) {
 			e.setPeerDiscoveryVisible(peer.DeviceID, false)
 			e.resetDiscoveryMiss(peer.DeviceID)
@@ -1545,11 +1626,16 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 		if existing.CertificateFingerprint != "" && message.CertFP == "" {
 			message.CertFP = existing.CertificateFingerprint
 		}
+		if peer.PublicKeyPEM == "" {
+			peer.PublicKeyPEM = existing.PublicKeyPEM
+		}
 		if peer.CertificateFingerprint == "" {
 			peer.CertificateFingerprint = existing.CertificateFingerprint
 		}
 		peer.Relation, peer.Remark, peer.AvatarPath = existing.Relation, existing.Remark, existing.AvatarPath
 		peer.VisibleInFriends = existing.VisibleInFriends
+		peer.RelationshipVersion = existing.RelationshipVersion
+		peer.FriendshipState = existing.FriendshipState
 		if !discoveryVisible {
 			peer.DiscoveryVisible = existing.DiscoveryVisible
 		}
@@ -1569,6 +1655,8 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 	if old, exists := e.peers[peer.DeviceID]; exists {
 		peer.Relation, peer.Remark = old.Relation, old.Remark
 		peer.VisibleInFriends = old.VisibleInFriends
+		peer.RelationshipVersion = old.RelationshipVersion
+		peer.FriendshipState = old.FriendshipState
 		peer.AvatarPath = old.AvatarPath
 		if !discoveryVisible {
 			peer.DiscoveryVisible = old.DiscoveryVisible
@@ -1611,12 +1699,42 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 	}
 	e.setPeerDiscoveryVisible(message.DeviceID, discoveryVisible)
 	e.emit("chat:peer-updated", e.Peers())
+	if discoveryVisible {
+		if peer, err := e.peer(message.DeviceID); err == nil && peer.FriendshipState == "removed" {
+			e.maybeSyncFriendRemoval(peer)
+		}
+	}
 	if wasFriend {
 		if peer, err := e.peer(message.DeviceID); err == nil {
 			e.maybeSendFriendRestore(peer)
 		}
 	}
 	return nil
+}
+
+// maybeSyncFriendRemoval closes the offline gap. A public announce means the
+// removed device is online again; send the tombstone over the authenticated
+// channel so the other side converges without waiting for it to send a
+// message. The cooldown prevents every announce packet from opening a new
+// connection.
+func (e *Engine) maybeSyncFriendRemoval(peer Peer) {
+	if peer.DeviceID == "" || peer.FriendshipState != "removed" {
+		return
+	}
+	now := time.Now()
+	e.friendRemovalSyncMu.Lock()
+	last := e.friendRemovalSyncAt[peer.DeviceID]
+	if !last.IsZero() && now.Sub(last) < 10*time.Second {
+		e.friendRemovalSyncMu.Unlock()
+		return
+	}
+	e.friendRemovalSyncAt[peer.DeviceID] = now
+	e.friendRemovalSyncMu.Unlock()
+	go func() {
+		if err := e.NotifyFriendRemoved(peer.DeviceID); err != nil {
+			log.Printf("解除好友关系离线同步失败: device=%s, err=%v", peer.DeviceID, err)
+		}
+	}()
 }
 
 func compatibleProtocol(message wireMessage) bool {
@@ -1663,29 +1781,40 @@ func validDevicePublicKey(deviceID, publicKeyPEM string) bool {
 }
 
 func (e *Engine) friendRequestForDevice(deviceID string) (FriendRequest, bool) {
-	requests, err := ListFriendRequests(context.Background(), "")
+	requests, err := listFriendRequestRows(context.Background(), "")
+	if err != nil {
+		return FriendRequest{}, false
+	}
+	var latest FriendRequest
+	for _, request := range requests {
+		if request.DeviceID != deviceID {
+			continue
+		}
+		if latest.RequestID == "" || (isActiveFriendRequest(request.Status) && !isActiveFriendRequest(latest.Status)) || (isActiveFriendRequest(request.Status) == isActiveFriendRequest(latest.Status) && requestTimeAfter(request.UpdatedAt, latest.UpdatedAt)) {
+			latest = request
+		}
+	}
+	return latest, latest.RequestID != ""
+}
+
+func isActiveFriendRequest(status string) bool {
+	return status == "queued" || status == "sent" || status == "pending"
+}
+
+func friendRequestByID(requestID string) (FriendRequest, bool) {
+	if strings.TrimSpace(requestID) == "" {
+		return FriendRequest{}, false
+	}
+	requests, err := listFriendRequestRows(context.Background(), "")
 	if err != nil {
 		return FriendRequest{}, false
 	}
 	for _, request := range requests {
-		if request.DeviceID == deviceID {
+		if request.RequestID == requestID {
 			return request, true
 		}
 	}
 	return FriendRequest{}, false
-}
-
-func earliestAcceptedAt(requests []FriendRequest, deviceID string) string {
-	acceptedAt := ""
-	for _, request := range requests {
-		if request.DeviceID == deviceID && request.AcceptedAt != "" && requestTimeBefore(request.AcceptedAt, acceptedAt) {
-			acceptedAt = request.AcceptedAt
-		}
-		if request.DeviceID == deviceID && acceptedAt == "" && request.AcceptedAt != "" {
-			acceptedAt = request.AcceptedAt
-		}
-	}
-	return acceptedAt
 }
 
 func (e *Engine) emitFriendRequestUpdate(deviceID string) {
@@ -1695,41 +1824,57 @@ func (e *Engine) emitFriendRequestUpdate(deviceID string) {
 }
 
 func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string) (FriendRequest, error) {
-	peer, err := e.peer(deviceID)
+	peer, err := e.latestPeer(ctx, deviceID)
 	if err != nil {
 		return FriendRequest{}, err
 	}
-	if existing, ok := e.friendRequestForDevice(deviceID); ok {
-		rows, rowsErr := listFriendRequestRows(ctx, "")
-		if rowsErr == nil {
-			for _, row := range rows {
-				if row.DeviceID == deviceID && row.Direction == "sent" && (row.Status == "sent" || row.Status == "queued" || row.Status == "pending") {
-					return existing, nil
-				}
+	removed, _ := IsFriendRemoved(ctx, deviceID)
+	if rows, rowsErr := listFriendRequestRows(ctx, ""); rowsErr == nil {
+		for _, row := range rows {
+			// A removal tombstone starts a new approval cycle. Do not let an
+			// older queued/sent request block re-adding the same device.
+			if !removed && row.DeviceID == deviceID && row.Direction == "sent" && isActiveFriendRequest(row.Status) {
+				return row, nil
 			}
 		}
-		if existing.Status == "accepted" && e.isFriend(deviceID) {
-			return existing, nil
-		}
 	}
+	_ = SupersedeActiveFriendRequests(ctx, deviceID, "sent")
 	request := FriendRequest{RequestID: newID(), DeviceID: deviceID, Nickname: peer.Nickname, Message: strings.TrimSpace(message), Status: "queued", Direction: "sent", CreatedAt: nowString()}
 	if err := SaveFriendRequest(ctx, request); err != nil {
 		return FriendRequest{}, err
 	}
 	if err := e.sendToPeer(peer, wireMessage{Type: "friend_request", RequestID: request.RequestID, Content: request.Message}); err != nil {
+		request.Status = "failed"
+		_ = UpdateFriendRequest(ctx, request.RequestID, "failed")
+		e.emit("chat:friend-request-updated", request)
 		return request, err
 	}
-	// A new request is an explicit re-add action. Do not clear the removal
-	// marker before the request has reached the other device.
-	_ = ClearFriendRemoval(ctx, deviceID)
+	log.Printf("好友申请已送达: device=%s, request=%s", deviceID, request.RequestID)
+	// Keep the removal tombstone until the request is accepted. This prevents
+	// a delayed friend_removed frame from being mistaken for a new friendship;
+	// AcceptFriendRequest clears it after creating a fresh relationship version.
 	_ = UpdateFriendRequest(ctx, request.RequestID, "sent")
-	if aggregated, ok := e.friendRequestForDevice(deviceID); ok {
-		e.emit("chat:friend-request-updated", aggregated)
-		return aggregated, nil
-	}
 	request.Status = "sent"
 	e.emit("chat:friend-request-updated", request)
 	return request, nil
+}
+
+// NotifyFriendRemoved informs an online peer that this device has ended the
+// friendship. It is best-effort: the local removal still completes when the
+// peer is offline, and the next ordinary message will receive the authoritative
+// FRIENDSHIP_REQUIRED response.
+func (e *Engine) NotifyFriendRemoved(deviceID string) error {
+	peer, err := e.latestPeer(context.Background(), strings.TrimSpace(deviceID))
+	if err != nil {
+		return err
+	}
+	version := peer.RelationshipVersion
+	if version == "" {
+		version = newID()
+		_ = SetPeerRelationshipVersion(context.Background(), peer.DeviceID, version)
+		e.setPeerRelationshipVersion(peer.DeviceID, version)
+	}
+	return e.sendToPeer(peer, wireMessage{Type: "friend_removed", RelationshipVersion: version, RemovedAt: nowString()})
 }
 
 func (e *Engine) AcceptFriendRequest(ctx context.Context, requestID string) error {
@@ -1747,38 +1892,35 @@ func (e *Engine) AcceptFriendRequest(ctx context.Context, requestID string) erro
 	if target == nil {
 		return fmt.Errorf("好友申请不存在")
 	}
+	if target.Status != "pending" || target.Direction == "sent" {
+		return fmt.Errorf("好友申请已处理")
+	}
 	if err := ClearFriendRemoval(ctx, target.DeviceID); err != nil {
 		return err
 	}
+	relationshipVersion := newID()
 	if err := SetPeerRelation(ctx, target.DeviceID, PeerRelation); err != nil {
+		return err
+	}
+	if err := SetPeerRelationshipVersion(ctx, target.DeviceID, relationshipVersion); err != nil {
 		return err
 	}
 	if err := SetPeerVisibleInFriends(ctx, target.DeviceID, true); err != nil {
 		return err
 	}
+	e.clearLocallyHiddenFriend(target.DeviceID)
 	e.updatePeerRelation(target.DeviceID, PeerRelation)
 	e.setPeerVisibleInFriends(target.DeviceID, true)
-	acceptedAt := earliestAcceptedAt(requests, target.DeviceID)
-	if acceptedAt == "" {
-		acceptedAt = nowString()
-	}
-	if err := UpdateFriendRequestsForDevice(ctx, target.DeviceID, "accepted", acceptedAt); err != nil {
+	acceptedAt := nowString()
+	if err := UpdateFriendRequestAccepted(ctx, target.RequestID, acceptedAt); err != nil {
 		return err
 	}
 	if peer, peerErr := e.peer(target.DeviceID); peerErr == nil {
-		seen := make(map[string]struct{})
-		for _, request := range requests {
-			if request.DeviceID != target.DeviceID || request.Status != "pending" || request.Direction == "sent" {
-				continue
-			}
-			if _, exists := seen[request.RequestID]; exists {
-				continue
-			}
-			seen[request.RequestID] = struct{}{}
-			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "accepted", AcceptedAt: acceptedAt})
-		}
+		_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: target.RequestID, Status: "accepted", AcceptedAt: acceptedAt, RelationshipVersion: relationshipVersion})
 	}
-	e.emitFriendRequestUpdate(target.DeviceID)
+	if updated, ok := friendRequestByID(target.RequestID); ok {
+		e.emit("chat:friend-request-updated", updated)
+	}
 	e.emit("chat:peer-updated", e.Peers())
 	return nil
 }
@@ -1798,23 +1940,18 @@ func (e *Engine) RejectFriendRequest(ctx context.Context, requestID string) erro
 	if target == nil {
 		return fmt.Errorf("好友申请不存在")
 	}
-	if err := UpdateFriendRequestsForDevice(ctx, target.DeviceID, "rejected", ""); err != nil {
+	if target.Status != "pending" || target.Direction == "sent" {
+		return fmt.Errorf("好友申请已处理")
+	}
+	if err := UpdateFriendRequest(ctx, target.RequestID, "rejected"); err != nil {
 		return err
 	}
 	if peer, peerErr := e.peer(target.DeviceID); peerErr == nil {
-		seen := make(map[string]struct{})
-		for _, request := range requests {
-			if request.DeviceID != target.DeviceID || request.Status != "pending" || request.Direction == "sent" {
-				continue
-			}
-			if _, exists := seen[request.RequestID]; exists {
-				continue
-			}
-			seen[request.RequestID] = struct{}{}
-			_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "rejected"})
-		}
+		_ = e.sendToPeer(peer, wireMessage{Type: "friend_request_response", RequestID: target.RequestID, Status: "rejected"})
 	}
-	e.emitFriendRequestUpdate(target.DeviceID)
+	if updated, ok := friendRequestByID(target.RequestID); ok {
+		e.emit("chat:friend-request-updated", updated)
+	}
 	return nil
 }
 
@@ -1914,13 +2051,11 @@ func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) erro
 	if !e.isFriend(deviceID) {
 		return fmt.Errorf("不是好友")
 	}
-	// Opening a friend from Contacts is an explicit user action. A friend may
-	// have been hidden from the main list locally, but that does not remove the
-	// relationship; make it visible again when the conversation is opened.
-	if err := SetPeerVisibleInFriends(ctx, deviceID, true); err == nil {
-		e.setPeerVisibleInFriends(deviceID, true)
-		e.emit("chat:peer-updated", e.Peers())
-	}
+	// Reading a conversation must not change whether the peer is shown in the
+	// main friends list.  In particular, an older asynchronous read operation
+	// can finish after HideFriendAndClearLocalData and must not resurrect the
+	// hidden row.  Restoring a hidden friend is an explicit Contacts action and
+	// is handled by RestoreHiddenFriend/SetPeerVisibleInFriends instead.
 	conversationID, err := EnsureConversation(ctx, deviceID)
 	if err != nil {
 		return err
@@ -2289,6 +2424,10 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if !responseCompatible {
 		return fmt.Errorf("对方握手协议不兼容")
 	}
+	if response.FriendshipState == "removed" {
+		e.handleRemoteFriendshipRequired(peer.DeviceID)
+		return fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
 	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1") && responseDialect.Major >= 2
 	supportsPreflight := hasCapability(response.Capabilities, "storage-preflight-v1") && responseDialect.Major >= 2
@@ -2610,6 +2749,42 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	if !responseCompatible {
 		return fmt.Errorf("对方握手协议不兼容")
 	}
+	if response.FriendshipState == "removed" {
+		// Relationship-control frames must be allowed to cross the old removal
+		// boundary. A re-add request needs to be persisted as pending, and an
+		// accepted response is what clears that boundary on the requester. Do
+		// not turn either frame into a normal friendship failure or prepend a
+		// stale friend_restore frame.
+		if message.Type != "friend_request" && message.Type != "friend_request_response" {
+			e.handleRemoteFriendshipRequired(peer.DeviceID)
+		} else if message.Type == "friend_request" {
+			_ = MarkFriendRemovedWithVersion(context.Background(), peer.DeviceID, peer.RelationshipVersion, peer.PublicKeyPEM, peer.CertificateFingerprint)
+			_ = SetPeerRelation(context.Background(), peer.DeviceID, DiscoveredState)
+			_ = SetPeerVisibleInFriends(context.Background(), peer.DeviceID, true)
+			e.clearLocallyHiddenFriend(peer.DeviceID)
+			e.updatePeerRelation(peer.DeviceID, DiscoveredState)
+			e.setPeerVisibleInFriends(peer.DeviceID, true)
+			e.setPeerFriendshipState(peer.DeviceID, "removed")
+		}
+		if !allowsRemovedFriendshipFrame(message.Type) {
+			return fmt.Errorf("FRIENDSHIP_REQUIRED")
+		}
+	}
+	// Do not let a stale worker send ordinary traffic after this side has
+	// removed the relationship. Send the tombstone first so an older client can
+	// converge too; re-add control frames remain the only frames allowed across
+	// this boundary.
+	if removed, removedErr := IsFriendRemoved(context.Background(), peer.DeviceID); removedErr == nil && removed && !allowsRemovedFriendshipFrame(message.Type) {
+		version, _, _, removedAt, _ := FriendRemovalInfo(context.Background(), peer.DeviceID)
+		if version == "" {
+			version = peer.RelationshipVersion
+		}
+		if removedAt == "" {
+			removedAt = nowString()
+		}
+		_ = writeWire(conn, wireMessage{Type: "friend_removed", RelationshipVersion: version, RemovedAt: removedAt})
+		return fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
 	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
@@ -2617,13 +2792,16 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	}
 	// A known friend may have reinstalled FlyQPro and lost its local database.
 	// Restore the relationship over this already authenticated connection before
-	// sending the message. The optional control message is only sent after the canonical dzhgo/v2 handshake.
-	if message.Type != "friend_restore" {
+	// normal friend traffic. Explicit friend requests must be sent first so a
+	// reset receiver can persist them as pending instead of being auto-restored.
+	if shouldSendFriendRestore(message.Type) {
 		if err := e.writeFriendRestoreIfNeeded(conn, peer, responseDialect); err != nil {
 			return err
 		}
+	} else if message.Type == "friend_request" {
+		log.Printf("friend_restore skipped for friend_request: device=%s", peer.DeviceID)
 	}
-	if peer.Relation == PeerRelation && peer.AvatarHash != "" && hasCapability(response.Capabilities, "avatar-sync-v1") && !cachedAvatarMatches(peer) {
+	if message.Type != "friend_request" && message.Type != "friend_removed" && peer.Relation == PeerRelation && peer.AvatarHash != "" && hasCapability(response.Capabilities, "avatar-sync-v1") && !cachedAvatarMatches(peer) {
 		_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
 		if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err == nil {
 			var avatar wireMessage
@@ -2635,6 +2813,30 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	}
 	if err := writeWire(conn, message); err != nil {
 		return err
+	}
+	if message.Type == "friend_request" {
+		// New receivers intentionally keep pending requests open without an
+		// acknowledgement. Read a short optional response so an explicit
+		// DISCOVERY_DISABLED rejection is reported to the sender, while remaining
+		// compatible with older receivers that simply close or stay silent.
+		_ = conn.SetReadDeadline(time.Now().Add(900 * time.Millisecond))
+		var requestResponse wireMessage
+		if err := decoder.Decode(&requestResponse); err == nil {
+			if requestResponse.Type == "error" {
+				status := requestResponse.Status
+				if status == "" {
+					status = "好友申请被对方拒绝"
+				}
+				return fmt.Errorf("%s", status)
+			}
+			if requestResponse.Type == "friend_request_response" {
+				e.handleWire(conn, wireMessage{DeviceID: peer.DeviceID}, requestResponse, nil)
+				if requestResponse.Status == "pending" {
+					log.Printf("好友申请已送达并等待处理: device=%s, request=%s", peer.DeviceID, message.RequestID)
+				}
+			}
+		}
+		_ = conn.SetReadDeadline(time.Time{})
 	}
 	if message.Type == "message" {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -2659,6 +2861,24 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 		}
 	}
 	return nil
+}
+
+// latestPeer prefers the persisted discovery snapshot over the in-memory
+// connection cache. Discovery can update an endpoint immediately before the
+// user presses “添加”, while the cache may still contain the previous address
+// or certificate fingerprint.
+func (e *Engine) latestPeer(ctx context.Context, deviceID string) (Peer, error) {
+	if peers, err := ListPeers(ctx, ""); err == nil {
+		for _, item := range peers {
+			if item.DeviceID == deviceID {
+				e.mu.Lock()
+				e.peers[deviceID] = item
+				e.mu.Unlock()
+				return item, nil
+			}
+		}
+	}
+	return e.peer(deviceID)
 }
 
 // writeFriendRestoreIfNeeded keeps the relationship recoverable after the
@@ -2955,15 +3175,69 @@ func (e *Engine) handleRemoteFriendshipRequired(deviceID string) {
 	if deviceID == "" {
 		return
 	}
-	_ = MarkFriendRemoved(context.Background(), deviceID)
+	peer, peerErr := e.peer(deviceID)
+	version := ""
+	publicKey, certificateFingerprint := "", ""
+	if peerErr == nil {
+		version = peer.RelationshipVersion
+		publicKey = peer.PublicKeyPEM
+		certificateFingerprint = peer.CertificateFingerprint
+	}
+	_ = MarkFriendRemovedWithVersion(context.Background(), deviceID, version, publicKey, certificateFingerprint)
 	_ = SetPeerRelation(context.Background(), deviceID, DiscoveredState)
-	_ = SetPeerVisibleInFriends(context.Background(), deviceID, false)
+	_ = SetPeerVisibleInFriends(context.Background(), deviceID, true)
+	e.clearLocallyHiddenFriend(deviceID)
 	_ = SetPeerDiscoveryVisible(context.Background(), deviceID, false)
-	_ = UpdateFriendRequestsForDevice(context.Background(), deviceID, "rejected", "")
 	e.updatePeerRelation(deviceID, DiscoveredState)
-	e.setPeerVisibleInFriends(deviceID, false)
+	e.setPeerVisibleInFriends(deviceID, true)
+	e.setPeerFriendshipState(deviceID, "removed")
 	e.setPeerDiscoveryVisible(deviceID, false)
 	e.emit("chat:peer-updated", e.Peers())
+}
+
+func (e *Engine) currentRelationshipVersion(deviceID string) string {
+	if peer, err := e.peer(deviceID); err == nil {
+		return peer.RelationshipVersion
+	}
+	return ""
+}
+
+func (e *Engine) ensureRelationshipVersion(deviceID string) string {
+	if version := e.currentRelationshipVersion(deviceID); version != "" {
+		return version
+	}
+	return newID()
+}
+
+func (e *Engine) setPeerRelationshipVersion(deviceID, version string) {
+	if version == "" {
+		return
+	}
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.RelationshipVersion = version
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) friendshipStateForPeer(deviceID string) (state, version string) {
+	if removed, err := IsFriendRemoved(context.Background(), deviceID); err == nil && removed {
+		version, _, _, _, _ = FriendRemovalInfo(context.Background(), deviceID)
+		return "removed", version
+	}
+	if peer, err := e.peer(deviceID); err == nil && peer.Relation == PeerRelation {
+		return "friend", peer.RelationshipVersion
+	}
+	return "unknown", ""
+}
+
+func (e *Engine) shouldApplyFriendRemoval(deviceID, incomingVersion string) bool {
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation != PeerRelation || incomingVersion == "" || peer.RelationshipVersion == "" {
+		return true
+	}
+	return peer.RelationshipVersion == incomingVersion
 }
 
 func (e *Engine) hasPendingFriendRequest(deviceID string) bool {
@@ -3028,12 +3302,59 @@ func (e *Engine) setPeerVisibleInFriends(deviceID string, visible bool) {
 	e.mu.Unlock()
 }
 
+// locallyHiddenFriends protects the local "hide from friends" action from
+// stale peer-updated events and endpoint refreshes.  The database remains the
+// source of truth across restarts; this in-memory guard closes the race while
+// a discovery/connection goroutine is still publishing an older Peer value.
+func (e *Engine) markLocallyHiddenFriend(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return
+	}
+	e.mu.Lock()
+	if e.locallyHiddenFriends == nil {
+		e.locallyHiddenFriends = make(map[string]struct{})
+	}
+	e.locallyHiddenFriends[deviceID] = struct{}{}
+	e.mu.Unlock()
+}
+
+func (e *Engine) clearLocallyHiddenFriend(deviceID string) {
+	e.mu.Lock()
+	delete(e.locallyHiddenFriends, strings.TrimSpace(deviceID))
+	e.mu.Unlock()
+}
+
+func (e *Engine) locallyHiddenFriend(deviceID string) bool {
+	e.mu.RLock()
+	_, hidden := e.locallyHiddenFriends[strings.TrimSpace(deviceID)]
+	e.mu.RUnlock()
+	return hidden
+}
+
 func (e *Engine) SetPeerVisibleInFriends(ctx context.Context, deviceID string, visible bool) error {
 	if !e.isFriend(deviceID) {
 		return fmt.Errorf("不是好友")
 	}
+	return e.setPeerVisibility(ctx, deviceID, visible)
+}
+
+// HidePeerFromFriends is the local hide operation without requiring an active
+// relationship. A retained peer may already be marked removed after the
+// other side deleted the friendship, but it still needs to be removable from
+// this device's friends list.
+func (e *Engine) HidePeerFromFriends(ctx context.Context, deviceID string) error {
+	return e.setPeerVisibility(ctx, deviceID, false)
+}
+
+func (e *Engine) setPeerVisibility(ctx context.Context, deviceID string, visible bool) error {
 	if err := SetPeerVisibleInFriends(ctx, deviceID, visible); err != nil {
 		return err
+	}
+	if visible {
+		e.clearLocallyHiddenFriend(deviceID)
+	} else {
+		e.markLocallyHiddenFriend(deviceID)
 	}
 	e.setPeerVisibleInFriends(deviceID, visible)
 	e.emit("chat:peer-updated", e.Peers())
@@ -3054,6 +3375,27 @@ func (e *Engine) updatePeerRelation(deviceID, relation string) {
 		e.peers[deviceID] = peer
 	}
 	e.mu.Unlock()
+}
+
+func (e *Engine) setPeerFriendshipState(deviceID, state string) {
+	e.mu.Lock()
+	if peer, ok := e.peers[deviceID]; ok {
+		peer.FriendshipState = state
+		e.peers[deviceID] = peer
+	}
+	e.mu.Unlock()
+}
+
+// MarkPeerRemoved keeps the trusted peer row visible after a full contact
+// removal while making the relationship unusable until a new request is
+// accepted.
+func (e *Engine) MarkPeerRemoved(deviceID string) {
+	e.updatePeerRelation(deviceID, DiscoveredState)
+	e.clearLocallyHiddenFriend(deviceID)
+	e.setPeerVisibleInFriends(deviceID, true)
+	e.setPeerFriendshipState(deviceID, "removed")
+	e.setPeerDiscoveryVisible(deviceID, false)
+	e.emit("chat:peer-updated", e.Peers())
 }
 func (e *Engine) Profile() Profile { e.mu.RLock(); defer e.mu.RUnlock(); return e.profile }
 func (e *Engine) DeviceInfo() DeviceInfo {
@@ -3167,6 +3509,11 @@ func (e *Engine) Peers() []Peer {
 	}
 	e.mu.RUnlock()
 	for index := range peers {
+		// Keep an explicit local hide effective even if an older connection or
+		// discovery refresh supplied a stale visible=true snapshot meanwhile.
+		if e.locallyHiddenFriend(peers[index].DeviceID) {
+			peers[index].VisibleInFriends = false
+		}
 		if serviceStopped {
 			peers[index].Online = false
 		} else if online, ok := onlineStates[peers[index].DeviceID]; ok {

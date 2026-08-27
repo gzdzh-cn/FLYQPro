@@ -10,6 +10,7 @@ import (
 	"flyqpro/internal/version"
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/services/dock"
 )
 
 //go:embed all:frontend/dist
@@ -26,6 +27,8 @@ func main() {
 	}()
 
 	chatService := service.NewChatService()
+	dockService := dock.New()
+	appBadgeService := service.NewAppBadgeService(dockService)
 	backgroundType := application.BackgroundTypeSolid
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		// Let the themed page own the pixels behind its rounded corners. A solid
@@ -38,6 +41,8 @@ func main() {
 		Description: "版本：v" + version.AppVersion + "\n技术栈：Go、Wails v3、Vue 3、TypeScript、Arco Design、SQLite\n技术支持：广州大智汇信息科技有限公司",
 		Services: []application.Service{
 			application.NewService(chatService),
+			application.NewService(dockService),
+			application.NewService(appBadgeService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -48,6 +53,7 @@ func main() {
 	})
 	app.RegisterService(application.NewService(service.NewImageViewerService(app, chatService)))
 	app.RegisterService(application.NewService(service.NewSharedDriveWindowService(app, chatService)))
+	app.RegisterService(application.NewServiceWithOptions(service.NewPreviewStreamService(chatService), application.ServiceOptions{Route: "/preview/"}))
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)
 

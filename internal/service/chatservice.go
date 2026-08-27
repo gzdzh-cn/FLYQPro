@@ -41,12 +41,54 @@ type ChatService struct {
 
 	sharedStatsMu sync.Mutex
 	sharedStats   sharedStatsState
+
+	sharedThumbnailStore *sharedThumbnailStore
+	sharedThumbnailStop  chan struct{}
+	sharedThumbnailOnce  sync.Once
 }
 
-func NewChatService() *ChatService { return &ChatService{engine: chat.NewEngine()} }
+func NewChatService() *ChatService {
+	service := &ChatService{
+		engine:               chat.NewEngine(),
+		sharedThumbnailStore: newSharedThumbnailStore(),
+		sharedThumbnailStop:  make(chan struct{}),
+	}
+	service.engine.SetSharedThumbnailProvider(func(root, relativePath string) (string, string, error) {
+		entry, path, err := chat.GetSharedEntry(root, relativePath, false)
+		if err != nil || entry.IsDirectory {
+			if err != nil {
+				return "", "", err
+			}
+			return "", "", fmt.Errorf("该文件不是图片")
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", "", err
+		}
+		cachePath, thumbnailMime, cached := service.sharedThumbnailStore.cached(root, entry.RelativePath, entry.MimeType, info)
+		if !cached {
+			// Never make a remote hello/request wait for a large image decode.
+			// The next request will pick up the atomically-written cache file.
+			go func() {
+				_, _, _ = service.sharedThumbnailStore.getOrCreate(root, entry.RelativePath, entry.MimeType, info)
+			}()
+			return "", "", nil
+		}
+		data, err := os.ReadFile(cachePath)
+		if err != nil || len(data) == 0 {
+			return "", "", fmt.Errorf("缩略图缓存不存在")
+		}
+		return base64.StdEncoding.EncodeToString(data), thumbnailMime, nil
+	})
+	return service
+}
 
-func (s *ChatService) Start() error { return s.engine.Start(gctx.New()) }
+func (s *ChatService) Start() error {
+	s.sharedThumbnailStore.startJanitor(s.sharedThumbnailStop)
+	return s.engine.Start(gctx.New())
+}
 func (s *ChatService) Stop() {
+	s.sharedThumbnailOnce.Do(func() { close(s.sharedThumbnailStop) })
 	s.sharedStatsMu.Lock()
 	if s.sharedStats.cancel != nil {
 		s.sharedStats.cancel()
@@ -235,6 +277,11 @@ func sharedRootCounts(root string) (files, folders int) {
 }
 
 func sharedRootCountsContext(ctx context.Context, root string) (files, folders int) {
+	return sharedRootCountsProgressContext(ctx, root, nil)
+}
+
+func sharedRootCountsProgressContext(ctx context.Context, root string, progress func(files, folders int)) (files, folders int) {
+	visited := 0
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -253,8 +300,15 @@ func sharedRootCountsContext(ctx context.Context, root string) (files, folders i
 		} else {
 			files++
 		}
+		visited++
+		if progress != nil && visited%100 == 0 {
+			progress(files, folders)
+		}
 		return nil
 	})
+	if progress != nil {
+		progress(files, folders)
+	}
 	return files, folders
 }
 
@@ -286,7 +340,27 @@ func (s *ChatService) startSharedStats(root string, force bool) {
 	s.sharedStatsMu.Unlock()
 
 	go func() {
-		files, folders := sharedRootCountsContext(ctx, root)
+		files, folders := sharedRootCountsProgressContext(ctx, root, func(files, folders int) {
+			if ctx.Err() != nil {
+				return
+			}
+			s.sharedStatsMu.Lock()
+			if s.sharedStats.generation == generation && s.sharedStats.root == root {
+				s.sharedStats.fileCount = files
+				s.sharedStats.folderCount = folders
+				s.sharedStats.loading = true
+				s.sharedStats.ready = false
+				s.sharedStats.updatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+			s.sharedStatsMu.Unlock()
+			profile := s.engine.Profile()
+			currentRoot, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+			if err == nil && currentRoot == root {
+				if app := application.Get(); app != nil {
+					app.Event.Emit("chat:shared-stats-updated", s.sharedStatus(profile, root))
+				}
+			}
+		})
 		if ctx.Err() != nil {
 			return
 		}
@@ -389,9 +463,8 @@ func (s *ChatService) SetSharedEnabled(enabled bool) (chat.SharedFolderStatus, e
 		return chat.SharedFolderStatus{}, err
 	}
 	s.engine.UpdateProfile(profile)
-	if root != "" {
-		s.startSharedStats(root, false)
-	}
+	// Changing access permission does not change the directory contents. Keep
+	// the existing stats scan/result and avoid restarting an expensive walk.
 	return s.sharedStatus(profile, root), nil
 }
 
@@ -403,6 +476,17 @@ func (s *ChatService) DisableSharedFolder() error {
 func (s *ChatService) ListSharedEntries(relativePath string) ([]chat.SharedEntry, error) {
 	profile := s.engine.Profile()
 	return chat.ListSharedEntries(profile.SharedRootPath, relativePath)
+}
+
+func (s *ChatService) ListSharedEntriesPage(relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
+	profile := s.engine.Profile()
+	page, err := chat.ListSharedEntriesPage(profile.SharedRootPath, relativePath, offset, limit)
+	if err == nil {
+		// Reconcile missing files in the background. The directory listing stays
+		// fast, while deleted source files eventually release their thumbnails.
+		go s.sharedThumbnailStore.prune()
+	}
+	return page, err
 }
 
 func (s *ChatService) GetSharedEntryDetails(relativePath string) (chat.SharedEntry, error) {
@@ -440,6 +524,49 @@ func (s *ChatService) GetSharedEntryPreview(relativePath string) (string, error)
 		return "", fmt.Errorf("在线预览文件过大，请先下载")
 	}
 	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+// GetSharedEntryThumbnail returns a small image-only preview for the shared
+// grid. The original file is intentionally not read into the webview.
+func (s *ChatService) GetSharedEntryThumbnail(relativePath string) (string, error) {
+	profile := s.engine.Profile()
+	entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return "", err
+	}
+	if entry.IsDirectory {
+		return "", fmt.Errorf("该文件不是图片")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	cachePath, thumbnailMime, cached := s.sharedThumbnailStore.cached(profile.SharedRootPath, entry.RelativePath, entry.MimeType, info)
+	if !cached {
+		// Queue generation and return immediately. This is important for large
+		// JPEG/PNG files: the UI must be able to show a stable placeholder while
+		// the background worker creates the thumbnail.
+		go func() {
+			_, _, _ = s.sharedThumbnailStore.getOrCreate(profile.SharedRootPath, entry.RelativePath, entry.MimeType, info)
+		}()
+		return "", nil
+	}
+	return s.sharedThumbnailStore.dataURL(cachePath, thumbnailMime)
+}
+
+func generateSharedThumbnail(root, relativePath, mimeType string) ([]byte, string, error) {
+	encoded, thumbnailMime, err := chat.GetSharedEntryThumbnail(root, relativePath)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, "", err
+	}
+	if thumbnailMime == "" {
+		thumbnailMime = "image/jpeg"
+	}
+	return data, thumbnailMime, nil
 }
 
 func (s *ChatService) OpenSharedEntry(relativePath string) error {
@@ -537,8 +664,16 @@ func (s *ChatService) ListFriendSharedEntries(deviceID, relativePath string) ([]
 	return s.engine.ListFriendSharedEntries(gctx.New(), strings.TrimSpace(deviceID), relativePath)
 }
 
+func (s *ChatService) ListFriendSharedEntriesPage(deviceID, relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
+	return s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), relativePath, offset, limit)
+}
+
 func (s *ChatService) GetFriendSharedEntryPreview(deviceID, relativePath string) (string, error) {
 	return s.engine.GetFriendSharedEntryPreview(gctx.New(), strings.TrimSpace(deviceID), relativePath)
+}
+
+func (s *ChatService) GetFriendSharedEntryThumbnail(deviceID, relativePath string) (string, error) {
+	return s.engine.GetFriendSharedEntryThumbnail(gctx.New(), strings.TrimSpace(deviceID), relativePath)
 }
 
 func (s *ChatService) DownloadFriendSharedEntry(deviceID, relativePath string) (chat.SharedTransfer, error) {
@@ -579,21 +714,27 @@ func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string)
 	if parent == "." {
 		parent = ""
 	}
-	entries, err := s.ListFriendSharedEntries(deviceID, parent)
-	if err != nil {
-		return chat.SharedEntry{}, err
-	}
-	for _, entry := range entries {
-		if entry.RelativePath == clean {
-			if entry.IsDirectory {
-				size, err := s.friendSharedDirectorySize(deviceID, clean, 0)
-				if err != nil {
-					return chat.SharedEntry{}, err
-				}
-				entry.Size = size
-			}
-			return entry, nil
+	for offset := 0; ; {
+		page, err := s.ListFriendSharedEntriesPage(deviceID, parent, offset, 200)
+		if err != nil {
+			return chat.SharedEntry{}, err
 		}
+		for _, entry := range page.Entries {
+			if entry.RelativePath == clean {
+				if entry.IsDirectory {
+					size, err := s.friendSharedDirectorySize(deviceID, clean, 0)
+					if err != nil {
+						return chat.SharedEntry{}, err
+					}
+					entry.Size = size
+				}
+				return entry, nil
+			}
+		}
+		if !page.HasMore || page.NextOffset <= offset {
+			break
+		}
+		offset = page.NextOffset
 	}
 	return chat.SharedEntry{}, fmt.Errorf("共享文件不存在")
 }
@@ -602,23 +743,29 @@ func (s *ChatService) friendSharedDirectorySize(deviceID, relativePath string, d
 	if depth >= 64 {
 		return 0, fmt.Errorf("共享文件夹层级过深")
 	}
-	entries, err := s.ListFriendSharedEntries(deviceID, relativePath)
-	if err != nil {
-		return 0, err
-	}
 	var total int64
-	for _, entry := range entries {
-		if entry.IsDirectory {
-			size, err := s.friendSharedDirectorySize(deviceID, entry.RelativePath, depth+1)
-			if err != nil {
-				return 0, err
+	for offset := 0; ; {
+		page, err := s.ListFriendSharedEntriesPage(deviceID, relativePath, offset, 200)
+		if err != nil {
+			return 0, err
+		}
+		for _, entry := range page.Entries {
+			if entry.IsDirectory {
+				size, err := s.friendSharedDirectorySize(deviceID, entry.RelativePath, depth+1)
+				if err != nil {
+					return 0, err
+				}
+				total += size
+				continue
 			}
-			total += size
-			continue
+			if entry.Size > 0 {
+				total += entry.Size
+			}
 		}
-		if entry.Size > 0 {
-			total += entry.Size
+		if !page.HasMore || page.NextOffset <= offset {
+			break
 		}
+		offset = page.NextOffset
 	}
 	return total, nil
 }
@@ -845,6 +992,9 @@ func (s *ChatService) ListFriendRequests() []chat.FriendRequest {
 	requests, _ := chat.ListFriendRequests(gctx.New(), "")
 	return requests
 }
+func (s *ChatService) ClearFriendRequestHistory() error {
+	return chat.ClearFriendRequestHistory(gctx.New())
+}
 func (s *ChatService) ListConversations() []chat.Conversation {
 	conversations, _ := chat.ListConversations(gctx.New())
 	return conversations
@@ -852,6 +1002,12 @@ func (s *ChatService) ListConversations() []chat.Conversation {
 func (s *ChatService) ListMessages(conversationID string) []chat.Message {
 	messages, _ := chat.ListMessages(gctx.New(), conversationID)
 	return messages
+}
+
+// GetMessage bootstraps the selected image before the viewer loads the full
+// conversation history for previous/next navigation.
+func (s *ChatService) GetMessage(messageID string) (chat.Message, error) {
+	return chat.GetMessage(gctx.New(), strings.TrimSpace(messageID))
 }
 
 func (s *ChatService) SendFriendRequest(deviceID, message string) (chat.FriendRequest, error) {
@@ -991,12 +1147,15 @@ func (s *ChatService) requireFriend(deviceID string) error {
 	if deviceID == "" {
 		return fmt.Errorf("好友设备 ID 不能为空")
 	}
-	peers, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
+	// A contact can already be in the locally retained "not a friend" state
+	// after the remote side removed the relationship. It is still a trusted
+	// contact row and must remain removable from the address book.
+	peers, err := chat.ListPeers(gctx.New(), "")
 	if err != nil {
 		return err
 	}
 	for _, peer := range peers {
-		if peer.DeviceID == deviceID {
+		if peer.DeviceID == deviceID && (peer.Relation == chat.PeerRelation || peer.FriendshipState == "removed") {
 			return nil
 		}
 	}
@@ -1299,6 +1458,23 @@ func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
 	if err := s.requireFriend(deviceID); err != nil {
 		return err
 	}
+	// A peer that is already marked as removed is no longer a friendship, but
+	// it may still be retained in the friends list until the user hides it.
+	// Do not route this case through Engine.SetPeerVisibleInFriends, which
+	// correctly rejects non-friends for normal relationship operations.
+	peers, err := chat.ListPeers(gctx.New(), "")
+	if err != nil {
+		return err
+	}
+	for _, peer := range peers {
+		if peer.DeviceID == deviceID && peer.FriendshipState == "removed" {
+			_, clearErr := s.ClearConversation(deviceID)
+			if clearErr != nil {
+				return clearErr
+			}
+			return s.engine.HidePeerFromFriends(gctx.New(), deviceID)
+		}
+	}
 	conversations, err := chat.ListConversations(gctx.New())
 	if err != nil {
 		return err
@@ -1325,18 +1501,25 @@ func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
 	return s.engine.SetPeerVisibleInFriends(gctx.New(), deviceID, false)
 }
 
+// RestoreHiddenFriend makes an explicitly opened contact visible in the main
+// friends list again. It does not change the friendship relationship.
+func (s *ChatService) RestoreHiddenFriend(deviceID string) error {
+	return s.engine.SetPeerVisibleInFriends(gctx.New(), deviceID, true)
+}
+
 func (s *ChatService) RemoveFriendAndClearLocalData(deviceID string) error {
 	deviceID = strings.TrimSpace(deviceID)
 	if err := s.requireFriend(deviceID); err != nil {
 		return err
 	}
-	if _, err := s.ClearConversation(deviceID); err != nil {
-		return err
-	}
 	if err := chat.DeletePeerAndFriendRecords(gctx.New(), deviceID); err != nil {
 		return err
 	}
-	s.engine.RemovePeerFromMemory(deviceID)
+	s.engine.MarkPeerRemoved(deviceID)
+	// Persist the local tombstone before notifying the peer. If the peer is
+	// offline the best-effort send fails harmlessly; the tombstone is then
+	// synchronized on its next authenticated connection.
+	_ = s.engine.NotifyFriendRemoved(deviceID)
 	return nil
 }
 

@@ -20,6 +20,7 @@ var schemaStatements = []string{
 		file_save_path TEXT NOT NULL DEFAULT '',
 		shared_root_path TEXT NOT NULL DEFAULT '',
 		shared_enabled INTEGER NOT NULL DEFAULT 0,
+		shared_drive_multi_window INTEGER NOT NULL DEFAULT 1,
 		theme TEXT NOT NULL DEFAULT 'system',
 		launch_at_startup INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL,
@@ -55,6 +56,7 @@ var schemaStatements = []string{
 		capabilities TEXT NOT NULL DEFAULT '',
 		discovery_visible INTEGER NOT NULL DEFAULT 0,
 		visible_in_friends INTEGER NOT NULL DEFAULT 1,
+		relationship_version TEXT NOT NULL DEFAULT '',
 		last_seen TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
@@ -74,7 +76,10 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_friend_requests_status ON friend_requests(status)`,
 	`CREATE TABLE IF NOT EXISTS friend_removals (
 		device_id TEXT PRIMARY KEY,
-		removed_at TEXT NOT NULL
+		removed_at TEXT NOT NULL,
+		relationship_version TEXT NOT NULL DEFAULT '',
+		public_key_pem TEXT NOT NULL DEFAULT '',
+		certificate_fingerprint TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE TABLE IF NOT EXISTS conversations (
 		conversation_id TEXT PRIMARY KEY,

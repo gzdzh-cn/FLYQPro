@@ -109,6 +109,7 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"profiles", "file_save_path", "TEXT NOT NULL DEFAULT ''"},
 		{"profiles", "shared_root_path", "TEXT NOT NULL DEFAULT ''"},
 		{"profiles", "shared_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"profiles", "shared_drive_multi_window", "INTEGER NOT NULL DEFAULT 1"},
 		{"profiles", "theme", "TEXT NOT NULL DEFAULT 'system'"},
 		{"profiles", "launch_at_startup", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "created_at", "TEXT NOT NULL DEFAULT ''"},
@@ -136,6 +137,7 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"peers", "capabilities", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "discovery_visible", "INTEGER NOT NULL DEFAULT 0"},
 		{"peers", "visible_in_friends", "INTEGER NOT NULL DEFAULT 1"},
+		{"peers", "relationship_version", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "last_seen", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"peers", "updated_at", "TEXT NOT NULL DEFAULT ''"},
@@ -169,6 +171,9 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"attachments", "local_path", "TEXT NOT NULL DEFAULT ''"},
 		{"attachments", "status", "TEXT NOT NULL DEFAULT 'pending'"},
 		{"attachments", "created_at", "TEXT NOT NULL DEFAULT ''"},
+		{"friend_removals", "relationship_version", "TEXT NOT NULL DEFAULT ''"},
+		{"friend_removals", "public_key_pem", "TEXT NOT NULL DEFAULT ''"},
+		{"friend_removals", "certificate_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, migration := range migrations {
 		var columns []struct {

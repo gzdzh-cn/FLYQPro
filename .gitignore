@@ -22,3 +22,4 @@ frontend/bindings/*
 **/.DS_Store
 docs/vitepress
 *.exe
+docs/元数据

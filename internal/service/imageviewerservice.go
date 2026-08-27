@@ -79,6 +79,11 @@ func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
 	query := url.Values{}
 	query.Set("source", "shared-owner")
 	query.Set("relativePath", filepath.ToSlash(relativePath))
+	if isPDFMime(entry.MimeType, entry.Name) {
+		query.Set("previewType", "pdf")
+	} else {
+		query.Set("previewType", "image")
+	}
 	return s.openViewer(query, "共享文件预览")
 }
 
@@ -86,17 +91,36 @@ func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, relativePath stri
 	if s.chatService == nil {
 		return fmt.Errorf("共享预览服务尚未初始化")
 	}
-	entry, err := s.chatService.GetFriendSharedEntryDetails(deviceID, relativePath)
+	deviceID = strings.TrimSpace(deviceID)
+	friends, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
 	if err != nil {
 		return err
 	}
-	if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isPDFMime(entry.MimeType, entry.Name)) {
+	knownFriend := false
+	for _, peer := range friends {
+		if peer.DeviceID == deviceID {
+			knownFriend = true
+			if !peer.Online {
+				return fmt.Errorf("好友不在线，暂不支持打开共享盘")
+			}
+			break
+		}
+	}
+	if !knownFriend {
+		return fmt.Errorf("不是好友，无法访问共享盘")
+	}
+	if !isImageMime("", relativePath) && !isPDFMime("", relativePath) {
 		return fmt.Errorf("该文件类型不支持在线预览")
 	}
 	query := url.Values{}
 	query.Set("source", "shared-friend")
-	query.Set("deviceId", strings.TrimSpace(deviceID))
+	query.Set("deviceId", deviceID)
 	query.Set("relativePath", filepath.ToSlash(relativePath))
+	if isPDFMime("", relativePath) {
+		query.Set("previewType", "pdf")
+	} else {
+		query.Set("previewType", "image")
+	}
 	return s.openViewer(query, "好友共享预览")
 }
 
@@ -120,6 +144,14 @@ func (s *ImageViewerService) openViewer(query url.Values, title string) error {
 		return nil
 	}
 
+	x, y := 40, 40
+	if mainWindow, ok := s.app.Window.GetByName(mainWindowName); ok {
+		mainX, mainY := mainWindow.Position()
+		mainWidth, mainHeight := mainWindow.Size()
+		if mainWidth > 0 && mainHeight > 0 {
+			x, y = mainX+40, mainY+40
+		}
+	}
 	window := s.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             imageViewerWindowName,
 		Title:            title,
@@ -127,7 +159,9 @@ func (s *ImageViewerService) openViewer(query url.Values, title string) error {
 		Height:           760,
 		MinWidth:         720,
 		MinHeight:        480,
-		InitialPosition:  application.WindowCentered,
+		InitialPosition:  application.WindowXY,
+		X:                x,
+		Y:                y,
 		BackgroundType:   application.BackgroundTypeSolid,
 		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
 		// Both desktop platforms use a fully custom title bar. macOS draws its

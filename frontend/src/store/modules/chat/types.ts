@@ -11,6 +11,7 @@ export interface Profile {
   launchAtStartup: boolean
   sharedRootPath?: string
   sharedEnabled?: boolean
+  sharedDriveMultiWindow?: boolean
 }
 
 export interface Peer {
@@ -34,6 +35,7 @@ export interface Peer {
   capabilities?: string[]
   discoveryVisible: boolean
   visibleInFriends?: boolean
+  friendshipState?: string
   online: boolean
   lastSeen: string
 }

@@ -65,7 +65,7 @@ func (e *Engine) handleSharedListRequest(conn net.Conn, hello, message wireMessa
 		return
 	}
 	profile := e.Profile()
-	entries, err := ListSharedEntries(profile.SharedRootPath, message.RelativePath)
+	page, err := ListSharedEntriesPage(profile.SharedRootPath, message.RelativePath, message.ListOffset, message.ListLimit)
 	if err != nil {
 		status := SharedPathInvalidError
 		if strings.Contains(err.Error(), SharedUnavailableError) {
@@ -74,7 +74,34 @@ func (e *Engine) handleSharedListRequest(conn net.Conn, hello, message wireMessa
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: status})
 		return
 	}
-	_ = writeWire(conn, wireMessage{Type: "share_list_response", Status: "ok", RelativePath: message.RelativePath, Entries: entries})
+	_ = writeWire(conn, wireMessage{Type: "share_list_response", Status: "ok", RelativePath: message.RelativePath, Entries: page.Entries, NextOffset: page.NextOffset, HasMore: page.HasMore})
+}
+
+func (e *Engine) handleSharedThumbnailRequest(conn net.Conn, hello, message wireMessage) {
+	if !e.sharedAccessAllowed(hello.DeviceID) {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
+		return
+	}
+	profile := e.Profile()
+	e.mu.RLock()
+	provider := e.sharedThumbnailProvider
+	e.mu.RUnlock()
+	var data, mimeType string
+	var err error
+	if provider != nil {
+		data, mimeType, err = provider(profile.SharedRootPath, message.RelativePath)
+	} else {
+		data, mimeType, err = GetSharedEntryThumbnail(profile.SharedRootPath, message.RelativePath)
+	}
+	if err != nil {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: "SHARED_THUMBNAIL_UNAVAILABLE"})
+		return
+	}
+	status := "ok"
+	if data == "" {
+		status = "pending"
+	}
+	_ = writeWire(conn, wireMessage{Type: "share_thumbnail_response", Status: status, RelativePath: message.RelativePath, MimeType: mimeType, Payload: data})
 }
 
 func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireMessage, session *wireSession) {
@@ -199,6 +226,12 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 			lastErr = fmt.Errorf("对方握手失败")
 			continue
 		}
+		if response.FriendshipState == "removed" {
+			e.handleRemoteFriendshipRequired(peer.DeviceID)
+			_ = conn.Close()
+			lastErr = fmt.Errorf("FRIENDSHIP_REQUIRED")
+			continue
+		}
 		responseDialect, compatible := protocolDialectForMessage(response)
 		if !compatible || !hasCapability(response.Capabilities, sharedDriveCapability) {
 			_ = conn.Close()
@@ -214,32 +247,37 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 }
 
 func (e *Engine) ListFriendSharedEntries(ctx context.Context, deviceID, relativePath string) ([]SharedEntry, error) {
+	page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, relativePath, 0, defaultSharedEntriesPageSize)
+	return page.Entries, err
+}
+
+func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, relativePath string, offset, limit int) (SharedEntriesPage, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return SharedEntriesPage{}, err
 	}
 	peer, err := e.peer(deviceID)
 	if err != nil || peer.Relation != PeerRelation {
-		return nil, fmt.Errorf("FRIENDSHIP_REQUIRED")
+		return SharedEntriesPage{}, fmt.Errorf("FRIENDSHIP_REQUIRED")
 	}
 	conn, decoder, _, err := e.dialSharedPeer(peer)
 	if err != nil {
-		return nil, err
+		return SharedEntriesPage{}, err
 	}
 	defer conn.Close()
-	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath}); err != nil {
-		return nil, err
+	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath, ListOffset: offset, ListLimit: limit}); err != nil {
+		return SharedEntriesPage{}, err
 	}
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil {
-		return nil, err
+		return SharedEntriesPage{}, err
 	}
 	if response.Type == "share_error" {
-		return nil, fmt.Errorf("%s", response.Status)
+		return SharedEntriesPage{}, fmt.Errorf("%s", response.Status)
 	}
 	if response.Type != "share_list_response" || response.Status != "ok" {
-		return nil, fmt.Errorf("共享目录响应无效")
+		return SharedEntriesPage{}, fmt.Errorf("共享目录响应无效")
 	}
-	return response.Entries, nil
+	return SharedEntriesPage{Entries: response.Entries, NextOffset: response.NextOffset, HasMore: response.HasMore}, nil
 }
 
 func sharedPreviewableEntry(entry SharedEntry) bool {
@@ -255,6 +293,130 @@ func sharedPreviewableEntry(entry SharedEntry) bool {
 	}
 }
 
+func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, relativePath string) (SharedEntry, error) {
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
+	if clean == "." || strings.Contains(clean, "..") {
+		return SharedEntry{}, fmt.Errorf("SHARED_PATH_INVALID")
+	}
+	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(clean)))
+	if parent == "." {
+		parent = ""
+	}
+	for offset := 0; ; {
+		page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, parent, offset, maxSharedEntriesPageSize)
+		if err != nil {
+			return SharedEntry{}, err
+		}
+		for _, entry := range page.Entries {
+			if entry.RelativePath == clean {
+				return entry, nil
+			}
+		}
+		if !page.HasMore || page.NextOffset <= offset {
+			break
+		}
+		offset = page.NextOffset
+	}
+	return SharedEntry{}, fmt.Errorf("共享文件不存在")
+}
+
+// StreamFriendSharedEntry streams a validated remote shared file to the
+// caller. It deliberately exposes bytes through a callback instead of
+// assembling the complete file in memory, which lets the desktop preview
+// window start rendering while a large image is still arriving.
+func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relativePath string, before func(SharedEntry) error, write func([]byte) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
+	if clean == "." || strings.Contains(clean, "..") {
+		return fmt.Errorf("SHARED_PATH_INVALID")
+	}
+	entry, err := e.findFriendSharedEntry(ctx, deviceID, clean)
+	if err != nil {
+		return err
+	}
+	if entry.IsDirectory || !sharedPreviewableEntry(entry) {
+		return fmt.Errorf("该文件类型不支持在线预览")
+	}
+	if entry.Size < 0 || entry.Size > maxSharedPreviewSize {
+		return fmt.Errorf("在线预览文件不能超过 %d MB，请先下载", maxSharedPreviewSize/(1024*1024))
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation != PeerRelation {
+		return fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
+	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	transferID := newID()
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, RelativePath: clean, Offset: 0}); err != nil {
+		return err
+	}
+	var response wireMessage
+	if err := decoder.Decode(&response); err != nil {
+		return err
+	}
+	if response.Type == "share_error" {
+		return fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "share_download_response" || response.Status != "accepted" || response.Offset != 0 {
+		return fmt.Errorf("共享文件预览响应无效")
+	}
+	if response.FileSize < 0 || response.FileSize > maxSharedPreviewSize {
+		return fmt.Errorf("在线预览文件过大，请先下载")
+	}
+	entry.Name = response.FileName
+	entry.Size = response.FileSize
+	if response.MimeType != "" {
+		entry.MimeType = response.MimeType
+	}
+	if before != nil {
+		if err := before(entry); err != nil {
+			return err
+		}
+	}
+	hash := sha256.New()
+	var received int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var message wireMessage
+		if err := decoder.Decode(&message); err != nil {
+			return err
+		}
+		switch message.Type {
+		case "share_chunk":
+			if message.TransferID != transferID {
+				return fmt.Errorf("共享传输标识无效")
+			}
+			payload, decodeErr := base64.StdEncoding.DecodeString(message.Payload)
+			if decodeErr != nil || received+int64(len(payload)) > response.FileSize {
+				return fmt.Errorf("共享文件数据无效")
+			}
+			if _, err := hash.Write(payload); err != nil {
+				return err
+			}
+			if write != nil {
+				if err := write(payload); err != nil {
+					return err
+				}
+			}
+			received += int64(len(payload))
+		case "share_error":
+			return fmt.Errorf("%s", message.Status)
+		case "share_complete":
+			if received != response.FileSize || (message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
+				return fmt.Errorf("共享文件校验失败")
+			}
+			return nil
+		}
+	}
+}
+
 func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, relativePath string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -263,20 +425,9 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 	if clean == "." || strings.Contains(clean, "..") {
 		return "", fmt.Errorf("SHARED_PATH_INVALID")
 	}
-	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(clean)))
-	if parent == "." {
-		parent = ""
-	}
-	entries, err := e.ListFriendSharedEntries(ctx, deviceID, parent)
+	entry, err := e.findFriendSharedEntry(ctx, deviceID, clean)
 	if err != nil {
 		return "", err
-	}
-	var entry SharedEntry
-	for _, candidate := range entries {
-		if candidate.RelativePath == clean {
-			entry = candidate
-			break
-		}
 	}
 	if entry.RelativePath == "" || entry.IsDirectory {
 		return "", fmt.Errorf("共享文件不存在")
@@ -346,6 +497,54 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 			return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data.Bytes()), nil
 		}
 	}
+}
+
+// GetFriendSharedEntryThumbnail fetches only the bounded preview generated by
+// the remote peer. It is used by the shared-drive thumbnail grid and avoids
+// transferring or decoding the original file in the webview.
+func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, relativePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
+	if clean == "." || strings.Contains(clean, "..") {
+		return "", fmt.Errorf("SHARED_PATH_INVALID")
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation != PeerRelation {
+		return "", fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
+	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if err := writeWire(conn, wireMessage{Type: "share_thumbnail_request", RelativePath: clean}); err != nil {
+		return "", err
+	}
+	// A peer that predates the thumbnail frame may keep the authenticated
+	// connection open while ignoring it. Do not leave a card in "加载中…"
+	// forever; the caller can then show a placeholder or use its fallback.
+	_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	var response wireMessage
+	if err := decoder.Decode(&response); err != nil {
+		return "", err
+	}
+	if response.Type == "share_error" {
+		return "", fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "share_thumbnail_response" || (response.Status != "ok" && response.Status != "pending") {
+		return "", fmt.Errorf("共享图片缩略图响应无效")
+	}
+	if response.Status == "pending" || response.Payload == "" {
+		return "", nil
+	}
+	mimeType := response.MimeType
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+	return "data:" + mimeType + ";base64," + response.Payload, nil
 }
 
 func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relativePath, targetPath string) (SharedTransfer, error) {

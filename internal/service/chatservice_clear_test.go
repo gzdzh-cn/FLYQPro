@@ -128,7 +128,7 @@ func TestHideFriendAndClearLocalDataKeepsFriendshipAndConversation(t *testing.T)
 	}
 }
 
-func TestRemoveFriendAndClearLocalDataRemovesFriendshipAndLocalRecords(t *testing.T) {
+func TestRemoveFriendAndClearLocalDataKeepsChatHistoryAndMarksRemoved(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
 	t.Setenv("FLYQPRO_DATA_DIR", filepath.Join(root, "data"))
@@ -160,17 +160,17 @@ func TestRemoveFriendAndClearLocalDataRemovesFriendshipAndLocalRecords(t *testin
 	if err := (&ChatService{engine: engine}).RemoveFriendAndClearLocalData("peer-remove"); err != nil {
 		t.Fatal(err)
 	}
-	if peers, err := chat.ListPeers(ctx, ""); err != nil || len(peers) != 0 {
-		t.Fatalf("好友关系或 Peer 未清理: %v, %+v", err, peers)
+	if peers, err := chat.ListPeers(ctx, ""); err != nil || len(peers) != 1 || peers[0].FriendshipState != "removed" {
+		t.Fatalf("删除后应保留已解除关系的好友列表项: %v, %+v", err, peers)
 	}
-	if conversations, err := chat.ListConversations(ctx); err != nil || len(conversations) != 0 {
-		t.Fatalf("会话未清理: %v, %+v", err, conversations)
+	if conversations, err := chat.ListConversations(ctx); err != nil || len(conversations) != 1 {
+		t.Fatalf("通讯录删除不应清理会话: %v, %+v", err, conversations)
 	}
-	if messages, err := chat.ListMessages(ctx, conversationID); err != nil || len(messages) != 0 {
-		t.Fatalf("聊天记录未清理: %v, %d", err, len(messages))
+	if messages, err := chat.ListMessages(ctx, conversationID); err != nil || len(messages) != 1 {
+		t.Fatalf("通讯录删除不应清理聊天记录: %v, %d", err, len(messages))
 	}
-	if requests, err := chat.ListFriendRequests(ctx, "peer-remove"); err != nil || len(requests) != 0 {
-		t.Fatalf("好友申请记录未清理: %v, %+v", err, requests)
+	if requests, err := chat.ListFriendRequests(ctx, ""); err != nil || len(requests) != 1 || requests[0].RequestID != "request-remove" || requests[0].Status != "accepted" {
+		t.Fatalf("好友申请历史不应被删除: %v, %+v", err, requests)
 	}
 	if removed, err := chat.IsFriendRemoved(ctx, "peer-remove"); err != nil || !removed {
 		t.Fatalf("好友删除标记未保留，旧端可能通过 friend_restore 恢复关系: %v, %v", err, removed)

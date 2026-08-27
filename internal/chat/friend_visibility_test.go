@@ -61,6 +61,144 @@ func TestPeerVisibilityAndConversationActionsPersist(t *testing.T) {
 	}
 }
 
+func TestStaleFriendRemovalMarkerDoesNotRestoreHiddenFriend(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-hidden-marker", Nickname: "隐藏好友", Relation: PeerRelation, VisibleInFriends: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Older relationship-sync data may leave a removal tombstone behind while
+	// the peer row is still a friend.  Hiding the friend must remain effective;
+	// ListPeers must not normalize that active row back to visible=true.
+	if err := MarkFriendRemoved(ctx, "peer-hidden-marker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerVisibleInFriends(ctx, "peer-hidden-marker", false); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := ListPeers(ctx, PeerRelation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Relation != PeerRelation || peers[0].VisibleInFriends {
+		t.Fatalf("旧解除标记不应覆盖好友隐藏状态: %+v", peers)
+	}
+}
+
+func TestFriendRequestDoesNotPrecedeWithRestore(t *testing.T) {
+	if shouldSendFriendRestore("friend_request") {
+		t.Fatal("显式好友申请前不应发送 friend_restore")
+	}
+	if shouldSendFriendRestore("friend_restore") {
+		t.Fatal("friend_restore 不应再次发送 friend_restore")
+	}
+	if shouldSendFriendRestore("friend_removed") {
+		t.Fatal("解除好友关系的控制帧前不应发送 friend_restore")
+	}
+	if shouldSendFriendRestore("friend_request_response") {
+		t.Fatal("好友申请响应前不应发送旧的 friend_restore")
+	}
+	for _, messageType := range []string{"friend_request", "friend_request_response", "friend_removed"} {
+		if !allowsRemovedFriendshipFrame(messageType) {
+			t.Fatalf("关系控制帧应允许穿过旧删除状态: %s", messageType)
+		}
+	}
+	for _, messageType := range []string{"message", "file_offer", "read_receipt"} {
+		if allowsRemovedFriendshipFrame(messageType) {
+			t.Fatalf("普通业务帧不应穿过旧删除状态: %s", messageType)
+		}
+	}
+	for _, messageType := range []string{"message", "file_offer", "read_receipt"} {
+		if !shouldSendFriendRestore(messageType) {
+			t.Fatalf("正常好友消息应允许恢复关系: %s", messageType)
+		}
+	}
+}
+
+func TestIncomingRequestAfterDatabaseResetIsPending(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := SaveProfile(ctx, Profile{Discoverable: true, Nickname: "重置设备"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-reset", Nickname: "另一台设备", Relation: DiscoveredState}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+	engine.mu.Lock()
+	engine.profile.Discoverable = true
+	engine.mu.Unlock()
+	engine.handleWire(nil, wireMessage{DeviceID: "peer-reset", Nickname: "另一台设备"}, wireMessage{
+		Type:      "friend_request",
+		RequestID: "request-after-reset",
+		Content:   "重新添加好友",
+	}, nil)
+
+	requests, err := listFriendRequestRows(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].Status != "pending" || requests[0].Direction != "received" {
+		t.Fatalf("清库后的好友申请未保存为待处理申请: %+v", requests)
+	}
+}
+
+func TestNewRequestIsNotHiddenByAcceptedHistory(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := SaveProfile(ctx, Profile{Discoverable: true, Nickname: "接收端"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-readd", Nickname: "重新申请", Relation: PeerRelation, RelationshipVersion: "old-version"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveFriendRequest(ctx, FriendRequest{RequestID: "old-request", DeviceID: "peer-readd", Status: "accepted", Direction: "received", CreatedAt: "2026-08-26T10:00:00Z", AcceptedAt: "2026-08-26T10:01:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+	engine.mu.Lock()
+	engine.profile.Discoverable = true
+	engine.mu.Unlock()
+	engine.handleWire(nil, wireMessage{DeviceID: "peer-readd", Nickname: "重新申请"}, wireMessage{Type: "friend_request", RequestID: "new-request", Content: "再次添加"}, nil)
+	requests, err := listFriendRequestRows(ctx, "")
+	if err != nil || len(requests) != 2 {
+		t.Fatalf("新申请不应覆盖历史申请: %v, %+v", err, requests)
+	}
+	current, ok := friendRequestByID("new-request")
+	if !ok || current.Status != "pending" {
+		t.Fatalf("新申请没有进入待处理状态: %+v", current)
+	}
+	old, ok := friendRequestByID("old-request")
+	if !ok || old.Status != "accepted" {
+		t.Fatalf("旧已同意记录被错误修改: %+v", old)
+	}
+	if err := engine.AcceptFriendRequest(ctx, "new-request"); err != nil {
+		t.Fatal(err)
+	}
+	old, _ = friendRequestByID("old-request")
+	current, _ = friendRequestByID("new-request")
+	if old.Status != "accepted" || current.Status != "accepted" || old.AcceptedAt == current.AcceptedAt {
+		t.Fatalf("同意新申请错误影响历史记录: old=%+v new=%+v", old, current)
+	}
+}
+
 func TestRemovedFriendRejectsLegacyRestoreFrame(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
@@ -84,7 +222,7 @@ func TestRemovedFriendRejectsLegacyRestoreFrame(t *testing.T) {
 	if err := readWire(client, &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Type != "friend_restore_ack" || response.Status != "rejected" || response.Reason != "FRIENDSHIP_REMOVED" {
+	if response.Type != "friend_restore_ack" || response.Status != "rejected" || response.Reason != "FRIENDSHIP_REQUIRED" {
 		t.Fatalf("删除后的恢复帧未被拒绝: %+v", response)
 	}
 	<-done
@@ -101,8 +239,11 @@ func TestAcceptedFriendRequestMakesRequesterVisible(t *testing.T) {
 	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-accepted", Nickname: "新好友", Relation: DiscoveredState, LastSeen: nowString()}); err != nil {
 		t.Fatal(err)
 	}
+	if err := SaveFriendRequest(ctx, FriendRequest{RequestID: "request-accepted", DeviceID: "peer-accepted", Nickname: "新好友", Status: "sent", Direction: "sent", CreatedAt: nowString()}); err != nil {
+		t.Fatal(err)
+	}
 	// A newly discovered peer starts hidden from the friends list. The
-	// acceptance response must promote both the relation and visibility.
+	// matching acceptance response must promote both the relation and visibility.
 	engine := NewEngine()
 	engine.handleWire(nil, wireMessage{DeviceID: "peer-accepted"}, wireMessage{
 		Type:      "friend_request_response",
@@ -130,7 +271,7 @@ func TestOpeningHiddenFriendRestoresFriendsListVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := NewEngine().MarkConversationRead(ctx, "peer-hidden"); err != nil {
+	if err := NewEngine().SetPeerVisibleInFriends(ctx, "peer-hidden", true); err != nil {
 		t.Fatal(err)
 	}
 	peers, err := ListPeers(ctx, PeerRelation)
@@ -139,6 +280,97 @@ func TestOpeningHiddenFriendRestoresFriendsListVisibility(t *testing.T) {
 	}
 	if len(peers) != 1 || !peers[0].VisibleInFriends {
 		t.Fatalf("从通讯录打开隐藏好友后未恢复好友列表显示: %+v", peers)
+	}
+}
+
+func TestMarkConversationReadDoesNotRestoreHiddenFriend(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-read-hidden", Nickname: "隐藏好友", Relation: DiscoveredState}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerRelation(ctx, "peer-read-hidden", PeerRelation); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerVisibleInFriends(ctx, "peer-read-hidden", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewEngine().MarkConversationRead(ctx, "peer-read-hidden"); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := ListPeers(ctx, PeerRelation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].VisibleInFriends {
+		t.Fatalf("读取聊天不应恢复隐藏好友: %+v", peers)
+	}
+}
+
+func TestEngineHideGuardRejectsStaleVisibleSnapshot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-hide-guard", Nickname: "隐藏好友", Relation: PeerRelation, VisibleInFriends: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	if err := engine.SetPeerVisibleInFriends(ctx, "peer-hide-guard", false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a late discovery/connection writer that carries an old
+	// visible=true value.  It must not make the just-hidden row reappear.
+	if err := SetPeerVisibleInFriends(ctx, "peer-hide-guard", true); err != nil {
+		t.Fatal(err)
+	}
+	peers := engine.Peers()
+	if len(peers) != 1 || peers[0].VisibleInFriends {
+		t.Fatalf("过期可见状态不应恢复隐藏好友: %+v", peers)
+	}
+	if err := engine.SetPeerVisibleInFriends(ctx, "peer-hide-guard", true); err != nil {
+		t.Fatal(err)
+	}
+	peers = engine.Peers()
+	if len(peers) != 1 || !peers[0].VisibleInFriends {
+		t.Fatalf("显式恢复好友应清除隐藏保护: %+v", peers)
+	}
+}
+
+func TestRemovalTombstoneDoesNotOverrideHiddenFriendsRow(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-hidden-removed", Nickname: "隐藏的旧好友", Relation: PeerRelation, VisibleInFriends: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkFriendRemoved(ctx, "peer-hidden-removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerRelation(ctx, "peer-hidden-removed", DiscoveredState); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerVisibleInFriends(ctx, "peer-hidden-removed", false); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].FriendshipState != "removed" || peers[0].VisibleInFriends {
+		t.Fatalf("解除关系标记不应覆盖本机隐藏状态: %+v", peers)
 	}
 }
 
@@ -159,8 +391,8 @@ func TestRemoteFriendshipRejectionDowngradesLocalPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
-		t.Fatalf("收到远端好友关系拒绝后未降级为陌生设备: %+v", peers)
+	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
+		t.Fatalf("收到远端好友关系拒绝后列表项或关系状态错误: %+v", peers)
 	}
 	removed, err := IsFriendRemoved(ctx, "peer-remote-removed")
 	if err != nil || !removed {
@@ -262,11 +494,50 @@ func TestFriendRemovedFrameDowngradesRemotePeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
-		t.Fatalf("解除好友帧未实时降级远端关系: %+v", peers)
+	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
+		t.Fatalf("解除好友帧未保留列表项并降级关系: %+v", peers)
 	}
 	removed, err := IsFriendRemoved(ctx, "peer-removed-notify")
 	if err != nil || !removed {
 		t.Fatalf("解除好友帧未留下关系删除标记: %v, %v", err, removed)
+	}
+}
+
+func TestStaleFriendRemovedFrameCannotUndoReaddedFriendship(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-versioned", Relation: PeerRelation, RelationshipVersion: "relationship-new", LastSeen: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	engine.handleWire(nil, wireMessage{DeviceID: "peer-versioned"}, wireMessage{Type: "friend_removed", RelationshipVersion: "relationship-old"}, nil)
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Relation != PeerRelation {
+		t.Fatalf("旧关系删除通知错误解除新好友关系: %+v", peers)
+	}
+}
+
+func TestHandshakeReportsRemovedFriendship(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := MarkFriendRemovedWithVersion(ctx, "peer-handshake-removed", "removed-version", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	state, version := NewEngine().friendshipStateForPeer("peer-handshake-removed")
+	if state != "removed" || version != "removed-version" {
+		t.Fatalf("握手删除状态错误: state=%q version=%q", state, version)
 	}
 }

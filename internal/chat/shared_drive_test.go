@@ -1,10 +1,41 @@
 package chat
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSharedEntriesPageReturnsBoundedResult(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index < 205; index++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file-%03d.txt", index)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := ListSharedEntriesPage(root, "", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries) != 100 || !first.HasMore || first.NextOffset != 100 {
+		t.Fatalf("unexpected first page: %#v", first)
+	}
+	second, err := ListSharedEntriesPage(root, "", first.NextOffset, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Entries) != 100 || !second.HasMore || second.NextOffset != 200 {
+		t.Fatalf("unexpected second page: %#v", second)
+	}
+	last, err := ListSharedEntriesPage(root, "", second.NextOffset, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last.Entries) != 5 || last.HasMore {
+		t.Fatalf("unexpected final page: %#v", last)
+	}
+}
 
 func TestSharedPathRejectsEscape(t *testing.T) {
 	root := t.TempDir()

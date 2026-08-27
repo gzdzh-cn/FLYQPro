@@ -13,7 +13,7 @@
       <nav class="rail-nav">
         <button :class="{ active: section === 'friends' }" @click="enterFriends" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small><b v-if="totalUnreadCount" class="rail-unread-badge">{{ unreadLabel(totalUnreadCount) }}</b></button>
         <button :class="{ active: section === 'discover' }" @click="openDiscover" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button>
-        <button @click="openSharedDrive" :disabled="store.attachmentMigration.active" aria-label="共享"><icon-cloud /><small>共享</small></button>
+        <button :class="{ active: section === 'shared' }" @click="openSharedDrive" :disabled="store.attachmentMigration.active" aria-label="共享"><icon-cloud /><small>共享</small></button>
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
     </aside>
@@ -32,7 +32,7 @@
         <div class="list-scroll">
           <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId, pinned: conversationForPeer(peer.deviceId)?.pinned }" @click="selectPeer(peer)" @contextmenu.prevent.stop="openPeerMenu($event, peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
-            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}<i v-if="conversationForPeer(peer.deviceId)?.pinned" class="pin-mark">置顶</i></strong><span class="peer-preview">{{ conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线') }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
+            <div class="peer-copy"><strong>{{ peer.remark || peer.nickname }}<i v-if="conversationForPeer(peer.deviceId)?.pinned" class="pin-mark">置顶</i></strong><span class="peer-device">{{ peerDeviceLabel(peer) }}</span><span class="peer-preview">{{ peer.friendshipState === 'removed' || peer.relation === 'removed' ? '不是好友' : (conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线')) }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
           </button>
           <div v-if="!filteredFriends.length" class="empty-small"><div class="empty-icon">⌁</div><p>还没有好友</p><a-button type="primary" size="small" @click="openDiscover">去发现好友</a-button></div>
         </div>
@@ -52,7 +52,7 @@
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
-                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :aria-busy="imageTransferActive(message)" @click="openImage(message)">
+                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :aria-busy="imageTransferActive(message)" @click="openImage(message)" @dblclick.stop.prevent="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
                     <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
@@ -98,12 +98,12 @@
         <a-modal v-model:visible="forwardVisible" title="选择转发好友" @ok="confirmForward" @cancel="forwardVisible = false"><div class="forward-targets"><a-checkbox v-for="peer in forwardCandidates" :key="peer.deviceId" :model-value="forwardTargetIds.includes(peer.deviceId)" @change="toggleForwardTarget(peer.deviceId)">{{ peer.remark || peer.nickname }}</a-checkbox></div></a-modal>
         <a-modal v-model:visible="attachmentDetailsVisible" title="附件详情" :footer="false"><div v-if="attachmentDetails" class="attachment-details"><p><span>文件名</span><strong>{{ attachmentDetails.fileName }}</strong></p><p><span>类型</span><strong>{{ attachmentDetails.mimeType || '未知' }}</strong></p><p><span>大小</span><strong>{{ formatBytes(attachmentDetails.fileSize) }}</strong></p><p><span>状态</span><strong>{{ attachmentDetails.status }}</strong></p><p><span>时间</span><strong>{{ formatTime(attachmentDetails.createdAt) }}</strong></p><p><span>路径</span><strong>{{ attachmentDetails.localPath }}</strong></p><p><span>SHA256</span><strong class="mono">{{ attachmentDetails.sha256 || '未知' }}</strong></p></div></a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
-        <footer class="composer" :style="{ height: `${composerHeight}px` }">
-          <div class="composer-tools"><button class="emoji-toggle" title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button><button title="打开好友共享盘" @click="openFriendSharedDrive"><icon-cloud /></button></div>
-          <div v-if="emojiOpen" class="emoji-panel" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
+        <footer class="composer" :class="{ 'composer-disabled': !activePeerCanSend }" :style="{ height: `${composerHeight}px` }">
+          <div class="composer-tools"><button class="emoji-toggle" title="表情" :disabled="!activePeerCanSend" @mousedown.prevent.stop="emojiOpen = !emojiOpen" @keydown.enter.space.prevent="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" :disabled="!activePeerCanSend" @mousedown.prevent.stop="pickFile" @keydown.enter.space.prevent="pickFile"><icon-folder /></button><button title="打开好友共享盘" :disabled="!activePeerCanSend" @mousedown.prevent.stop="openFriendSharedDrive" @keydown.enter.space.prevent="openFriendSharedDrive"><icon-cloud /></button></div>
+          <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
-          <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
-          <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
+          <textarea v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
+          <div class="composer-foot"><span>{{ activePeerCanSend ? '消息将通过局域网加密传输' : '当前不是好友，请重新申请好友' }}</span><a-button type="primary" :disabled="!activePeerCanSend || (!draft.trim() && !pendingImages.length)" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
       </main>
@@ -120,11 +120,20 @@
       </div>
     </section>
 
+    <section v-show="section === 'shared'" class="workspace shared-embedded-workspace">
+      <SharedDrivePage
+        :key="`${sharedEmbeddedMode}:${sharedEmbeddedDeviceId}`"
+        embedded-mode
+        :owner-mode="sharedEmbeddedMode === 'owner'"
+        :friend-device-id="sharedEmbeddedDeviceId"
+      />
+    </section>
+
     <section v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
         <div class="discovery-scroll">
-          <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-for="request in store.requests" v-show="groups.requests" :key="request.deviceId" class="request-row" :class="{ selected: selectedRequest?.deviceId === request.deviceId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
+          <div class="discover-group" @contextmenu.prevent><div class="group-title-row"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-if="store.requests.length" class="clear-requests" @click.stop="clearRequestHistory">清除历史</button></div><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
           <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已是好友 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
           <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.remark || peer.nickname }}</strong><span>已是好友 · {{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
         </div>
@@ -134,7 +143,7 @@
         <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><div class="tags"><a-tag>{{ requestDeviceLabel(selectedRequest) }}</a-tag><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status, selectedRequest.direction) }}</a-tag></div><p>{{ selectedRequest.message || (selectedRequest.direction === 'mutual' ? '双方都发起了好友申请' : '想和你成为好友') }}</p><div class="request-times"><span>申请时间<strong>{{ formatTime(selectedRequest.createdAt) }}</strong></span><span v-if="selectedRequest.acceptedAt">同意时间<strong>{{ formatTime(selectedRequest.acceptedAt) }}</strong></span></div><a-button v-if="selectedRequest.status === 'accepted' && isFriend(selectedRequest.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedRequest.deviceId)">打开聊天</a-button><div v-else-if="selectedRequest.status === 'pending'" class="detail-actions"><a-button type="primary" @click="acceptRequest">同意</a-button><a-button status="danger" @click="rejectRequest">拒绝</a-button></div></div>
       </main>
       <main class="detail-pane" v-else-if="selectedDiscovery" @click="clearDiscoverySelection">
-        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag color="green">{{ selectedDiscovery.relation === 'friend' ? '已是好友' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.relation === 'friend' ? '已是好友，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
+        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag :color="selectedDiscovery.friendshipState === 'removed' ? 'red' : selectedDiscovery.relation === 'friend' ? 'green' : 'arcoblue'">{{ selectedDiscovery.friendshipState === 'removed' ? '不是好友' : selectedDiscovery.relation === 'friend' ? '已是好友' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.friendshipState === 'removed' ? '好友关系已解除，请重新发送申请。' : selectedDiscovery.relation === 'friend' ? '已是好友，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
       </main>
       <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" :loading="scanning" :disabled="scanning" @click="refreshPeers">立即扫描</a-button></main>
       <div v-if="contactMenu.visible && contactMenu.peer" class="contact-context-menu" :style="contactMenuStyle" @click.stop @pointerdown.stop>
@@ -143,7 +152,7 @@
       </div>
       <div v-if="deleteConfirm.visible && deleteConfirm.kind === 'remove' && deleteConfirm.peer" class="delete-confirm-popover" :style="deleteConfirmStyle" @click.stop @pointerdown.stop>
         <strong>删除“{{ deleteConfirm.peer.remark || deleteConfirm.peer.nickname }}”</strong>
-        <p>将删除好友关系、本机聊天记录、接收附件和相关本地数据，删除后需要重新建立好友关系。确定删除吗？</p>
+        <p>将解除好友关系，但保留好友列表、聊天记录和本地附件。解除后需要重新建立好友关系。确定删除吗？</p>
         <div class="delete-confirm-actions"><button @click="closeDeleteConfirm">取消</button><button class="danger" @click="confirmPendingDelete">确认删除</button></div>
       </div>
     </section>
@@ -151,7 +160,7 @@
     <section v-show="section === 'settings'" class="settings-shell">
       <header class="settings-head"><div><h2>设置</h2><p>管理个人资料、网络和应用行为</p></div><div class="settings-tabs"><button :class="{ active: settingsTab === 'general' }" @click="settingsTab = 'general'">通用</button><button :class="{ active: settingsTab === 'network' }" @click="settingsTab = 'network'">网络</button><button :class="{ active: settingsTab === 'device' }" @click="settingsTab = 'device'">设备信息</button><button :class="{ active: settingsTab === 'about' }" @click="settingsTab = 'about'">关于</button></div></header>
       <div class="settings-panel">
-        <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><button class="avatar-upload" type="button" title="更换头像" @click="chooseAvatar"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><span class="avatar-camera"><icon-camera /></span></button><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @mousedown.prevent="saveProfile">保存</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px" @change="saveTheme"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 FlyQPro</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动选择接收、另存或拒绝</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><div class="path-actions"><a-button @click="chooseDirectory" :disabled="store.attachmentMigration.active">选择目录</a-button><a-button @click="resetAttachmentPath" :disabled="store.attachmentMigration.active || isDefaultPath" title="恢复为 FlyQPro 默认附件目录">重置</a-button></div></div></section></main>
+        <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><button class="avatar-upload" type="button" title="更换头像" @click="chooseAvatar"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><span class="avatar-camera"><icon-camera /></span></button><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" maxlength="32" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @mousedown.prevent="saveProfile">保存</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px" @change="saveTheme"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 FlyQPro</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动选择接收、另存或拒绝</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><div class="path-actions"><a-button @click="chooseDirectory" :disabled="store.attachmentMigration.active">选择目录</a-button><a-button @click="resetAttachmentPath" :disabled="store.attachmentMigration.active || isDefaultPath" title="恢复为 FlyQPro 默认附件目录">重置</a-button></div></div></section><section class="setting-card"><h3>共享盘</h3><div class="setting-line"><div><strong>共享盘多窗打开</strong><span>开启后使用独立窗口，关闭后嵌入当前应用窗口</span></div><a-switch v-model="editProfile.sharedDriveMultiWindow" @change="saveProfile(false)" /></div></section></main>
       <main class="settings-content" v-else-if="settingsTab === 'network'"><section class="setting-card network-card"><div class="network-summary"><div class="network-dot" :class="store.network.status" /><div><strong>{{ store.network.status === 'normal' ? '网络正常' : '网络需要检查' }}</strong><span>{{ store.network.localIps.join('、') || '尚未获取局域网地址' }}</span></div><a-button type="primary" @click="runDiagnostic">网络诊断</a-button></div><div class="diagnostic-list" v-if="diagnostic"><div v-for="item in diagnostic.items" :key="item.name" class="diagnostic-row"><span :class="['diagnostic-icon', item.status]">{{ item.status === 'ok' ? '✓' : '!' }}</span><div><strong>{{ item.name }}</strong><span>{{ item.detail }} · {{ item.status === 'ok' ? '正常' : item.advice }}</span></div></div></div></section><section class="setting-card"><h3>监听信息</h3><div class="setting-line"><div><strong>UDP 发现端口</strong><span>用于局域网设备发现</span></div><code>{{ store.network.discoveryPort }}</code></div><div class="setting-line"><div><strong>TCP 发现端口</strong><span>UDP 不可用时的设备发现</span></div><code>{{ store.network.discoveryPort }}</code></div><div class="setting-line"><div><strong>TCP/TLS 聊天端口</strong><span>用于好友连接和消息传输</span></div><code>{{ store.network.chatPort || '启动中' }}</code></div><div class="setting-line"><div><strong>设备状态</strong><span>{{ store.network.peerCount }} 台已发现，{{ store.network.onlineCount }} 台在线</span></div><a-button @click="refreshPeers">重新扫描</a-button></div></section></main>
         <main class="settings-content" v-else-if="settingsTab === 'device'"><section class="setting-card device-card"><div class="device-card-head"><div><span class="device-eyebrow">本机身份</span><h3>设备信息</h3><p>用于局域网发现与加密连接的本机凭据</p></div><span class="device-badge"><i />本机</span></div><div class="device-fields"><label><span class="device-field-label"><i class="device-field-icon">⌘</i>平台</span><strong>{{ deviceInfo?.platform || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">▣</i>操作系统</span><strong>{{ deviceInfo?.osVersion || '未知' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">◈</i>通讯协议</span><strong>{{ deviceInfo?.protocolName || 'dzhgo' }}/{{ deviceInfo?.protocolMajor || 2 }}.0</strong></label><label><span class="device-field-label"><i class="device-field-icon">ID</i>设备 ID</span><strong class="mono">{{ deviceInfo?.deviceId || '尚未生成' }}</strong></label><label><span class="device-field-label"><i class="device-field-icon">✓</i>证书指纹</span><strong class="mono">{{ deviceInfo?.certificateFingerprint || '尚未生成' }}</strong></label></div><div class="device-card-foot">设备身份信息仅保存在本机，用于验证局域网连接安全性。</div></section></main>
         <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2 class="about-chinese-name">飞秋Pro</h2><p class="about-english-name">FlyQPro</p><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>{{ appVersion || '未知' }}</strong></span><span>协议版本<strong>{{ deviceInfo?.protocolName || 'dzhgo' }}/{{ deviceInfo?.protocolMajor || 2 }}.0</strong></span><span>技术栈<strong>Go · Wails v3 · Vue 3 · TypeScript · Arco Design · SQLite</strong></span><span>技术支持<strong>广州大智汇信息科技有限公司</strong></span><span>数据存储<strong>本地 SQLite</strong></span><div class="about-link-row"><span>开源仓库</span><button type="button" class="repo-link" title="在浏览器中打开开源仓库" @click="openRepository">github.com/gzdzh-cn/FlyQPro <icon-export /></button></div></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
@@ -180,12 +189,17 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconCloud, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { Browser, Clipboard, System, Window } from '@wailsio/runtime'
-import { ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
+import { AppBadgeService, ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
+import SharedDrivePage from '../shared-drive/index.vue'
 import type { AttachmentDetails, FriendRequest, Message as ChatMessage, Peer } from '@/store/modules/chat/types'
 
 const store = useChatStore()
 const section = ref('friends')
+const sharedEmbeddedMode = ref<'owner' | 'friend'>('owner')
+const sharedEmbeddedDeviceId = ref('')
+const sharedReturnSection = ref('friends')
+const sharedReturnPeerId = ref('')
 const settingsTab = ref('general')
 const friendSearch = ref('')
 const draft = ref('')
@@ -242,6 +256,7 @@ const forwardTargetIds = ref<string[]>([])
 let resizeState: { kind: 'friends' | 'discover' | 'composer'; startX: number; startY: number; startValue: number } | undefined
 let notificationAudio: AudioContext | undefined
 let audioUnlocked = false
+let pendingNotificationTone = false
 let suppressScrollReadUntil = 0
 let scrollScheduleFrame = 0
 let scrollAnimationFrame = 0
@@ -250,6 +265,7 @@ let bottomSettleToken = 0
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
+const activePeerCanSend = computed(() => Boolean(activePeer.value && activePeer.value.relation === 'friend' && activePeer.value.friendshipState !== 'removed'))
 const orderedFriends = computed(() => [...store.friends].sort((left, right) => {
   const leftConversation = conversationForPeer(left.deviceId)
   const rightConversation = conversationForPeer(right.deviceId)
@@ -271,6 +287,7 @@ const filteredFriends = computed(() => {
   return orderedFriends.value.filter((peer) => `${peer.remark || ''} ${peer.nickname}`.toLowerCase().includes(keyword))
 })
 const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
+const appBadgeCount = computed(() => totalUnreadCount.value + store.pendingRequests.length)
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? store.transferProgress[message.attachmentId] : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
@@ -315,6 +332,7 @@ function unreadCount(deviceId: string) { return conversationForPeer(deviceId)?.u
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
 function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
 function requestDeviceLabel(request: FriendRequest) { const peer = store.peers.find((item) => item.deviceId === request.deviceId); if (!peer) return '设备信息同步中'; return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
+function peerDeviceLabel(peer: Peer) { return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
 function chatScrollKey(deviceId: string) { return `flyqpro.chatScroll.v2.${deviceId}` }
@@ -503,15 +521,34 @@ async function resetAvatar() { try { const theme = editProfile.theme; const prof
 async function refreshPeers() { if (scanning.value) return; scanning.value = true; try { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') } catch (error: any) { Message.error(error?.message || '扫描失败') } finally { scanning.value = false } }
 function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined; showPeerInfo.value = false; closeContactMenu(); closeDeleteConfirm() }
 function selectRequest(request: FriendRequest) {
-  if (selectedRequest.value?.deviceId === request.deviceId) {
+  if (selectedRequest.value?.requestId === request.requestId) {
     clearDiscoverySelection()
     return
   }
   selectedRequest.value = request
   selectedDiscovery.value = undefined
 }
-function isFriend(deviceId: string): boolean { return store.contacts.some((peer) => peer.deviceId === deviceId) }
-function openFriendChat(deviceId: string) {
+function clearRequestHistory() {
+  Modal.confirm({
+    title: '清除新的朋友',
+    content: '将清除本机保存的全部好友申请历史，好友关系和通讯录不会受到影响。确定继续吗？',
+    okText: '清除历史',
+    cancelText: '取消',
+    okButtonProps: { status: 'danger' },
+    onOk: async () => {
+      try {
+        await ChatService.ClearFriendRequestHistory()
+        store.requests = []
+        selectedRequest.value = undefined
+        Message.success('好友申请历史已清除')
+      } catch (error: any) {
+        Message.error(error?.message || '清除好友申请历史失败')
+      }
+    },
+  })
+}
+function isFriend(deviceId: string): boolean { return store.contacts.some((peer) => peer.deviceId === deviceId && peer.relation === 'friend' && peer.friendshipState !== 'removed') }
+async function openFriendChat(deviceId: string) {
   const peer = store.contacts.find((item) => item.deviceId === deviceId)
   if (!peer) {
     Message.warning('好友信息尚未同步，请稍后重试')
@@ -522,6 +559,13 @@ function openFriendChat(deviceId: string) {
   selectedRequest.value = undefined
   selectedDiscovery.value = undefined
   section.value = 'friends'
+  if (peer.friendshipState === 'removed') {
+    Message.warning('该设备已不是好友，请先重新发送好友申请')
+    return
+  }
+  if (peer.visibleInFriends === false) {
+    try { await ChatService.RestoreHiddenFriend(deviceId); store.clearHiddenFriend(deviceId); store.peers = await ChatService.ListPeers() } catch (error: any) { Message.error(error?.message || '恢复好友显示失败'); return }
+  }
   void loadConversation(peer, true, false, true)
 }
 function selectDiscovery(peer: Peer) {
@@ -536,8 +580,8 @@ function selectContact(peer: Peer) {
   selectedRequest.value = undefined
   selectedDiscovery.value = peer
 }
-async function addPeer() { if (!selectedDiscovery.value || isFriend(selectedDiscovery.value.deviceId)) return; try { const request = await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); store.requests = [request, ...store.requests.filter((item) => item.deviceId !== request.deviceId)]; Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
-async function acceptRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
+async function addPeer() { if (!selectedDiscovery.value || isFriend(selectedDiscovery.value.deviceId)) return; try { const request = await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); store.requests = [request, ...store.requests.filter((item) => item.requestId !== request.requestId && item.deviceId !== request.deviceId)]; Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
+async function acceptRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; const deviceId = selectedRequest.value.deviceId; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); store.clearHiddenFriend(deviceId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
 async function rejectRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
 async function appendSentMessage(message: any) {
   const isNewActiveMessage = conversationVisible.value && message?.conversationId === `conv-${activePeer.value?.deviceId}` && !activeMessages.value.some((item) => item.messageId === message.messageId)
@@ -545,7 +589,7 @@ async function appendSentMessage(message: any) {
   if (isNewActiveMessage) scheduleScrollToBottom(false, 'animated')
   await nextTick()
 }
-async function sendMessage() { if (!activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessageWithMetadata(activePeer.value.deviceId, draft.value.trim(), quoteMessageId.value, quoteContent.value, ''); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; quoteMessageId.value = ''; quoteContent.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
+async function sendMessage() { if (!activePeerCanSend.value || !activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessageWithMetadata(activePeer.value.deviceId, draft.value.trim(), quoteMessageId.value, quoteContent.value, ''); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; quoteMessageId.value = ''; quoteContent.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
@@ -585,25 +629,44 @@ function unlockNotificationAudio() {
     notificationAudio = notificationAudio || new AudioContextClass()
     void notificationAudio.resume()
     audioUnlocked = true
+    if (pendingNotificationTone) {
+      pendingNotificationTone = false
+      playNotificationTone()
+    }
   } catch { /* browser audio may be unavailable */ }
 }
 function playNotificationTone() {
-  if (!audioUnlocked || !notificationAudio) return
+  if (!audioUnlocked || !notificationAudio) {
+    pendingNotificationTone = true
+    return
+  }
   try {
     const context = notificationAudio
-    const oscillator = context.createOscillator()
-    const gain = context.createGain()
-    oscillator.type = 'sine'
-    oscillator.frequency.value = 760
-    gain.gain.setValueAtTime(.0001, context.currentTime)
-    gain.gain.exponentialRampToValueAtTime(.08, context.currentTime + .015)
-    gain.gain.exponentialRampToValueAtTime(.0001, context.currentTime + .16)
-    oscillator.connect(gain).connect(context.destination)
-    oscillator.start()
-    oscillator.stop(context.currentTime + .17)
+    const play = () => {
+      const now = context.currentTime
+      const master = context.createGain()
+      master.gain.setValueAtTime(.72, now)
+      master.connect(context.destination)
+      const notes = [{ frequency: 880, start: 0, duration: .18 }, { frequency: 1175, start: .11, duration: .21 }]
+      notes.forEach(({ frequency, start, duration }) => {
+        const oscillator = context.createOscillator()
+        const gain = context.createGain()
+        oscillator.type = 'sine'
+        oscillator.frequency.value = frequency
+        const begins = now + start
+        gain.gain.setValueAtTime(.0001, begins)
+        gain.gain.exponentialRampToValueAtTime(.18, begins + .012)
+        gain.gain.exponentialRampToValueAtTime(.0001, begins + duration)
+        oscillator.connect(gain).connect(master)
+        oscillator.start(begins)
+        oscillator.stop(begins + duration + .01)
+      })
+    }
+    if (context.state === 'suspended') void context.resume().then(play)
+    else play()
   } catch { /* browser audio may be unavailable */ }
 }
-async function pickFile() { pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); notifyAttachmentResult(message) } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
+async function pickFile() { if (!activePeerCanSend.value || !activePeer.value) return; pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); notifyAttachmentResult(message) } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
 async function retryMessage(message: any) {
   if (!message?.messageId || retryingMessages[message.messageId]) return
   retryingMessages[message.messageId] = true
@@ -826,18 +889,32 @@ async function confirmPendingDelete() {
   try {
     if (kind === 'hide') await ChatService.HideFriendAndClearLocalData(peer.deviceId)
     else await ChatService.RemoveFriendAndClearLocalData(peer.deviceId)
-    for (const message of store.messages[`conv-${peer.deviceId}`] || []) {
-      delete messagePreviews[message.messageId]
-      if (message.attachmentId) delete store.transferProgress[message.attachmentId]
+    if (kind === 'hide') {
+      for (const message of store.messages[`conv-${peer.deviceId}`] || []) {
+        delete messagePreviews[message.messageId]
+        if (message.attachmentId) delete store.transferProgress[message.attachmentId]
+      }
+      delete store.messages[`conv-${peer.deviceId}`]
     }
-    delete store.messages[`conv-${peer.deviceId}`]
-    if (store.activePeerId === peer.deviceId) {
+    if (store.activePeerId === peer.deviceId && kind === 'hide') {
       store.selectPeer('')
       showPeerInfo.value = false
     }
+    if (kind === 'hide') {
+      store.hideFriendLocally(peer.deviceId)
+      // Hide the row immediately.  The backend remains authoritative, but
+      // an in-flight peer/status event must not leave the just-hidden row
+      // visible until the subsequent refresh completes.
+      store.peers = store.peers.map((item) => item.deviceId === peer.deviceId ? { ...item, visibleInFriends: false } : item)
+    }
     await reloadPeerData()
+    if (kind === 'hide') {
+      // Keep the local list invariant even if a stale peer-updated event was
+      // queued while the conversation records were being cleared.
+      store.peers = store.peers.map((item) => item.deviceId === peer.deviceId ? { ...item, visibleInFriends: false } : item)
+    }
     if (kind === 'remove') store.requests = await ChatService.ListFriendRequests()
-    Message.success(kind === 'hide' ? '已隐藏好友并清除本机聊天记录' : '已删除好友关系及本机数据')
+    Message.success(kind === 'hide' ? '已隐藏好友并清除本机聊天记录' : '已解除好友关系，聊天记录已保留')
   } catch (error: any) {
     Message.error(error?.message || (kind === 'hide' ? '删除失败' : '删除好友失败'))
   }
@@ -938,18 +1015,41 @@ function stopResize() { if (!resizeState) return; localStorage.setItem('flyqpro.
 async function savePeerRemark() { if (!activePeer.value || peerRemark.value === activePeer.value.remark) return; try { await ChatService.SetPeerRemark(activePeer.value.deviceId, peerRemark.value.trim()); const peer = store.peers.find((item) => item.deviceId === activePeer.value?.deviceId); if (peer) peer.remark = peerRemark.value.trim() } catch (error: any) { Message.error(error?.message || '备注保存失败') } }
 async function runDiagnostic() { diagnostic.value = await ChatService.RunNetworkDiagnostic() }
 function openRepository() { void Browser.OpenURL('https://github.com/gzdzh-cn/FlyQPro') }
+function openEmbeddedShared(mode: 'owner' | 'friend', peerId = '') {
+  saveActiveScrollPosition()
+  sharedEmbeddedMode.value = mode
+  sharedEmbeddedDeviceId.value = peerId
+  sharedReturnSection.value = section.value === 'shared' ? sharedReturnSection.value : 'friends'
+  sharedReturnPeerId.value = peerId
+  section.value = 'shared'
+}
+function leaveEmbeddedShared() {
+  const returnSection = sharedReturnSection.value || 'friends'
+  const returnPeer = store.friends.find((peer) => peer.deviceId === sharedReturnPeerId.value)
+  section.value = returnSection
+  if (returnSection === 'friends' && returnPeer) void loadConversation(returnPeer, false, true, true)
+}
 async function openSharedDrive() {
-  try { await SharedDriveWindowService.OpenSharedDrive() } catch (error: any) { Message.error(error?.message || '打开共享窗口失败') }
+  try {
+    if (store.profile.sharedDriveMultiWindow !== false) await SharedDriveWindowService.OpenSharedDrive()
+    else openEmbeddedShared('owner')
+  } catch (error: any) { Message.error(error?.message || '打开共享窗口失败') }
 }
 async function openFriendSharedDrive() {
   if (!activePeer.value) return
-  try { await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId) } catch (error: any) { Message.error(error?.message || '打开好友共享盘失败') }
+  if (!activePeerCanSend.value) { Message.warning('当前不是好友，请重新申请好友'); return }
+  if (!activePeer.value.online) { Message.warning('好友不在线，暂不支持打开共享盘'); return }
+  try {
+    if (store.profile.sharedDriveMultiWindow !== false) await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId)
+    else openEmbeddedShared('friend', activePeer.value.deviceId)
+  } catch (error: any) { Message.error(error?.message || '打开好友共享盘失败') }
 }
 function minimiseWindow() { Window.Minimise() }
 async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
 function closeWindow() { Window.Close() }
 watch(() => store.profile, (value) => Object.assign(editProfile, value), { deep: true })
 watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
+watch(activePeerCanSend, (canSend) => { if (!canSend) emojiOpen.value = false })
 watch(activeMessageLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) }, { immediate: true })
 watch(activeTransferLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) })
 watch(() => store.lastMessageEvent, (message) => {
@@ -968,7 +1068,13 @@ watch(section, (value, previous) => {
   if (value !== 'friends') closePeerInfo()
 })
 watch(() => editProfile.theme, (value) => applyTheme(value))
-watch(() => store.peers, () => { if (selectedDiscovery.value && !store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId) && !store.contacts.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined }, { deep: true })
+watch(appBadgeCount, (count) => { void AppBadgeService.SetCount(count).catch(() => undefined) }, { immediate: true })
+watch(() => store.peers, () => {
+  if (!selectedDiscovery.value) return
+  const current = store.peers.find((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)
+  if (current) selectedDiscovery.value = current
+  else if (!store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId) && !store.contacts.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined
+}, { deep: true })
 onMounted(async () => {
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
@@ -1134,6 +1240,18 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .chat-app .message-line.mine .message-bubble { background: var(--message-outgoing); color: var(--message-outgoing-text); }
 .chat-app .composer textarea { background: transparent; color: var(--text); }
 .chat-app .composer textarea::placeholder { color: var(--muted); }
+.chat-app .composer.composer-disabled { background: var(--surface-2); }
+.chat-app .composer textarea:disabled {
+  background: var(--surface-3);
+  color: var(--muted);
+  cursor: not-allowed;
+  border-radius: 8px;
+  padding-left: 10px;
+  padding-right: 10px;
+  opacity: 1;
+}
+.chat-app .composer.composer-disabled .composer-tools button { color: var(--muted); opacity: .45; cursor: not-allowed; }
+.chat-app .composer.composer-disabled .composer-foot { color: var(--muted); }
 .chat-app .pane-title span,
 .chat-app .peer-copy span,
 .chat-app .request-row span,
@@ -1559,6 +1677,10 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .group-title { align-items: center; }
 .group-title > span { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; line-height: 20px; }
 .group-title > span svg { width: 14px; height: 14px; flex: 0 0 14px; }
+.group-title-row { display: flex; align-items: center; }
+.group-title-row .group-title { flex: 1; min-width: 0; }
+.clear-requests { flex: 0 0 auto; margin: 8px 16px 0 0; border: 0; background: transparent; color: #86909c; font-size: 12px; cursor: pointer; padding: 3px 4px; }
+.clear-requests:hover { color: #165dff; }
 
 /* Chat density and interaction polish. */
 .conversation-head { height: 52px; flex-basis: 52px; padding: 0 18px; }
@@ -1584,6 +1706,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .avatar-button:hover { transform: translateY(-1px); filter: brightness(1.06); }
 .peer-row { position: relative; padding-right: 42px; }
 .peer-copy { flex: 1; }
+.peer-device { color: #a0a8b3 !important; font-size: 11px !important; }
 .unread-badge { position: absolute; right: 10px; top: 50%; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 10px; transform: translateY(-50%); background: #f53f3f; color: #fff !important; font-size: 10px !important; font-weight: 700 !important; line-height: 18px; text-align: center; }
 .peer-row { gap: 10px; padding-right: 20px; }
 .peer-row > .avatar { width: 38px; height: 38px; border-radius: 12px; font-size: 14px; }
@@ -1605,7 +1728,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .composer-foot { min-height: 28px; flex: 0 0 28px; gap: 12px; }
 .composer-foot > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-foot :deep(.arco-btn) { flex: 0 0 auto; min-width: 72px; }
-.emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; box-sizing: border-box; display: grid; grid-template-columns: repeat(8, 1fr); align-content: start; gap: 4px; width: 360px; height: 272px; max-width: calc(100vw - 36px); padding: 10px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); }
+.emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; box-sizing: border-box; display: grid; grid-template-columns: repeat(8, 1fr); align-content: start; gap: 4px; width: 360px; height: 272px; max-width: calc(100vw - 36px); padding: 10px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(18px); will-change: transform, opacity; transition: opacity .15s cubic-bezier(.22, .8, .28, 1), transform .15s cubic-bezier(.22, .8, .28, 1), visibility 0s linear .15s; }
+.emoji-panel.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); transition-delay: 0s; }
 .emoji-panel button { display: flex; width: 36px; height: 36px; align-items: center; justify-content: center; border-radius: 7px; font-size: 22px; line-height: 1; }
 .emoji-panel button:hover { background: var(--hover); }
 .pending-images { flex: 0 0 auto; max-height: 50px; overflow-x: auto; flex-wrap: nowrap; padding: 3px 0; }

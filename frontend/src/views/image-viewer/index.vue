@@ -7,8 +7,8 @@
         <button type="button" class="mac-traffic-light mac-traffic-maximise" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"></button>
       </div>
       <div v-if="!isPdfPreview" class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
-        <button type="button" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @click="moveImage(-1)"><icon-left /></button>
-        <button type="button" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @click="moveImage(1)"><icon-right /></button>
+        <button type="button" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @click="moveImage(-1)"><icon-left /></button>
+        <button type="button" aria-label="下一张" title="下一张" :disabled="!canMoveNext || loading" @click="moveImage(1)"><icon-right /></button>
         <button type="button" aria-label="缩小" title="缩小" :disabled="loading || scale <= .5" @click="zoomImage(-.25)"><icon-zoom-out /></button>
         <button type="button" aria-label="放大" title="放大" :disabled="loading || scale >= 6" @click="zoomImage(.25)"><icon-zoom-in /></button>
         <button type="button" aria-label="向左旋转90度" title="向左旋转90°" :disabled="loading || !source" @click="rotateImageLeft"><icon-rotate-left /></button>
@@ -21,43 +21,59 @@
     </header>
 
     <section class="image-viewer-canvas" @wheel.prevent.stop="handleWheel" @dblclick.prevent.stop="toggleZoom" @pointerdown.stop="handlePointerDown" @pointermove.stop="handlePointerMove" @pointerup.stop="handlePointerUp" @pointercancel.stop="handlePointerUp">
-      <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-prev">
-        <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
+      <div v-if="galleryLength > 1" class="image-nav-side image-nav-side-prev">
+        <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
-      <iframe v-if="source && isPdfPreview" class="pdf-preview" :src="source" :title="imageViewerName" />
-      <img v-else-if="source" :src="source" :alt="imageViewerName" :style="imageTransform" draggable="false" />
-      <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-next">
-        <button type="button" class="image-nav-arrow" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @pointerdown.stop @click.stop="moveImage(1)"><icon-right /></button>
+      <iframe v-if="source && isPdfPreview" :key="viewerContentKey" class="pdf-preview" :src="source" :title="imageViewerName" />
+      <template v-else>
+        <img v-if="thumbnailSource" class="preview-image preview-thumbnail" :class="{ 'preview-image-faded': originalReady }" :src="thumbnailSource" :alt="imageViewerName" :style="imageTransform" draggable="false" />
+        <img v-if="originalSource" class="preview-image preview-original" :class="{ 'preview-image-visible': originalReady }" :src="originalSource" :alt="imageViewerName" :style="imageTransform" draggable="false" @load="handleOriginalLoad" @error="handleOriginalError" />
+      </template>
+      <div v-if="galleryLength > 1" class="image-nav-side image-nav-side-next">
+        <button type="button" class="image-nav-arrow" aria-label="下一张" title="下一张" :disabled="!canMoveNext || loading" @pointerdown.stop @click.stop="moveImage(1)"><icon-right /></button>
       </div>
       <div v-if="loading" class="image-viewer-state"><icon-loading /><span>正在读取图片</span></div>
-      <div v-else-if="error" class="image-viewer-state error"><icon-close-circle /><strong>{{ error }}</strong></div>
-      <div v-else-if="!imageMessages.length" class="image-viewer-state"><icon-close-circle /><strong>没有可预览的图片</strong></div>
+      <div v-else-if="thumbnailPending" class="image-viewer-state"><icon-loading /><span>正在生成缩略图</span></div>
+      <div v-else-if="error && !thumbnailSource" class="image-viewer-state error"><icon-close-circle /><strong>{{ error }}</strong></div>
+      <div v-else-if="originalLoading" class="image-viewer-quality"><icon-loading />正在加载高清原图</div>
+      <div v-if="error && thumbnailSource" class="image-viewer-quality error">高清原图暂时无法读取，当前显示缩略图</div>
+      <div v-else-if="!isSharedPreview && !imageMessages.length" class="image-viewer-state"><icon-close-circle /><strong>没有可预览的图片</strong></div>
     </section>
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Events, Window } from '@wailsio/runtime'
-import { ChatService } from '/#/flyqpro/internal/service'
+import { ChatService, PreviewStreamService } from '/#/flyqpro/internal/service'
 import { IconClose, IconCloseCircle, IconFullscreen, IconLeft, IconLoading, IconMinus, IconRight, IconRotateLeft, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
 
 const route = useRoute()
 const conversationId = computed(() => String(route.query.conversationId || ''))
 const initialMessageId = computed(() => String(route.query.messageId || ''))
 const previewSource = computed(() => String(route.query.source || ''))
+const sharedPreviewType = computed(() => String(route.query.previewType || '').toLowerCase())
 const sharedDeviceId = computed(() => String(route.query.deviceId || '').trim())
 const sharedRelativePath = computed(() => String(route.query.relativePath || ''))
 const isSharedPreview = computed(() => previewSource.value === 'shared-owner' || previewSource.value === 'shared-friend')
 const messages = ref<any[]>([])
+type SharedPreviewEntry = { name: string; relativePath: string; mimeType?: string; isDirectory?: boolean }
+const sharedEntries = ref<SharedPreviewEntry[]>([])
+const sharedCurrentPath = ref(sharedRelativePath.value)
 const currentIndex = ref(0)
 const currentMessageId = ref('')
 const source = ref('')
+const thumbnailSource = ref('')
+const originalSource = ref('')
+const thumbnailReady = ref(false)
+const originalLoading = ref(false)
+const originalReady = ref(false)
 const sourceType = ref<'thumbnail' | 'original'>('thumbnail')
 const sharedName = ref('')
 const sharedIsPdf = ref(false)
 const loading = ref(false)
+const thumbnailPending = ref(false)
 const error = ref('')
 const scale = ref(1)
 const rotation = ref(0)
@@ -68,11 +84,17 @@ const isWindows = /Win32|Windows/i.test(`${navigator.platform || ''} ${navigator
 const cache = new Map<string, { source: string; type: 'thumbnail' | 'original' }>()
 const imageMessages = computed(() => messages.value.filter((message) => message.kind === 'file' && message.attachmentId && isImageMessage(message)))
 const currentMessage = computed(() => imageMessages.value[currentIndex.value])
-const imageViewerName = computed(() => isSharedPreview.value ? (sharedName.value || '共享文件预览') : (currentMessage.value?.attachmentName || '图片预览'))
+const sharedCurrentEntry = computed(() => sharedEntries.value[currentIndex.value])
+const galleryLength = computed(() => isSharedPreview.value ? sharedEntries.value.length : imageMessages.value.length)
+const canMovePrevious = computed(() => currentIndex.value > 0)
+const canMoveNext = computed(() => currentIndex.value < galleryLength.value - 1)
+const imageViewerName = computed(() => isSharedPreview.value ? (sharedCurrentEntry.value?.name || sharedName.value || '共享文件预览') : (currentMessage.value?.attachmentName || '图片预览'))
 const isPdfPreview = computed(() => sharedIsPdf.value)
+const viewerContentKey = computed(() => `${isSharedPreview.value ? sharedCurrentPath.value : currentMessage.value?.messageId || ''}:${isPdfPreview.value ? source.value : ''}`)
 const imageTransform = computed(() => ({
   transform: `translate(${offset.value.x}px, ${offset.value.y}px) rotate(${rotation.value}deg) scale(${scale.value})`,
   cursor: scale.value > 1 ? 'grab' : 'zoom-in',
+  transition: gestureActive.value ? 'none' : 'transform .08s linear',
 }))
 
 let loadToken = 0
@@ -82,6 +104,12 @@ let wheelSwitchAt = 0
 let reloadTimer = 0
 let zoomFrame = 0
 let zoomTarget = 1
+let pinchFrame = 0
+let pinchDelta = 0
+let dragFrame = 0
+let pendingDrag = { x: 0, y: 0 }
+const gestureActive = ref(false)
+const switchingImage = ref(false)
 type PointerPosition = { x: number; y: number }
 let pointers = new Map<number, PointerPosition>()
 let pointer: { id: number; x: number; y: number; offsetX: number; offsetY: number } | undefined
@@ -153,42 +181,99 @@ function zoomImage(delta: number) {
   setZoomTarget(zoomTarget + delta)
 }
 function zoomByPinch(delta: number) { setZoomTarget(zoomTarget * Math.exp(-delta * .002)) }
+function queuePinchZoom(delta: number) {
+  pinchDelta += delta
+  if (pinchFrame) return
+  pinchFrame = window.requestAnimationFrame(() => {
+    const next = clampScale(zoomTarget * Math.exp(-pinchDelta * .002))
+    pinchDelta = 0
+    pinchFrame = 0
+    zoomTarget = next
+    scale.value = next
+    if (next <= 1) offset.value = { x: 0, y: 0 }
+  })
+}
+function queueThreeFingerDrag(deltaX: number, deltaY: number) {
+  pendingDrag.x += deltaX
+  pendingDrag.y += deltaY
+  if (dragFrame) return
+  dragFrame = window.requestAnimationFrame(() => {
+    offset.value = { x: offset.value.x + pendingDrag.x, y: offset.value.y + pendingDrag.y }
+    pendingDrag = { x: 0, y: 0 }
+    dragFrame = 0
+  })
+}
+function flushThreeFingerDrag() {
+  if (dragFrame) window.cancelAnimationFrame(dragFrame)
+  dragFrame = 0
+  if (!pendingDrag.x && !pendingDrag.y) return
+  offset.value = { x: offset.value.x + pendingDrag.x, y: offset.value.y + pendingDrag.y }
+  pendingDrag = { x: 0, y: 0 }
+}
 function toggleZoom() { if (scale.value > 1) setZoomTarget(1); else setZoomTarget(2) }
 function rotateImageLeft() { rotation.value = (rotation.value - 90) % 360 }
 
-function readImage(sourceValue: string) {
-  return new Promise<boolean>((resolve) => {
-    const image = new Image()
-    image.onload = () => resolve(true)
-    image.onerror = () => resolve(false)
-    image.src = sourceValue
-  })
+function handleOriginalLoad() {
+  originalReady.value = true
+  originalLoading.value = false
+  sourceType.value = 'original'
+  source.value = originalSource.value
 }
 
-async function sourceFor(message: any, token: number) {
-  const original = completed(message)
-  const type: 'thumbnail' | 'original' = original ? 'original' : 'thumbnail'
-  const cacheKey = `${message.attachmentId}:${type}`
+function handleOriginalError() {
+  originalReady.value = false
+  originalLoading.value = false
+  if (thumbnailSource.value) error.value = '高清原图暂时无法读取，当前显示缩略图'
+  else error.value = '本地原图不存在'
+}
+
+async function thumbnailFor(message: any, token: number) {
+  const cacheKey = `${message.attachmentId}:thumbnail`
   const cached = cache.get(cacheKey)
   if (cached) return cached.source
-  let sourceValue = ''
-  if (original) {
-    try { sourceValue = await ChatService.GetAttachmentImage(message.attachmentId) } catch { sourceValue = '' }
-  } else {
-    sourceValue = thumbnailDataURL(message)
-    if (!sourceValue) {
-      try { sourceValue = await ChatService.GetAttachmentThumbnail(message.attachmentId) } catch { sourceValue = '' }
-    }
+  let sourceValue = thumbnailDataURL(message)
+  if (!sourceValue) {
+    try { sourceValue = await ChatService.GetAttachmentThumbnail(message.attachmentId) } catch { sourceValue = '' }
   }
   if (token !== loadToken) return ''
-  if (sourceValue) cache.set(cacheKey, { source: sourceValue, type })
+  if (sourceValue) cache.set(cacheKey, { source: sourceValue, type: 'thumbnail' })
   return sourceValue
 }
 
-async function sharedSourceFor() {
-  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryPreview(sharedRelativePath.value)
-  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryPreview(sharedDeviceId.value, sharedRelativePath.value)
+async function originalFor(message: any, token: number) {
+  const cacheKey = `${message.attachmentId}:original`
+  const cached = cache.get(cacheKey)
+  if (cached) return cached.source
+  let sourceValue = ''
+  try { sourceValue = await PreviewStreamService.CreateAttachmentPreviewURL(message.attachmentId) } catch { sourceValue = '' }
+  if (token !== loadToken) return ''
+  if (sourceValue) cache.set(cacheKey, { source: sourceValue, type: 'original' })
+  return sourceValue
+}
+
+async function sharedSourceFor(relativePath: string) {
+  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryPreview(relativePath)
+  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryPreview(sharedDeviceId.value, relativePath)
   throw new Error('共享预览参数无效')
+}
+
+async function sharedThumbnailFor(relativePath: string) {
+  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryThumbnail(relativePath)
+  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryThumbnail(sharedDeviceId.value, relativePath)
+  throw new Error('共享预览参数无效')
+}
+
+async function sharedOriginalFor(relativePath: string) {
+  return PreviewStreamService.CreateSharedPreviewURL(previewSource.value, sharedDeviceId.value, relativePath)
+}
+
+function isImageSharedEntry(entry: SharedPreviewEntry) {
+  return !entry.isDirectory && (String(entry.mimeType || '').toLowerCase().startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name))
+}
+function parentSharedPath(path: string) {
+  const parts = String(path || '').split('/').filter(Boolean)
+  parts.pop()
+  return parts.join('/')
 }
 
 function pruneCache() {
@@ -199,60 +284,167 @@ function pruneCache() {
 async function loadCurrent() {
   if (isSharedPreview.value) {
     const token = ++loadToken
+    const entry = sharedCurrentEntry.value
+    const activePath = entry?.relativePath || sharedCurrentPath.value || sharedRelativePath.value
     loading.value = true
+    thumbnailPending.value = false
     error.value = ''
     source.value = ''
-    sharedName.value = sharedRelativePath.value.split('/').filter(Boolean).pop() || '共享文件预览'
-    sharedIsPdf.value = /\.pdf$/i.test(sharedName.value)
+    thumbnailSource.value = ''
+    originalSource.value = ''
+    thumbnailReady.value = false
+    originalLoading.value = false
+    originalReady.value = false
+    sharedCurrentPath.value = activePath
+    sharedName.value = entry?.name || activePath.split('/').filter(Boolean).pop() || '共享文件预览'
+    sharedIsPdf.value = sharedPreviewType.value === 'pdf' || /\.pdf$/i.test(sharedName.value) || String(entry?.mimeType || '').toLowerCase() === 'application/pdf'
     resetTransform()
-    try {
-      const sourceValue = await sharedSourceFor()
-      if (token !== loadToken) return
-      sharedIsPdf.value = sharedIsPdf.value || sourceValue.toLowerCase().startsWith('data:application/pdf')
-      if (!sharedIsPdf.value && !(await readImage(sourceValue))) throw new Error('图片预览无法打开')
-      source.value = sourceValue
-      loading.value = false
-      void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
-    } catch (loadError: any) {
-      if (token !== loadToken) return
-      loading.value = false
-      error.value = loadError?.message || '共享文件预览失败'
+    if (sharedIsPdf.value) {
+      try {
+        const sourceValue = await sharedSourceFor(activePath)
+        if (token !== loadToken) return
+        source.value = sourceValue
+        loading.value = false
+        void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
+      } catch (loadError: any) {
+        if (token !== loadToken) return
+        loading.value = false
+        error.value = loadError?.message || '共享文件预览失败'
+      }
+      return
     }
+    // The viewer opens immediately. If the shared folder has no cached
+    // thumbnail yet, keep the window responsive while the thumbnail service
+    // generates it in the background.
+    loading.value = false
+    thumbnailPending.value = true
+    void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
+    void (async () => {
+      let thumbnail = ''
+      for (let attempt = 0; attempt < 24 && !thumbnail; attempt++) {
+        try { thumbnail = await sharedThumbnailFor(activePath) } catch { /* placeholder remains */ }
+        if (thumbnail || token !== loadToken) break
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(750, 220 + attempt * 25)))
+      }
+      if (token !== loadToken) return
+      if (thumbnail) {
+        thumbnailSource.value = thumbnail
+        thumbnailReady.value = true
+        source.value = thumbnail
+      }
+      thumbnailPending.value = false
+      originalLoading.value = true
+      try {
+        const original = await sharedOriginalFor(activePath)
+        if (token !== loadToken) return
+        if (original) originalSource.value = original
+        else if (!thumbnail) error.value = '图片原图暂时无法读取'
+      } catch {
+        if (token === loadToken && !thumbnail) error.value = '共享图片暂时无法读取'
+      } finally {
+        if (token === loadToken) originalLoading.value = false
+      }
+    })()
     return
   }
   const message = currentMessage.value
   const token = ++loadToken
   loading.value = true
+  thumbnailPending.value = false
   error.value = ''
   source.value = ''
-  sourceType.value = completed(message) ? 'original' : 'thumbnail'
+  thumbnailSource.value = ''
+  originalSource.value = ''
+  thumbnailReady.value = false
+  originalLoading.value = false
+  originalReady.value = false
+  sourceType.value = 'thumbnail'
   if (!message?.attachmentId) {
     loading.value = false
     error.value = '图片附件不存在'
     return
   }
-  const sourceValue = await sourceFor(message, token)
-  if (token !== loadToken) return
-  if (!sourceValue) {
+  // A message already contains its thumbnail in the common case. Put it on
+  // screen synchronously and fetch missing preview data without blocking the
+  // first paint.
+  const immediateThumbnail = thumbnailDataURL(message)
+  if (immediateThumbnail) {
+    thumbnailSource.value = immediateThumbnail
+    thumbnailReady.value = true
+    source.value = immediateThumbnail
     loading.value = false
-    error.value = completed(message) ? '本地原图不存在' : '图片预览暂时无法读取'
-    return
+  } else {
+    loading.value = false
+    thumbnailPending.value = true
   }
-  const loaded = await readImage(sourceValue)
-  if (token !== loadToken) return
-  loading.value = false
-  if (!loaded) error.value = completed(message) ? '本地原图无法打开' : '图片预览无法打开'
-  else source.value = sourceValue
   void Window.SetTitle(`图片预览 - ${imageViewerName.value}`).catch(() => undefined)
+  void (async () => {
+    let thumbnail = immediateThumbnail
+    if (!thumbnail) {
+      try { thumbnail = await thumbnailFor(message, token) } catch { /* keep placeholder */ }
+      if (token !== loadToken) return
+      if (thumbnail) {
+        thumbnailSource.value = thumbnail
+        thumbnailReady.value = true
+        source.value = thumbnail
+      }
+      thumbnailPending.value = false
+    }
+    if (!completed(message)) {
+      if (token === loadToken && !thumbnail) error.value = '图片缩略图暂时无法读取'
+      return
+    }
+    if (token !== loadToken) return
+    originalLoading.value = true
+    try {
+      const original = await originalFor(message, token)
+      if (token !== loadToken) return
+      if (original) originalSource.value = original
+      else if (!thumbnail) error.value = '本地原图不存在'
+    } catch {
+      if (token === loadToken && !thumbnail) error.value = '本地原图不存在'
+    } finally {
+      if (token === loadToken) originalLoading.value = false
+    }
+  })()
   pruneCache()
 }
 
 async function loadMessages() {
   if (isSharedPreview.value) {
-    messages.value = []
-    currentIndex.value = 0
+    const requestedPath = sharedRelativePath.value
+    sharedCurrentPath.value = requestedPath
+    sharedName.value = requestedPath.split('/').filter(Boolean).pop() || '共享文件预览'
     currentMessageId.value = ''
-    await loadCurrent()
+    const initialIsPDF = sharedPreviewType.value === 'pdf' || /\.pdf$/i.test(sharedName.value)
+    if (initialIsPDF) {
+      sharedEntries.value = []
+      currentIndex.value = 0
+      await loadCurrent()
+      return
+    }
+    // Do not wait for the containing directory to be listed before opening
+    // the selected image.  The selected path is enough for the thumbnail and
+    // preview services; the directory request only fills the adjacent-image
+    // gallery in the background.
+    sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' }]
+    currentIndex.value = 0
+    void loadCurrent()
+    try {
+      const parentPath = parentSharedPath(requestedPath)
+      const page = previewSource.value === 'shared-owner'
+        ? await ChatService.ListSharedEntriesPage(parentPath, 0, 100)
+        : await ChatService.ListFriendSharedEntriesPage(sharedDeviceId.value, parentPath, 0, 100)
+      const images = (page.entries || []).filter((entry: SharedPreviewEntry) => isImageSharedEntry(entry))
+      if (!images.some((entry: SharedPreviewEntry) => entry.relativePath === requestedPath)) {
+        images.push({ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' })
+      }
+      sharedEntries.value = images
+      currentIndex.value = Math.max(0, images.findIndex((entry: SharedPreviewEntry) => entry.relativePath === requestedPath))
+    } catch {
+      sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' }]
+      currentIndex.value = 0
+    }
     return
   }
   if (!conversationId.value) {
@@ -263,14 +455,33 @@ async function loadMessages() {
     return
   }
   try {
+    // Bootstrap the selected record first. A large conversation history can
+    // otherwise delay the first thumbnail even though the user already chose
+    // the exact image to open.
+    let bootstrapped = false
+    if (initialMessageId.value) {
+      try {
+        const selected = await ChatService.GetMessage(initialMessageId.value)
+        if (selected?.conversationId === conversationId.value && selected?.attachmentId) {
+          messages.value = [selected]
+          currentMessageId.value = selected.messageId
+          currentIndex.value = 0
+          bootstrapped = true
+          void loadCurrent()
+        }
+      } catch { /* the full history load below remains the fallback */ }
+    }
     const loaded = await ChatService.ListMessages(conversationId.value)
+    const bootstrappedMessageId = currentMessageId.value
     messages.value = loaded || []
-    const wanted = currentMessageId.value || initialMessageId.value
+    const wanted = bootstrappedMessageId || initialMessageId.value
     const index = imageMessages.value.findIndex((message) => message.messageId === wanted)
     currentIndex.value = index >= 0 ? index : Math.min(currentIndex.value, Math.max(0, imageMessages.value.length - 1))
     currentMessageId.value = imageMessages.value[currentIndex.value]?.messageId || ''
-    resetTransform()
-    await loadCurrent()
+    if (!bootstrapped || currentMessageId.value !== bootstrappedMessageId) {
+      resetTransform()
+      await loadCurrent()
+    }
   } catch {
     messages.value = []
     loading.value = false
@@ -279,13 +490,23 @@ async function loadMessages() {
 }
 
 async function moveImage(direction: number) {
-  if (loading.value) return
-  const target = Math.max(0, Math.min(imageMessages.value.length - 1, currentIndex.value + direction))
-  if (target === currentIndex.value || !imageMessages.value[target]) return
+  if (loading.value || switchingImage.value) return
+  const total = galleryLength.value
+  const target = Math.max(0, Math.min(total - 1, currentIndex.value + direction))
+  if (target === currentIndex.value) return
+  const targetSharedEntry = isSharedPreview.value ? sharedEntries.value[target] : undefined
+  const targetMessage = isSharedPreview.value ? undefined : imageMessages.value[target]
+  if (!targetSharedEntry && !targetMessage) return
   currentIndex.value = target
-  currentMessageId.value = imageMessages.value[target].messageId
+  if (targetSharedEntry) sharedCurrentPath.value = targetSharedEntry.relativePath
+  if (targetMessage) currentMessageId.value = targetMessage.messageId
+  switchingImage.value = true
   resetTransform()
-  await loadCurrent()
+  // Remove the old media node before creating the next one. This prevents
+  // composited frames from overlapping during quick trackpad navigation.
+  source.value = ''
+  await nextTick()
+  try { await loadCurrent() } finally { switchingImage.value = false }
 }
 
 function closeViewer() { void Window.Close() }
@@ -296,8 +517,11 @@ function handleWheel(event: WheelEvent) {
   // the delta continuously keeps the gesture proportional instead of turning
   // it into a series of visible .15x jumps.
   if (event.ctrlKey) {
+    gestureActive.value = true
     const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-    if (Math.abs(delta) >= .01) zoomByPinch(delta)
+    if (Math.abs(delta) >= .01) queuePinchZoom(delta)
+    window.clearTimeout(wheelResetTimer)
+    wheelResetTimer = window.setTimeout(() => { gestureActive.value = false; wheelResetTimer = 0 }, 120)
     return
   }
   const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.15
@@ -314,7 +538,7 @@ function handleWheel(event: WheelEvent) {
     wheelResetTimer = window.setTimeout(() => { wheelX = 0; wheelResetTimer = 0 }, 320)
     // A two-finger horizontal trackpad swipe is one navigation gesture. The
     // cooldown prevents a single long swipe from skipping several pictures.
-    if (Math.abs(wheelX) >= 360 && performance.now() - wheelSwitchAt > 700) {
+    if (Math.abs(wheelX) >= 420 && performance.now() - wheelSwitchAt > 700) {
       const direction = wheelX > 0 ? 1 : -1
       wheelX = 0
       wheelSwitchAt = performance.now()
@@ -346,6 +570,7 @@ function handlePointerDown(event: PointerEvent) {
   if (event.button !== undefined && event.button !== 0) return
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (pointers.size >= 2) {
+    gestureActive.value = true
     multiPointerGesture = true
     pointer = undefined
     const center = pointerCentroid()
@@ -362,14 +587,25 @@ function handlePointerMove(event: PointerEvent) {
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (pointers.size >= 3 && multiGesture?.type === 'three') {
     const center = pointerCentroid()
-    if (scale.value > 1) offset.value = { x: offset.value.x + center.x - multiGesture.lastX, y: offset.value.y + center.y - multiGesture.lastY }
+    if (scale.value > 1) queueThreeFingerDrag(center.x - multiGesture.lastX, center.y - multiGesture.lastY)
     multiGesture.lastX = center.x
     multiGesture.lastY = center.y
     return
   }
   if (pointers.size === 2 && multiGesture?.type === 'pinch') {
     const distance = pointerDistance()
-    if (distance > 0 && multiGesture.initialDistance > 0) setZoomTarget(multiGesture.initialScale * distance / multiGesture.initialDistance)
+    if (distance > 0 && multiGesture.initialDistance > 0) {
+      const next = clampScale(multiGesture.initialScale * distance / multiGesture.initialDistance)
+      const center = pointerCentroid()
+      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+      const anchorX = center.x - rect.left - rect.width / 2
+      const anchorY = center.y - rect.top - rect.height / 2
+      const ratio = scale.value > 0 ? next / scale.value : 1
+      zoomTarget = next
+      scale.value = next
+      if (next > 1) offset.value = { x: anchorX + (offset.value.x - anchorX) * ratio, y: anchorY + (offset.value.y - anchorY) * ratio }
+      if (next <= 1) offset.value = { x: 0, y: 0 }
+    }
     return
   }
   if (!pointer || pointer.id !== event.pointerId || scale.value <= 1) return
@@ -393,8 +629,10 @@ function handlePointerUp(event: PointerEvent) {
   }
   if (start && !multiPointerGesture && scale.value <= 1 && Math.abs(deltaX) >= 48) void moveImage(deltaX < 0 ? 1 : -1)
   pointer = undefined
+  flushThreeFingerDrag()
   multiPointerGesture = false
   multiGesture = undefined
+  gestureActive.value = false
 }
 
 function handleEvent(event: any) {
@@ -407,7 +645,7 @@ function handleEvent(event: any) {
 }
 
 function handleKey(event: KeyboardEvent) {
-  if (event.key === 'Escape' || event.key === ' ' || event.code === 'Space') { event.preventDefault(); closeViewer(); return }
+  if (event.key === 'Escape' || event.key === ' ' || event.code === 'Space' || (event.metaKey && event.key.toLowerCase() === 'w')) { event.preventDefault(); closeViewer(); return }
   if (event.key === 'ArrowLeft') { event.preventDefault(); void moveImage(-1) }
   if (event.key === 'ArrowRight') { event.preventDefault(); void moveImage(1) }
   if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomImage(.25) }
@@ -432,6 +670,8 @@ onBeforeUnmount(() => {
   eventCancels.forEach((cancel) => cancel())
   if (reloadTimer) window.clearTimeout(reloadTimer)
   if (wheelResetTimer) window.clearTimeout(wheelResetTimer)
+  if (pinchFrame) window.cancelAnimationFrame(pinchFrame)
+  if (dragFrame) window.cancelAnimationFrame(dragFrame)
   stopZoomAnimation()
   pointers.clear()
   multiGesture = undefined
@@ -470,7 +710,12 @@ onBeforeUnmount(() => {
 .image-viewer-window-actions button:disabled { opacity: .32; cursor: default; }
 .image-viewer-window-actions .window-close:hover:not(:disabled) { background: #e5484d; color: #fff; }
 .image-viewer-canvas { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; overflow: hidden; align-items: center; justify-content: center; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
-.image-viewer-canvas img { display: block; max-width: calc(100% - 24px); max-height: calc(100% - 24px); object-fit: contain; user-select: none; will-change: transform; transition: transform .08s linear; }
+.image-viewer-canvas img { display: block; max-width: calc(100% - 24px); max-height: calc(100% - 24px); object-fit: contain; user-select: none; will-change: transform, opacity; transition: transform .08s linear; }
+.image-viewer-canvas .preview-image { position: absolute; inset: 12px; width: calc(100% - 24px); height: calc(100% - 24px); margin: auto; opacity: 1; transition: opacity .16s ease, transform .08s linear; }
+.image-viewer-canvas .preview-thumbnail { z-index: 1; }
+.image-viewer-canvas .preview-original { z-index: 2; opacity: 0; }
+.image-viewer-canvas .preview-original.preview-image-visible { opacity: 1; }
+.image-viewer-canvas .preview-thumbnail.preview-image-faded { opacity: 0; }
 .image-viewer-canvas .pdf-preview { width: calc(100% - 24px); height: calc(100% - 24px); border: 0; border-radius: 6px; background: #fff; }
 .image-nav-side { position: absolute; z-index: 2; top: 0; bottom: 0; display: flex; width: 88px; align-items: center; opacity: 0; pointer-events: auto; transition: opacity .18s ease; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-nav-side-prev { left: 0; justify-content: flex-start; padding-left: 14px; }
@@ -483,5 +728,8 @@ onBeforeUnmount(() => {
 .image-viewer-state > svg { font-size: 30px; color: #84a8ff; }
 .image-viewer-state.error { color: #ffb4b4; }
 .image-viewer-state.error > svg { color: #ff8b8b; }
+.image-viewer-quality { position: absolute; right: 16px; bottom: 14px; z-index: 4; display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 999px; background: color-mix(in srgb, var(--viewer-surface) 86%, transparent); color: var(--viewer-muted); font-size: 11px; pointer-events: none; }
+.image-viewer-quality > svg { font-size: 13px; }
+.image-viewer-quality.error { color: #c34d55; }
 @media (max-width: 720px), (max-height: 540px) { .image-viewer-head { min-height: 34px; flex-basis: 34px; padding-top: 3px; padding-bottom: 3px; } .image-viewer-app.is-macos .image-viewer-head { padding-left: 16px; } .image-viewer-toolbar button, .image-viewer-window-actions button { width: 26px; height: 26px; } .mac-traffic-light { width: 11px; height: 11px; } }
 </style>

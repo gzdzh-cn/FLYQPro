@@ -14,6 +14,25 @@ import (
 
 const friendRestoreVersion = 1
 
+// shouldSendFriendRestore reports whether a normal authenticated connection
+// may restore an existing friendship before its payload. An explicit friend
+// request is deliberately excluded: it must reach the receiver while the
+// relationship is still unknown so a freshly initialized database can save it
+// as a pending request instead of silently auto-accepting it.
+func shouldSendFriendRestore(messageType string) bool {
+	// Relationship control frames must be delivered without a stale restore
+	// frame in front of them. In particular, an accepted response is the frame
+	// that establishes the new relationship after a previous removal.
+	return messageType != "friend_restore" && messageType != "friend_request" && messageType != "friend_request_response" && messageType != "friend_removed"
+}
+
+// allowsRemovedFriendshipFrame identifies relationship-control frames that
+// must still cross a stale removal handshake. In particular, the acceptance
+// response is the only frame that can complete a new add cycle.
+func allowsRemovedFriendshipFrame(messageType string) bool {
+	return messageType == "friend_request" || messageType == "friend_request_response" || messageType == "friend_removed"
+}
+
 func friendRestorePayload(domain, sourceDeviceID, targetDeviceID, sourcePublicKey string) []byte {
 	return []byte(fmt.Sprintf("%s/friend-restore/v1\n%s\n%s\n%s", domain, sourceDeviceID, targetDeviceID, sourcePublicKey))
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,17 +15,18 @@ import (
 )
 
 type profileRow struct {
-	Nickname        string `orm:"nickname"`
-	AvatarPath      string `orm:"avatar_path"`
-	AvatarHash      string `orm:"avatar_hash"`
-	AvatarVersion   int64  `orm:"avatar_version"`
-	Discoverable    int    `orm:"discoverable"`
-	AutoSave        int    `orm:"auto_save"`
-	FileSavePath    string `orm:"file_save_path"`
-	SharedRootPath  string `orm:"shared_root_path"`
-	SharedEnabled   int    `orm:"shared_enabled"`
-	Theme           string `orm:"theme"`
-	LaunchAtStartup int    `orm:"launch_at_startup"`
+	Nickname               string `orm:"nickname"`
+	AvatarPath             string `orm:"avatar_path"`
+	AvatarHash             string `orm:"avatar_hash"`
+	AvatarVersion          int64  `orm:"avatar_version"`
+	Discoverable           int    `orm:"discoverable"`
+	AutoSave               int    `orm:"auto_save"`
+	FileSavePath           string `orm:"file_save_path"`
+	SharedRootPath         string `orm:"shared_root_path"`
+	SharedEnabled          int    `orm:"shared_enabled"`
+	SharedDriveMultiWindow int    `orm:"shared_drive_multi_window"`
+	Theme                  string `orm:"theme"`
+	LaunchAtStartup        int    `orm:"launch_at_startup"`
 }
 
 type identityRow struct {
@@ -55,6 +57,7 @@ type peerRow struct {
 	Capabilities           string `orm:"capabilities"`
 	DiscoveryVisible       int    `orm:"discovery_visible"`
 	VisibleInFriends       int    `orm:"visible_in_friends"`
+	RelationshipVersion    string `orm:"relationship_version"`
 	LastSeen               string `orm:"last_seen"`
 	UpdatedAt              string `orm:"updated_at"`
 }
@@ -164,7 +167,7 @@ func randomIndex(size int) int {
 
 func GetProfile(ctx context.Context) (Profile, error) {
 	var rows []profileRow
-	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, shared_root_path, shared_enabled, theme, launch_at_startup FROM profiles WHERE id = 1`)
+	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, shared_root_path, shared_enabled, shared_drive_multi_window, theme, launch_at_startup FROM profiles WHERE id = 1`)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -175,7 +178,7 @@ func GetProfile(ctx context.Context) (Profile, error) {
 		return Profile{}, fmt.Errorf("个人资料不存在")
 	}
 	row := rows[0]
-	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	profile := Profile{Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, SharedDriveMultiWindow: row.SharedDriveMultiWindow != 0, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
 	if strings.TrimSpace(profile.Nickname) == "" || strings.TrimSpace(profile.Nickname) == "新用户" {
 		profile.Nickname = randomChineseNickname()
 		if err := SaveProfile(ctx, profile); err != nil {
@@ -216,8 +219,8 @@ func migrateLegacyAttachmentPath(path string) string {
 }
 
 func SaveProfile(ctx context.Context, profile Profile) error {
-	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, shared_root_path=?, shared_enabled=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
-		strings.TrimSpace(profile.Nickname), profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.SharedRootPath, boolInt(profile.SharedEnabled), profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
+	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, shared_root_path=?, shared_enabled=?, shared_drive_multi_window=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
+		strings.TrimSpace(profile.Nickname), profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.SharedRootPath, boolInt(profile.SharedEnabled), boolInt(profile.SharedDriveMultiWindow), profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
 }
 
 func GetIdentity(ctx context.Context) (identityRow, error) {
@@ -247,10 +250,10 @@ func UpsertPeer(ctx context.Context, peer Peer) error {
 	if peer.Relation == PeerRelation {
 		visibleInFriends = true
 	}
-	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, last_seen, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), ?, ?, ?)
-		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.LastSeen, nowString(), nowString())
+	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), COALESCE((SELECT relationship_version FROM peers WHERE device_id=?), ?), ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, relationship_version=CASE WHEN excluded.relationship_version='' THEN peers.relationship_version ELSE excluded.relationship_version END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.DeviceID, peer.RelationshipVersion, peer.LastSeen, nowString(), nowString())
 }
 
 func SetPeerDiscoveryVisible(ctx context.Context, deviceID string, visible bool) error {
@@ -263,6 +266,10 @@ func SetPeerVisibleInFriends(ctx context.Context, deviceID string, visible bool)
 
 func SetPeerRelation(ctx context.Context, deviceID, relation string) error {
 	return exec(ctx, `UPDATE peers SET relation=?, updated_at=? WHERE device_id=?`, relation, nowString(), deviceID)
+}
+
+func SetPeerRelationshipVersion(ctx context.Context, deviceID, version string) error {
+	return exec(ctx, `UPDATE peers SET relationship_version=?, updated_at=? WHERE device_id=?`, version, nowString(), deviceID)
 }
 
 func SetPeerRemark(ctx context.Context, deviceID, remark string) error {
@@ -278,7 +285,7 @@ func SetPeerAvatar(ctx context.Context, deviceID, avatarPath, avatarHash string,
 }
 
 func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
-	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, last_seen, updated_at FROM peers`
+	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, updated_at FROM peers`
 	args := []any{}
 	if relation != "" {
 		sql += ` WHERE relation=?`
@@ -295,7 +302,27 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 	}
 	peers := make([]Peer, 0, len(rows))
 	for _, row := range rows {
-		peers = append(peers, Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, VisibleInFriends: row.VisibleInFriends != 0, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)})
+		peer := Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, VisibleInFriends: row.VisibleInFriends != 0, RelationshipVersion: row.RelationshipVersion, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)}
+		// Older builds persisted a full contact removal directly as
+		// relation=removed. Normalize it to the current retained-contact
+		// state so it can show "不是好友". Do not overwrite the saved local
+		// visibility flag: the user may have hidden this retained row already.
+		if peer.Relation == "removed" {
+			peer.Relation = DiscoveredState
+			peer.FriendshipState = "removed"
+		}
+		// A removal tombstone belongs to a peer that has already been
+		// downgraded from friend.  Do not let a stale tombstone override an
+		// active friend row (or its explicit visible_in_friends=false hide
+		// flag).  The latter can happen when an older removal notification is
+		// delivered after the local "hide friend" operation.
+		if peer.Relation != PeerRelation {
+			if removed, removalErr := IsFriendRemoved(ctx, row.DeviceID); removalErr == nil && removed {
+				peer.Relation = DiscoveredState
+				peer.FriendshipState = "removed"
+			}
+		}
+		peers = append(peers, peer)
 	}
 	return peers, nil
 }
@@ -327,6 +354,13 @@ func UpdateFriendRequest(ctx context.Context, requestID, status string) error {
 		return exec(ctx, `UPDATE friend_requests SET status=?, accepted_at=CASE WHEN accepted_at='' THEN ? ELSE accepted_at END, updated_at=? WHERE request_id=?`, status, now, now, requestID)
 	}
 	return exec(ctx, `UPDATE friend_requests SET status=?, updated_at=? WHERE request_id=?`, status, now, requestID)
+}
+
+func UpdateFriendRequestAccepted(ctx context.Context, requestID, acceptedAt string) error {
+	if acceptedAt == "" {
+		acceptedAt = nowString()
+	}
+	return exec(ctx, `UPDATE friend_requests SET status='accepted', accepted_at=?, updated_at=? WHERE request_id=?`, acceptedAt, nowString(), requestID)
 }
 
 func UpdateFriendRequestsForDevice(ctx context.Context, deviceID, status, acceptedAt string) error {
@@ -383,122 +417,73 @@ func requestTimeAfter(left, right string) bool {
 	return parseTime(left).After(parseTime(right))
 }
 
-func requestStatusPriority(status string) int {
-	switch status {
-	case "accepted":
-		return 4
-	case "pending":
-		return 3
-	case "sent":
-		return 2
-	case "queued":
-		return 1
-	default:
-		return 0
-	}
-}
-
-func aggregateFriendRequestRows(rows []FriendRequest) []FriendRequest {
-	if len(rows) == 0 {
-		return []FriendRequest{}
-	}
-	type aggregate struct {
-		request       FriendRequest
-		hasSent       bool
-		hasReceived   bool
-		statusRank    int
-		canonicalRank int
-	}
-	grouped := make(map[string]*aggregate, len(rows))
-	for _, row := range rows {
-		item := grouped[row.DeviceID]
-		if item == nil {
-			item = &aggregate{request: row, statusRank: -1, canonicalRank: 99}
-			grouped[row.DeviceID] = item
-		}
-		if row.Direction == "sent" {
-			item.hasSent = true
-		}
-		if row.Direction == "received" {
-			item.hasReceived = true
-		}
-		if row.Nickname != "" && (item.request.Nickname == "" || requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt)) {
-			item.request.Nickname = row.Nickname
-		}
-		if row.Message != "" && (item.request.Message == "" || requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt)) {
-			item.request.Message = row.Message
-		}
-		if requestTimeBefore(row.CreatedAt, item.request.CreatedAt) {
-			item.request.CreatedAt = row.CreatedAt
-		}
-		if requestTimeAfter(row.UpdatedAt, item.request.UpdatedAt) {
-			item.request.UpdatedAt = row.UpdatedAt
-		}
-		if row.AcceptedAt != "" && requestTimeBefore(row.AcceptedAt, item.request.AcceptedAt) {
-			item.request.AcceptedAt = row.AcceptedAt
-		}
-		if row.AcceptedAt != "" && item.request.AcceptedAt == "" {
-			item.request.AcceptedAt = row.AcceptedAt
-		}
-
-		statusRank := requestStatusPriority(row.Status)
-		if statusRank > item.statusRank {
-			item.statusRank = statusRank
-			item.request.Status = row.Status
-		}
-		canonicalRank := 3
-		if row.Status == "pending" {
-			canonicalRank = 0
-		} else if row.Status == "sent" || row.Status == "queued" {
-			canonicalRank = 1
-		} else if row.Status == "accepted" {
-			canonicalRank = 2
-		}
-		if canonicalRank < item.canonicalRank || (canonicalRank == item.canonicalRank && row.Direction == "received" && item.request.Direction != "received") {
-			item.request.RequestID = row.RequestID
-			item.canonicalRank = canonicalRank
-		}
-	}
-
-	result := make([]FriendRequest, 0, len(grouped))
-	for _, item := range grouped {
-		if item.hasSent && item.hasReceived {
-			item.request.Direction = "mutual"
-		} else if item.hasSent {
-			item.request.Direction = "sent"
-		} else if item.hasReceived {
-			item.request.Direction = "received"
-		}
-		result = append(result, item.request)
-	}
-	// Keep the same newest-first ordering as the raw history, but use the
-	// merged record's last activity so a newly completed request rises once.
-	for index := 0; index < len(result); index++ {
-		for next := index + 1; next < len(result); next++ {
-			if requestTimeAfter(result[next].UpdatedAt, result[index].UpdatedAt) {
-				result[index], result[next] = result[next], result[index]
-			}
-		}
-	}
-	return result
-}
-
 func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, error) {
 	rows, err := listFriendRequestRows(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	resultRows := aggregateFriendRequestRows(rows)
-	if status == "" {
-		return resultRows, nil
-	}
-	filtered := make([]FriendRequest, 0, len(resultRows))
-	for _, request := range resultRows {
-		if request.Status == status {
-			filtered = append(filtered, request)
+	// The database keeps the complete lifecycle for audit/history, but the
+	// friends UI must have exactly one row per device. Pick the newest request
+	// cycle, so a new pending request replaces an old accepted one visually.
+	latestByDevice := make(map[string]FriendRequest)
+	activeByDevice := make(map[string]FriendRequest)
+	for _, request := range rows {
+		if isActiveFriendRequest(request.Status) {
+			current, exists := activeByDevice[request.DeviceID]
+			if !exists || requestIsNewer(request, current) {
+				activeByDevice[request.DeviceID] = request
+			}
+			continue
+		}
+		current, exists := latestByDevice[request.DeviceID]
+		if !exists || requestIsNewer(request, current) {
+			latestByDevice[request.DeviceID] = request
 		}
 	}
-	return filtered, nil
+	for deviceID, request := range activeByDevice {
+		latestByDevice[deviceID] = request
+	}
+	result := make([]FriendRequest, 0, len(latestByDevice))
+	for _, request := range latestByDevice {
+		if status == "" || request.Status == status {
+			result = append(result, request)
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return requestTimeAfter(result[i].UpdatedAt, result[j].UpdatedAt)
+	})
+	return result, nil
+}
+
+func requestIsNewer(candidate, current FriendRequest) bool {
+	candidateCreated := parseTime(candidate.CreatedAt)
+	currentCreated := parseTime(current.CreatedAt)
+	if candidateCreated.After(currentCreated) {
+		return true
+	}
+	if candidateCreated.Before(currentCreated) {
+		return false
+	}
+	return requestTimeAfter(candidate.UpdatedAt, current.UpdatedAt)
+}
+
+// SupersedeActiveFriendRequests marks older in-flight requests as historical
+// when a new request for the same device is created. Requests are identified
+// by request_id; this helper never changes terminal records such as accepted.
+func SupersedeActiveFriendRequests(ctx context.Context, deviceID, direction string) error {
+	if direction == "" {
+		return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID)
+	}
+	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND direction=? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, direction)
+}
+
+func ClearFriendRequestHistory(ctx context.Context) error {
+	database := db.DB()
+	if database == nil {
+		return fmt.Errorf("数据库尚未初始化")
+	}
+	_, err := database.Exec(ctx, `DELETE FROM friend_requests`)
+	return err
 }
 
 func EnsureConversation(ctx context.Context, peerDeviceID string) (string, error) {
@@ -636,14 +621,40 @@ func DeletePeerAndFriendRecords(ctx context.Context, deviceID string) error {
 	if database == nil {
 		return fmt.Errorf("数据库尚未初始化")
 	}
+	var identity struct {
+		RelationshipVersion    string `orm:"relationship_version"`
+		PublicKeyPEM           string `orm:"public_key_pem"`
+		CertificateFingerprint string `orm:"certificate_fingerprint"`
+	}
+	if rows, err := query(ctx, `SELECT relationship_version, public_key_pem, certificate_fingerprint FROM peers WHERE device_id=? LIMIT 1`, deviceID); err == nil {
+		var values []struct {
+			RelationshipVersion    string `orm:"relationship_version"`
+			PublicKeyPEM           string `orm:"public_key_pem"`
+			CertificateFingerprint string `orm:"certificate_fingerprint"`
+		}
+		if rows.Structs(&values) == nil && len(values) > 0 {
+			identity.RelationshipVersion = values[0].RelationshipVersion
+			identity.PublicKeyPEM = values[0].PublicKeyPEM
+			identity.CertificateFingerprint = values[0].CertificateFingerprint
+		}
+	}
+	if identity.RelationshipVersion == "" {
+		identity.RelationshipVersion = newID()
+	}
 	return database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
-		if _, err := tx.Exec(`INSERT INTO friend_removals(device_id, removed_at) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at`, deviceID, nowString()); err != nil {
+		if _, err := tx.Exec(`INSERT INTO friend_removals(device_id, removed_at, relationship_version, public_key_pem, certificate_fingerprint) VALUES(?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at, relationship_version=excluded.relationship_version, public_key_pem=CASE WHEN excluded.public_key_pem='' THEN friend_removals.public_key_pem ELSE excluded.public_key_pem END, certificate_fingerprint=CASE WHEN excluded.certificate_fingerprint='' THEN friend_removals.certificate_fingerprint ELSE excluded.certificate_fingerprint END`, deviceID, nowString(), identity.RelationshipVersion, identity.PublicKeyPEM, identity.CertificateFingerprint); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM friend_requests WHERE device_id=?`, deviceID); err != nil {
+		// Keep the request history so a later re-add can create a new request_id
+		// and be shown independently of the old accepted/rejected request. Only
+		// in-flight requests are superseded by the relationship removal.
+		if _, err := tx.Exec(`UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND status IN ('queued','sent','pending')`, nowString(), deviceID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM peers WHERE device_id=?`, deviceID)
+		// Keep the peer row and its relationship to the local conversation. The
+		// tombstone makes it unusable as a friend, while the retained row lets
+		// the friends list show the existing chat as “不是好友”.
+		_, err := tx.Exec(`UPDATE peers SET relation='discovered', discovery_visible=0, visible_in_friends=1, updated_at=? WHERE device_id=?`, nowString(), deviceID)
 		return err
 	})
 }
@@ -669,7 +680,34 @@ func IsFriendRemoved(ctx context.Context, deviceID string) (bool, error) {
 }
 
 func MarkFriendRemoved(ctx context.Context, deviceID string) error {
-	return exec(ctx, `INSERT INTO friend_removals(device_id, removed_at) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at`, deviceID, nowString())
+	return MarkFriendRemovedWithVersion(ctx, deviceID, "", "", "")
+}
+
+func MarkFriendRemovedWithVersion(ctx context.Context, deviceID, version, publicKey, certificateFingerprint string) error {
+	if version == "" {
+		version = newID()
+	}
+	return exec(ctx, `INSERT INTO friend_removals(device_id, removed_at, relationship_version, public_key_pem, certificate_fingerprint) VALUES(?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET removed_at=excluded.removed_at, relationship_version=excluded.relationship_version, public_key_pem=CASE WHEN excluded.public_key_pem='' THEN friend_removals.public_key_pem ELSE excluded.public_key_pem END, certificate_fingerprint=CASE WHEN excluded.certificate_fingerprint='' THEN friend_removals.certificate_fingerprint ELSE excluded.certificate_fingerprint END`, deviceID, nowString(), version, publicKey, certificateFingerprint)
+}
+
+func FriendRemovalInfo(ctx context.Context, deviceID string) (version, publicKey, certificateFingerprint, removedAt string, err error) {
+	rows, err := query(ctx, `SELECT relationship_version, public_key_pem, certificate_fingerprint, removed_at FROM friend_removals WHERE device_id=? LIMIT 1`, deviceID)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	var values []struct {
+		RelationshipVersion    string `orm:"relationship_version"`
+		PublicKeyPEM           string `orm:"public_key_pem"`
+		CertificateFingerprint string `orm:"certificate_fingerprint"`
+		RemovedAt              string `orm:"removed_at"`
+	}
+	if err := rows.Structs(&values); err != nil || len(values) == 0 {
+		if err != nil {
+			return "", "", "", "", err
+		}
+		return "", "", "", "", fmt.Errorf("friend_removal_not_found")
+	}
+	return values[0].RelationshipVersion, values[0].PublicKeyPEM, values[0].CertificateFingerprint, values[0].RemovedAt, nil
 }
 
 func ClearFriendRemoval(ctx context.Context, deviceID string) error {
