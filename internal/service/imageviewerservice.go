@@ -19,12 +19,13 @@ const imageViewerWindowName = "flyqpro-image-viewer"
 // chat window only passes database identifiers; the viewer reads the image
 // through the existing bound services after it has loaded.
 type ImageViewerService struct {
-	app *application.App
-	mu  sync.Mutex
+	app         *application.App
+	chatService *ChatService
+	mu          sync.Mutex
 }
 
-func NewImageViewerService(app *application.App) *ImageViewerService {
-	return &ImageViewerService{app: app}
+func NewImageViewerService(app *application.App, chatService *ChatService) *ImageViewerService {
+	return &ImageViewerService{app: app, chatService: chatService}
 }
 
 func isImageMime(mimeType, fileName string) bool {
@@ -60,10 +61,51 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 	query := url.Values{}
 	query.Set("conversationId", conversationID)
 	query.Set("messageId", messageID)
+	return s.openViewer(query, "图片预览")
+}
+
+func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
+	if s.chatService == nil {
+		return fmt.Errorf("共享预览服务尚未初始化")
+	}
+	profile := s.chatService.engine.Profile()
+	entry, _, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return err
+	}
+	if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isPDFMime(entry.MimeType, entry.Name)) {
+		return fmt.Errorf("该文件类型不支持在线预览")
+	}
+	query := url.Values{}
+	query.Set("source", "shared-owner")
+	query.Set("relativePath", filepath.ToSlash(relativePath))
+	return s.openViewer(query, "共享文件预览")
+}
+
+func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, relativePath string) error {
+	if s.chatService == nil {
+		return fmt.Errorf("共享预览服务尚未初始化")
+	}
+	entry, err := s.chatService.GetFriendSharedEntryDetails(deviceID, relativePath)
+	if err != nil {
+		return err
+	}
+	if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isPDFMime(entry.MimeType, entry.Name)) {
+		return fmt.Errorf("该文件类型不支持在线预览")
+	}
+	query := url.Values{}
+	query.Set("source", "shared-friend")
+	query.Set("deviceId", strings.TrimSpace(deviceID))
+	query.Set("relativePath", filepath.ToSlash(relativePath))
+	return s.openViewer(query, "好友共享预览")
+}
+
+func isPDFMime(mimeType, fileName string) bool {
+	return strings.EqualFold(strings.TrimSpace(mimeType), "application/pdf") || strings.EqualFold(filepath.Ext(fileName), ".pdf")
+}
+
+func (s *ImageViewerService) openViewer(query url.Values, title string) error {
 	viewerURL := "/#/image-viewer?" + query.Encode()
-	// The viewer uses a custom title bar on Windows and macOS, so do not put
-	// the attachment name in the native window title either.
-	title := "图片预览"
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

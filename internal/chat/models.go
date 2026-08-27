@@ -302,6 +302,7 @@ type wireMessage struct {
 	RequiredBytes    int64         `json:"requiredBytes,omitempty"`
 	RelativePath     string        `json:"relativePath,omitempty"`
 	TransferID       string        `json:"transferId,omitempty"`
+	Offset           int64         `json:"offset,omitempty"`
 	Entries          []SharedEntry `json:"entries,omitempty"`
 }
 

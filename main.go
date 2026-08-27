@@ -46,7 +46,7 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
-	app.RegisterService(application.NewService(service.NewImageViewerService(app)))
+	app.RegisterService(application.NewService(service.NewImageViewerService(app, chatService)))
 	app.RegisterService(application.NewService(service.NewSharedDriveWindowService(app, chatService)))
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)

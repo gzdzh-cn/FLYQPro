@@ -112,6 +112,10 @@ export function GetFriendSharedEntryDetails(deviceID: string, relativePath: stri
     });
 }
 
+export function GetFriendSharedEntryPreview(deviceID: string, relativePath: string): $CancellablePromise<string> {
+    return $Call.ByID(1887022076, deviceID, relativePath);
+}
+
 export function GetProfile(): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(633746438).then(($result: any) => {
         return $$createType6($result);
@@ -122,6 +126,10 @@ export function GetSharedEntryDetails(relativePath: string): $CancellablePromise
     return $Call.ByID(3749520102, relativePath).then(($result: any) => {
         return $$createType2($result);
     });
+}
+
+export function GetSharedEntryPreview(relativePath: string): $CancellablePromise<string> {
+    return $Call.ByID(4183612052, relativePath);
 }
 
 export function GetSharedFolderSettings(): $CancellablePromise<chat$0.SharedFolderStatus> {
@@ -224,6 +232,10 @@ export function OpenSharedEntry(relativePath: string): $CancellablePromise<void>
     return $Call.ByID(3246281806, relativePath);
 }
 
+export function PauseSharedTransfer(transferID: string): $CancellablePromise<void> {
+    return $Call.ByID(3454468329, transferID);
+}
+
 export function PickDirectory(): $CancellablePromise<string> {
     return $Call.ByID(875816205);
 }
@@ -255,6 +267,12 @@ export function RenameSharedEntry(relativePath: string, newName: string): $Cance
 export function ResetAvatar(): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(3245822307).then(($result: any) => {
         return $$createType6($result);
+    });
+}
+
+export function ResumeSharedTransfer(transferID: string): $CancellablePromise<chat$0.SharedTransfer> {
+    return $Call.ByID(2346923958, transferID).then(($result: any) => {
+        return $$createType3($result);
     });
 }
 

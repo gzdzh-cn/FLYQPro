@@ -6,7 +6,7 @@
         <button type="button" class="mac-traffic-light mac-traffic-minimise" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"></button>
         <button type="button" class="mac-traffic-light mac-traffic-maximise" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"></button>
       </div>
-      <div class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
+      <div v-if="!isPdfPreview" class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
         <button type="button" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @click="moveImage(-1)"><icon-left /></button>
         <button type="button" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @click="moveImage(1)"><icon-right /></button>
         <button type="button" aria-label="缩小" title="缩小" :disabled="loading || scale <= .5" @click="zoomImage(-.25)"><icon-zoom-out /></button>
@@ -24,7 +24,8 @@
       <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-prev">
         <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="currentIndex <= 0 || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
-      <img v-if="source" :src="source" :alt="imageViewerName" :style="imageTransform" draggable="false" />
+      <iframe v-if="source && isPdfPreview" class="pdf-preview" :src="source" :title="imageViewerName" />
+      <img v-else-if="source" :src="source" :alt="imageViewerName" :style="imageTransform" draggable="false" />
       <div v-if="imageMessages.length > 1" class="image-nav-side image-nav-side-next">
         <button type="button" class="image-nav-arrow" aria-label="下一张" title="下一张" :disabled="currentIndex >= imageMessages.length - 1 || loading" @pointerdown.stop @click.stop="moveImage(1)"><icon-right /></button>
       </div>
@@ -45,11 +46,17 @@ import { IconClose, IconCloseCircle, IconFullscreen, IconLeft, IconLoading, Icon
 const route = useRoute()
 const conversationId = computed(() => String(route.query.conversationId || ''))
 const initialMessageId = computed(() => String(route.query.messageId || ''))
+const previewSource = computed(() => String(route.query.source || ''))
+const sharedDeviceId = computed(() => String(route.query.deviceId || '').trim())
+const sharedRelativePath = computed(() => String(route.query.relativePath || ''))
+const isSharedPreview = computed(() => previewSource.value === 'shared-owner' || previewSource.value === 'shared-friend')
 const messages = ref<any[]>([])
 const currentIndex = ref(0)
 const currentMessageId = ref('')
 const source = ref('')
 const sourceType = ref<'thumbnail' | 'original'>('thumbnail')
+const sharedName = ref('')
+const sharedIsPdf = ref(false)
 const loading = ref(false)
 const error = ref('')
 const scale = ref(1)
@@ -61,7 +68,8 @@ const isWindows = /Win32|Windows/i.test(`${navigator.platform || ''} ${navigator
 const cache = new Map<string, { source: string; type: 'thumbnail' | 'original' }>()
 const imageMessages = computed(() => messages.value.filter((message) => message.kind === 'file' && message.attachmentId && isImageMessage(message)))
 const currentMessage = computed(() => imageMessages.value[currentIndex.value])
-const imageViewerName = computed(() => currentMessage.value?.attachmentName || '图片预览')
+const imageViewerName = computed(() => isSharedPreview.value ? (sharedName.value || '共享文件预览') : (currentMessage.value?.attachmentName || '图片预览'))
+const isPdfPreview = computed(() => sharedIsPdf.value)
 const imageTransform = computed(() => ({
   transform: `translate(${offset.value.x}px, ${offset.value.y}px) rotate(${rotation.value}deg) scale(${scale.value})`,
   cursor: scale.value > 1 ? 'grab' : 'zoom-in',
@@ -177,12 +185,41 @@ async function sourceFor(message: any, token: number) {
   return sourceValue
 }
 
+async function sharedSourceFor() {
+  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryPreview(sharedRelativePath.value)
+  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryPreview(sharedDeviceId.value, sharedRelativePath.value)
+  throw new Error('共享预览参数无效')
+}
+
 function pruneCache() {
   const keep = new Set(imageMessages.value.slice(Math.max(0, currentIndex.value - 1), currentIndex.value + 2).map((message) => message.attachmentId))
   for (const key of cache.keys()) if (!keep.has(key.split(':')[0])) cache.delete(key)
 }
 
 async function loadCurrent() {
+  if (isSharedPreview.value) {
+    const token = ++loadToken
+    loading.value = true
+    error.value = ''
+    source.value = ''
+    sharedName.value = sharedRelativePath.value.split('/').filter(Boolean).pop() || '共享文件预览'
+    sharedIsPdf.value = /\.pdf$/i.test(sharedName.value)
+    resetTransform()
+    try {
+      const sourceValue = await sharedSourceFor()
+      if (token !== loadToken) return
+      sharedIsPdf.value = sharedIsPdf.value || sourceValue.toLowerCase().startsWith('data:application/pdf')
+      if (!sharedIsPdf.value && !(await readImage(sourceValue))) throw new Error('图片预览无法打开')
+      source.value = sourceValue
+      loading.value = false
+      void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
+    } catch (loadError: any) {
+      if (token !== loadToken) return
+      loading.value = false
+      error.value = loadError?.message || '共享文件预览失败'
+    }
+    return
+  }
   const message = currentMessage.value
   const token = ++loadToken
   loading.value = true
@@ -211,6 +248,13 @@ async function loadCurrent() {
 }
 
 async function loadMessages() {
+  if (isSharedPreview.value) {
+    messages.value = []
+    currentIndex.value = 0
+    currentMessageId.value = ''
+    await loadCurrent()
+    return
+  }
   if (!conversationId.value) {
     messages.value = []
     currentIndex.value = 0
@@ -427,6 +471,7 @@ onBeforeUnmount(() => {
 .image-viewer-window-actions .window-close:hover:not(:disabled) { background: #e5484d; color: #fff; }
 .image-viewer-canvas { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; overflow: hidden; align-items: center; justify-content: center; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-viewer-canvas img { display: block; max-width: calc(100% - 24px); max-height: calc(100% - 24px); object-fit: contain; user-select: none; will-change: transform; transition: transform .08s linear; }
+.image-viewer-canvas .pdf-preview { width: calc(100% - 24px); height: calc(100% - 24px); border: 0; border-radius: 6px; background: #fff; }
 .image-nav-side { position: absolute; z-index: 2; top: 0; bottom: 0; display: flex; width: 88px; align-items: center; opacity: 0; pointer-events: auto; transition: opacity .18s ease; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-nav-side-prev { left: 0; justify-content: flex-start; padding-left: 14px; }
 .image-nav-side-next { right: 0; justify-content: flex-end; padding-right: 14px; }

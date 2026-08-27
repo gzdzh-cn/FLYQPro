@@ -12,6 +12,14 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
+export function OpenFriendSharedPreview(deviceID: string, relativePath: string): $CancellablePromise<void> {
+    return $Call.ByID(509701049, deviceID, relativePath);
+}
+
 export function OpenImageViewer(conversationID: string, messageID: string): $CancellablePromise<void> {
     return $Call.ByID(433471697, conversationID, messageID);
+}
+
+export function OpenSharedPreview(relativePath: string): $CancellablePromise<void> {
+    return $Call.ByID(2171153429, relativePath);
 }

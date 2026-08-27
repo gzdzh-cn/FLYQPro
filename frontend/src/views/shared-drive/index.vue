@@ -38,20 +38,31 @@
         <div v-if="transferExpanded" class="transfer-body">
           <div v-for="transfer in transfers" :key="transfer.transferId" class="transfer-row">
             <div class="transfer-main"><strong>{{ transfer.fileName || transfer.relativePath }}</strong><span>{{ transferStatusText(transfer) }}</span><div class="transfer-progress"><i :style="{ width: `${transferPercent(transfer)}%` }" /></div></div>
-            <div class="transfer-actions"><strong>{{ transferPercent(transfer) }}%</strong><button v-if="!['completed', 'canceled', 'failed'].includes(transfer.status)" @click.stop="cancelTransfer(transfer.transferId)">取消</button></div>
+            <div class="transfer-actions"><strong>{{ transferPercent(transfer) }}%</strong><button v-if="['starting', 'transferring'].includes(transfer.status)" @click.stop="pauseTransfer(transfer.transferId)">暂停</button><button v-if="['paused', 'failed'].includes(transfer.status)" @click.stop="resumeTransfer(transfer.transferId)">继续</button><button v-if="!['completed', 'canceled'].includes(transfer.status)" @click.stop="cancelTransfer(transfer.transferId)">取消</button></div>
           </div>
         </div>
       </section>
     </main>
     <div v-if="context.visible && context.entry" class="context-menu" :style="{ left: context.x + 'px', top: context.y + 'px' }" @pointerdown.stop @click.stop>
-      <template v-if="mode === 'owner'"><button v-if="context.entry.isDirectory" @click="newContextFolder">打开</button><button @click="renameEntry">重命名</button><button @click="deleteEntry" class="danger">删除</button><button @click="copyRelative">复制相对路径</button><button @click="showDetails">属性</button></template>
-      <template v-else><button v-if="context.entry.isDirectory" @click="openPath(context.entry.relativePath)">打开</button><button v-if="!context.entry.isDirectory" @click="downloadEntry">下载</button><button v-if="!context.entry.isDirectory" @click="saveEntry">另存为</button><button v-if="!context.entry.isDirectory" @click="copyName">复制文件名</button><button @click="copyRelative">复制相对路径</button><button @click="showDetails">详情</button></template>
+      <template v-if="mode === 'owner'"><button v-if="context.entry.isDirectory" @click="newContextFolder">打开</button><button v-if="!context.entry.isDirectory && isPreviewable(context.entry)" @click="preview(context.entry)">预览</button><button @click="renameEntry">重命名</button><button @click="deleteEntry" class="danger">删除</button><button @click="copyRelative">复制相对路径</button><button @click="showDetails">属性</button></template>
+      <template v-else><button v-if="context.entry.isDirectory" @click="openPath(context.entry.relativePath)">打开</button><button v-if="!context.entry.isDirectory && isPreviewable(context.entry)" @click="preview(context.entry)">预览</button><button v-if="!context.entry.isDirectory" @click="downloadEntry">下载</button><button v-if="!context.entry.isDirectory" @click="saveEntry">另存为</button><button v-if="!context.entry.isDirectory" @click="copyName">复制文件名</button><button @click="copyRelative">复制相对路径</button><button @click="showDetails">详情</button></template>
     </div>
     <a-modal v-model:visible="renameDialog.visible" title="重命名" :footer="false" :mask-closable="false" @cancel="cancelRename">
       <div class="rename-dialog">
         <label>新名称</label>
         <a-input v-model="renameDialog.name" allow-clear placeholder="请输入新的文件或文件夹名称" @press-enter="confirmRename" />
         <div class="rename-actions"><a-button @click="cancelRename">取消</a-button><a-button type="primary" :loading="renameDialog.loading" @click="confirmRename">确定</a-button></div>
+      </div>
+    </a-modal>
+    <a-modal v-model:visible="detailsDialog.visible" title="文件属性" :footer="false" :mask-closable="true">
+      <div v-if="detailsDialog.entry" class="details-dialog">
+        <div class="detail-row"><span>名称</span><strong>{{ detailsDialog.entry.name }}</strong></div>
+        <div class="detail-row"><span>类型</span><strong>{{ detailsDialog.entry.isDirectory ? '文件夹' : (detailsDialog.entry.mimeType || '文件') }}</strong></div>
+        <div class="detail-row"><span>大小</span><strong>{{ detailsDialog.loading ? '统计中…' : formatBytes(detailsDialog.entry.size) }}</strong></div>
+        <div class="detail-row"><span>修改时间</span><strong>{{ formatDate(detailsDialog.entry.modifiedAt) }}</strong></div>
+        <div v-if="detailsDialog.entry.sha256" class="detail-row"><span>SHA256</span><strong class="detail-value">{{ detailsDialog.entry.sha256 }}</strong></div>
+        <div v-if="detailsDialog.loading" class="detail-loading">正在统计文件夹及子目录大小，请稍候…</div>
+        <div v-if="detailsDialog.error" class="detail-error">{{ detailsDialog.error }}</div>
       </div>
     </a-modal>
   </div>
@@ -62,7 +73,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconCloud, IconDown, IconFile, IconFolder, IconUp } from '@arco-design/web-vue/es/icon'
 import { Clipboard, Events, System, Window } from '@wailsio/runtime'
-import { ChatService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
+import { ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 
 interface Entry { entryId: string; name: string; relativePath: string; isDirectory: boolean; size: number; mimeType: string; modifiedAt: string; sha256?: string }
 type SharedMode = 'owner' | 'friend' | 'invalid'
@@ -82,6 +93,7 @@ const isMac = ref(false); const isDark = ref(false); const loading = ref(false);
 const settings = reactive({ enabled: false, rootPath: '', fileCount: 0, folderCount: 0, availableBytes: 0, statsLoading: false, statsReady: false, statsUpdatedAt: '' })
 const context = reactive({ visible: false, x: 0, y: 0, entry: undefined as Entry | undefined })
 const renameDialog = reactive({ visible: false, loading: false, name: '', entry: undefined as Entry | undefined })
+const detailsDialog = reactive({ visible: false, loading: false, error: '', entry: undefined as Entry | undefined })
 const transfers = reactive<Record<string, any>>({})
 const dismissedTransfers = reactive(new Set<string>())
 const notifiedTransferFailures = reactive(new Set<string>())
@@ -93,7 +105,7 @@ const filteredEntries = computed(() => { const key = search.value.trim().toLower
 const selectedFiles = computed(() => entries.value.filter((entry) => selected.has(entry.relativePath) && !entry.isDirectory))
 const transferSummary = computed(() => {
   const all = Object.values(transfers)
-  const active = all.filter((transfer) => !['completed', 'canceled', 'failed'].includes(transfer.status)).length
+  const active = all.filter((transfer) => ['starting', 'transferring'].includes(transfer.status)).length
   const completed = all.filter((transfer) => transfer.status === 'completed').length
   return active ? `${active} 个下载中${completed ? `，已完成 ${completed} 个` : ''}` : `已完成 ${completed} 个`
 })
@@ -105,6 +117,7 @@ function transferPercent(transfer: any) { return transfer.fileSize > 0 ? Math.mi
 function transferStatusText(transfer: any) {
   if (transfer.status === 'starting') return '正在连接…'
   if (transfer.status === 'transferring') return `${formatBytes(transfer.transferred || 0)} / ${formatBytes(transfer.fileSize || 0)}`
+  if (transfer.status === 'paused') return `已暂停 · ${formatBytes(transfer.transferred || 0)} / ${formatBytes(transfer.fileSize || 0)}`
   if (transfer.status === 'completed') return '下载完成'
   if (transfer.status === 'canceled') return '已取消'
   if (transfer.status === 'failed') return `下载失败：${transfer.errorMessage || '连接或文件校验失败'}`
@@ -113,7 +126,9 @@ function transferStatusText(transfer: any) {
 function registerTransfer(transfer: any) {
   if (!transfer?.transferId || dismissedTransfers.has(transfer.transferId)) return
   const current = transfers[transfer.transferId]
-  if (current && ['completed', 'canceled', 'failed'].includes(current.status) && transfer.status === 'starting') return
+  // A failed task can be explicitly resumed. Completed/canceled tasks must
+  // ignore a late starting event from the original worker.
+  if (current && ['completed', 'canceled'].includes(current.status) && transfer.status === 'starting') return
   transfers[transfer.transferId] = { ...current, ...transfer }
 }
 function handleTransferEvent(event: any) {
@@ -133,7 +148,7 @@ function handleTransferEvent(event: any) {
 function closeWindow() { void Window.Close() }
 async function loadTheme() { try { const profile = await ChatService.GetProfile(); isDark.value = profile.theme === 'dark' || (profile.theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches); document.body.classList.toggle('flyqpro-dark', isDark.value) } catch {} }
 async function loadSettings() { if (mode.value !== 'owner') return; const result = await ChatService.GetSharedFolderSettings(); Object.assign(settings, result); sharedDisabled.value = false }
-function resetViewState() { relativePath.value = ''; search.value = ''; entries.value = []; selected.clear(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
+function resetViewState() { relativePath.value = ''; search.value = ''; entries.value = []; selected.clear(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
 async function refresh() {
   if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) {
     sharedDisabled.value = true
@@ -193,13 +208,50 @@ async function confirmRename() { const entry = renameDialog.entry; const name = 
 async function deleteEntry() { if (!context.entry) return; const entry = context.entry; Modal.confirm({ title: '确认删除', content: entry.isDirectory ? '将递归删除该文件夹及其内容，确定继续吗？' : `确定删除“${entry.name}”吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { try { await ChatService.DeleteSharedEntry(entry.relativePath); await refresh(); Message.success('已删除') } catch (error: any) { Message.error(error?.message || '删除失败') } } }); closeContext() }
 async function copyRelative() { if (!context.entry) return; try { await Clipboard.SetText(context.entry.relativePath); Message.success('相对路径已复制') } catch { Message.error('复制失败') } closeContext() }
 async function copyName() { if (!context.entry) return; try { await Clipboard.SetText(context.entry.name); Message.success('文件名已复制') } catch { Message.error('复制失败') } closeContext() }
-async function showDetails() { if (!context.entry) return; try { const detail = mode.value === 'owner' ? await ChatService.GetSharedEntryDetails(context.entry.relativePath) : await ChatService.GetFriendSharedEntryDetails(deviceId, context.entry.relativePath); Modal.info({ title: '文件详情', content: `名称：${detail.name}\n大小：${formatBytes(detail.size)}\n类型：${detail.mimeType || '文件夹'}\n修改时间：${formatDate(detail.modifiedAt)}${detail.sha256 ? `\nSHA256：${detail.sha256}` : ''}` }) } catch (error: any) { Message.error(error?.message || '读取详情失败') } closeContext() }
+let detailsRequestId = 0
+async function showDetails() {
+  const entry = context.entry
+  if (!entry) return
+  closeContext()
+  const requestId = ++detailsRequestId
+  detailsDialog.entry = { ...entry }
+  detailsDialog.error = ''
+  detailsDialog.loading = true
+  detailsDialog.visible = true
+  try {
+    const detail = mode.value === 'owner' ? await ChatService.GetSharedEntryDetails(entry.relativePath) : await ChatService.GetFriendSharedEntryDetails(deviceId, entry.relativePath)
+    if (requestId === detailsRequestId) {
+      detailsDialog.entry = detail
+      detailsDialog.loading = false
+    }
+  } catch (error: any) {
+    if (requestId === detailsRequestId) {
+      detailsDialog.loading = false
+      detailsDialog.error = error?.message || '读取属性失败'
+    }
+  }
+}
 async function downloadEntry() { if (!context.entry || context.entry.isDirectory) return; try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '下载失败') } finally { closeContext() } }
 async function saveEntry() { if (!context.entry || context.entry.isDirectory) return; try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '保存失败') } finally { closeContext() } }
 async function downloadSelected() { const files = [...selectedFiles.value]; if (!files.length) return; let started = 0; for (const entry of files) { try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 下载失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个下载任务`) } }
 async function saveSelected() { const files = [...selectedFiles.value]; if (!files.length) return; let started = 0; for (const entry of files) { try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 保存失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个下载任务`) } }
 function cancelTransfer(transferId: string) { const transfer = transfers[transferId]; if (!transfer) return; Modal.confirm({ title: '取消下载', content: `确定取消“${transfer.fileName || transfer.relativePath}”的下载吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { dismissedTransfers.add(transferId); try { await ChatService.CancelSharedTransfer(transferId); delete transfers[transferId]; Message.success('下载已取消') } catch (error: any) { dismissedTransfers.delete(transferId); Message.error(error?.message || '取消下载失败') } } }) }
-function preview(entry: Entry) { if (entry.isDirectory) return; Message.info('共享文件请先下载后再打开') }
+async function pauseTransfer(transferId: string) { try { await ChatService.PauseSharedTransfer(transferId); if (transfers[transferId]) transfers[transferId].status = 'paused'; Message.success('下载已暂停，可继续下载') } catch (error: any) { Message.error(error?.message || '暂停下载失败') } }
+async function resumeTransfer(transferId: string) { try { const result = await ChatService.ResumeSharedTransfer(transferId); registerTransfer(result); transferExpanded.value = true; Message.success('已继续下载') } catch (error: any) { Message.error(error?.message || '继续下载失败') } }
+function isPreviewable(entry: Entry) {
+  const mime = String(entry.mimeType || '').toLowerCase()
+  return mime.startsWith('image/') || mime === 'application/pdf' || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp|pdf)$/i.test(entry.name)
+}
+async function preview(entry: Entry) {
+  if (entry.isDirectory) return
+  closeContext()
+  if (!isPreviewable(entry)) { Message.info('该文件类型请先下载后打开'); return }
+  try {
+    if (mode.value === 'owner') await ImageViewerService.OpenSharedPreview(entry.relativePath)
+    else if (mode.value === 'friend') await ImageViewerService.OpenFriendSharedPreview(deviceId, entry.relativePath)
+    else Message.warning('共享窗口参数无效')
+  } catch (error: any) { Message.error(error?.message || '打开预览失败') }
+}
 function handleKeydown(event: KeyboardEvent) { if (isMac.value && event.metaKey && event.key.toLowerCase() === 'w') { event.preventDefault(); closeWindow() } }
 onMounted(async () => { try { isMac.value = System.IsMac() } catch {} resetViewState(); window.addEventListener('pointerdown', closeContext); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status?.rootPath === settings.rootPath) Object.assign(settings, status) }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; await loadTheme(); await refresh() })
 onBeforeUnmount(() => { window.removeEventListener('pointerdown', closeContext); window.removeEventListener('keydown', handleKeydown); cancelSharedEvents?.() })
@@ -214,5 +266,6 @@ onBeforeUnmount(() => { window.removeEventListener('pointerdown', closeContext);
 .shared-head { flex:0 0 58px; box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; padding:0 20px 0 24px; border-bottom:1px solid var(--line); background:var(--surface); }.shared-head.draggable { padding-left:80px; --wails-draggable:drag; }.head-title { display:flex; gap:10px; align-items:center; }.head-title svg{width:21px;height:21px;color:var(--accent)}.head-title div{display:flex;flex-direction:column;gap:2px}.head-title strong{font-size:16px}.head-title span{font-size:12px;color:var(--muted)}
 .shared-body { flex:1; min-height:0; overflow:auto; padding:16px 20px 24px; }.card{background:var(--surface);border:1px solid var(--line);border-radius:10px}.owner-summary{display:flex;align-items:center;gap:20px;padding:15px 18px;margin-bottom:12px}.summary-main{flex:1;display:flex;flex-direction:column;gap:4px}.summary-label{font-size:12px;color:var(--muted)}.summary-main strong{font-size:17px}.summary-main span,.summary-item span{font-size:12px;color:var(--muted)}.summary-item{min-width:105px;display:flex;flex-direction:column;gap:4px;padding-left:18px;border-left:1px solid var(--line)}.summary-item strong{font-size:16px}.toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:12px}.toolbar button,.file-toolbar button,.breadcrumbs button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 10px;cursor:pointer}.toolbar button:disabled,.file-toolbar button:disabled{opacity:.45;cursor:not-allowed}.path-info{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.path-info span{font-size:11px;color:var(--muted)}.path-info strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.remote-banner{display:flex;align-items:center;gap:12px;padding:15px 18px;margin-bottom:12px}.remote-banner svg{color:var(--accent);width:22px;height:22px}.remote-banner div{flex:1;display:flex;flex-direction:column;gap:4px}.remote-banner span{font-size:12px;color:var(--muted)}.remote-banner button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 12px;cursor:pointer}.breadcrumbs{display:flex;align-items:center;gap:5px;padding:8px 12px;margin-bottom:12px;overflow:auto;white-space:nowrap}.breadcrumbs button{border:0;padding:4px 6px}.breadcrumbs button.active{color:var(--accent);font-weight:600}.file-panel{overflow:hidden}.file-toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}.file-toolbar input{flex:1;min-width:120px;border:1px solid var(--line);background:var(--surface);color:inherit;border-radius:6px;padding:7px 9px;outline:none}.view-note{margin-left:auto;color:var(--muted);font-size:12px}.file-list{min-height:300px}.file-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:default}.file-row:hover,.file-row.selected{background:color-mix(in srgb,var(--accent) 8%,var(--surface))}.file-icon{width:20px;height:20px;color:var(--muted);flex:0 0 20px}.file-icon.folder{color:#e6a23c}.file-name{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.file-name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-name span,.file-date{font-size:12px;color:var(--muted)}.file-date{width:155px;text-align:right}.row-more{border:0;background:transparent;color:var(--muted);font-size:17px;cursor:pointer}.empty-state{min-height:300px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted)}.empty-state svg{width:34px;height:34px;color:var(--accent)}.empty-state strong{color:inherit}.context-menu{position:fixed;z-index:20;min-width:150px;padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.24)}.context-menu button{display:block;width:100%;border:0;border-radius:5px;background:transparent;color:inherit;text-align:left;padding:8px 10px;cursor:pointer}.context-menu button:hover{background:color-mix(in srgb,var(--accent) 12%,var(--surface))}.context-menu .danger{color:#f53f3f}
 .rename-dialog{display:flex;flex-direction:column;gap:10px}.rename-dialog label{font-size:13px;color:var(--muted)}.rename-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+.details-dialog{display:flex;flex-direction:column;gap:11px;min-width:360px}.detail-row{display:flex;align-items:flex-start;gap:18px}.detail-row>span{flex:0 0 64px;color:var(--muted);font-size:13px}.detail-row>strong{min-width:0;flex:1;font-size:13px;word-break:break-all}.detail-value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px!important}.detail-loading{margin-top:4px;padding:9px 10px;border-radius:6px;background:color-mix(in srgb,var(--accent) 8%,var(--surface));color:var(--accent);font-size:12px}.detail-error{margin-top:4px;color:#f53f3f;font-size:12px}
 .transfer-float{position:fixed;z-index:15;right:20px;bottom:20px;width:min(440px,calc(100vw - 40px));max-height:min(430px,calc(100vh - 40px));overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:0 14px 36px rgba(0,0,0,.22)}.transfer-float.collapsed{width:230px}.transfer-header{display:flex;align-items:center;justify-content:space-between;width:100%;border:0;border-bottom:1px solid var(--line);background:var(--surface);color:inherit;padding:10px 13px;cursor:pointer}.transfer-title{display:flex;align-items:baseline;gap:8px}.transfer-title small{font-size:12px;color:var(--muted)}.transfer-header svg{width:16px;height:16px;color:var(--muted)}.transfer-body{max-height:365px;overflow:auto;padding:4px 12px}.transfer-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.transfer-row:last-child{border-bottom:0}.transfer-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}.transfer-main strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transfer-row span{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transfer-progress{height:4px;overflow:hidden;border-radius:4px;background:color-mix(in srgb,var(--accent) 14%,var(--surface))}.transfer-progress i{display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .2s ease}.transfer-actions{display:flex;align-items:center;gap:10px;flex:0 0 auto}.transfer-actions strong{font-size:12px;color:var(--accent)}.transfer-actions button{border:1px solid var(--line);border-radius:5px;background:var(--surface);color:inherit;padding:4px 8px;cursor:pointer}
 </style>

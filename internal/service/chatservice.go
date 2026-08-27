@@ -411,6 +411,37 @@ func (s *ChatService) GetSharedEntryDetails(relativePath string) (chat.SharedEnt
 	return entry, err
 }
 
+func sharedPreviewMime(entry chat.SharedEntry) string {
+	mimeType := strings.ToLower(strings.TrimSpace(entry.MimeType))
+	if strings.HasPrefix(mimeType, "image/") || mimeType == "application/pdf" {
+		return mimeType
+	}
+	if guessed := mime.TypeByExtension(filepath.Ext(entry.Name)); guessed != "" {
+		return guessed
+	}
+	return ""
+}
+
+func (s *ChatService) GetSharedEntryPreview(relativePath string) (string, error) {
+	profile := s.engine.Profile()
+	entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return "", err
+	}
+	mimeType := sharedPreviewMime(entry)
+	if mimeType == "" || (entry.Size > 32*1024*1024) {
+		return "", fmt.Errorf("该文件不支持在线预览或文件过大，请先下载")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > 32*1024*1024 {
+		return "", fmt.Errorf("在线预览文件过大，请先下载")
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
 func (s *ChatService) OpenSharedEntry(relativePath string) error {
 	profile := s.engine.Profile()
 	_, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
@@ -506,6 +537,10 @@ func (s *ChatService) ListFriendSharedEntries(deviceID, relativePath string) ([]
 	return s.engine.ListFriendSharedEntries(gctx.New(), strings.TrimSpace(deviceID), relativePath)
 }
 
+func (s *ChatService) GetFriendSharedEntryPreview(deviceID, relativePath string) (string, error) {
+	return s.engine.GetFriendSharedEntryPreview(gctx.New(), strings.TrimSpace(deviceID), relativePath)
+}
+
 func (s *ChatService) DownloadFriendSharedEntry(deviceID, relativePath string) (chat.SharedTransfer, error) {
 	targetRoot := chat.DefaultSharedDownloadDir()
 	if err := os.MkdirAll(targetRoot, 0o700); err != nil {
@@ -525,6 +560,14 @@ func (s *ChatService) SaveFriendSharedEntryAs(deviceID, relativePath string) (ch
 
 func (s *ChatService) CancelSharedTransfer(transferID string) error {
 	return s.engine.CancelSharedTransfer(transferID)
+}
+
+func (s *ChatService) PauseSharedTransfer(transferID string) error {
+	return s.engine.PauseSharedTransfer(transferID)
+}
+
+func (s *ChatService) ResumeSharedTransfer(transferID string) (chat.SharedTransfer, error) {
+	return s.engine.ResumeSharedTransfer(transferID)
 }
 
 func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string) (chat.SharedEntry, error) {
