@@ -45,6 +45,7 @@ type Engine struct {
 	serviceStopped      bool
 	attachmentMigration bool
 	friendRestoreAt     map[string]time.Time
+	discoveryMisses     map[string]int
 	presenceMu          sync.Mutex
 	discoveryScanMu     sync.Mutex
 	discoveryMu         sync.Mutex
@@ -166,8 +167,10 @@ var (
 	errAttachmentRejected = errors.New("attachment transfer rejected")
 )
 
+const discoveryMissThreshold = 3
+
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -1237,7 +1240,7 @@ func (e *Engine) discoveryLoop() {
 			message.IP = addr.IP.String()
 			e.handleAnnounce(message)
 		case "withdraw":
-			e.forgetDiscoveredPeer(message.DeviceID)
+			e.handleWithdraw(message.DeviceID)
 		case "offline":
 			e.handleOffline(message.DeviceID)
 		}
@@ -1461,20 +1464,33 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 		return
 	}
 	for _, peer := range e.Peers() {
-		_, ok := seen[peer.DeviceID]
-		if peer.Relation == PeerRelation {
-			if !ok && peer.DiscoveryVisible {
-				e.setPeerDiscoveryVisible(peer.DeviceID, false)
-			}
+		if _, ok := seen[peer.DeviceID]; ok {
+			e.resetDiscoveryMiss(peer.DeviceID)
 			continue
 		}
-		if !ok {
-			if e.hasPendingFriendRequest(peer.DeviceID) {
-				e.setPeerDiscoveryVisible(peer.DeviceID, false)
-				continue
-			}
-			e.forgetDiscoveredPeer(peer.DeviceID)
+
+		e.discoveryMu.Lock()
+		if e.discoveryMisses == nil {
+			e.discoveryMisses = make(map[string]int)
 		}
+		misses := e.discoveryMisses[peer.DeviceID] + 1
+		e.discoveryMisses[peer.DeviceID] = misses
+		e.discoveryMu.Unlock()
+		if misses < discoveryMissThreshold {
+			continue
+		}
+
+		if peer.Relation == PeerRelation {
+			e.setPeerDiscoveryVisible(peer.DeviceID, false)
+			e.resetDiscoveryMiss(peer.DeviceID)
+			continue
+		}
+		if e.hasPendingFriendRequest(peer.DeviceID) {
+			e.setPeerDiscoveryVisible(peer.DeviceID, false)
+			e.resetDiscoveryMiss(peer.DeviceID)
+			continue
+		}
+		e.forgetDiscoveredPeer(peer.DeviceID)
 	}
 }
 
@@ -1589,6 +1605,9 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 	}
 	if err := e.upsertWirePeer(message, discoveryVisible); err != nil {
 		return err
+	}
+	if discoveryVisible {
+		e.resetDiscoveryMiss(message.DeviceID)
 	}
 	e.setPeerDiscoveryVisible(message.DeviceID, discoveryVisible)
 	e.emit("chat:peer-updated", e.Peers())
@@ -3095,6 +3114,33 @@ func (e *Engine) broadcastPresence(kind string) {
 	}
 }
 
+func (e *Engine) resetDiscoveryMiss(deviceID string) {
+	e.discoveryMu.Lock()
+	if e.discoveryMisses == nil {
+		e.discoveryMisses = make(map[string]int)
+	}
+	delete(e.discoveryMisses, deviceID)
+	e.discoveryMu.Unlock()
+}
+
+func (e *Engine) handleWithdraw(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return
+	}
+	e.resetDiscoveryMiss(deviceID)
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return
+	}
+	if peer.Relation == PeerRelation {
+		e.setPeerDiscoveryVisible(deviceID, false)
+		e.emit("chat:peer-updated", e.Peers())
+		return
+	}
+	e.forgetDiscoveredPeer(deviceID)
+}
+
 func (e *Engine) forgetDiscoveredPeer(deviceID string) {
 	if strings.TrimSpace(deviceID) == "" {
 		return
@@ -3103,6 +3149,7 @@ func (e *Engine) forgetDiscoveredPeer(deviceID string) {
 	if err != nil || peer.Relation == PeerRelation {
 		return
 	}
+	e.resetDiscoveryMiss(deviceID)
 	_ = exec(context.Background(), `DELETE FROM peers WHERE device_id=? AND relation=?`, deviceID, DiscoveredState)
 	e.mu.Lock()
 	delete(e.peers, deviceID)

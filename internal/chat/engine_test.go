@@ -1,9 +1,13 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"net"
+	"path/filepath"
 	"testing"
+
+	"flyqpro/internal/service/db"
 )
 
 func TestProtocolDialectAcceptsCanonicalTuple(t *testing.T) {
@@ -175,6 +179,65 @@ func TestDiscoveryResponseMustBelongToCurrentScan(t *testing.T) {
 	}
 	if _, ok := engine.activeDiscoverySeen["current-device"]; !ok {
 		t.Fatal("current device must be included in the current scan snapshot")
+	}
+}
+
+func TestDiscoveryGracePeriodKeepsStrangerForTwoMisses(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "stranger-grace", Nickname: "设备", Relation: DiscoveredState, DiscoveryVisible: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	for round := 1; round <= discoveryMissThreshold-1; round++ {
+		engine.removeUnseenDiscoveredPeers(map[string]struct{}{})
+		peers, err := ListPeers(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(peers) != 1 || !peers[0].DiscoveryVisible {
+			t.Fatalf("peer disappeared after miss %d: %+v", round, peers)
+		}
+	}
+
+	engine.removeUnseenDiscoveredPeers(map[string]struct{}{})
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 0 {
+		t.Fatalf("stranger should be removed after %d misses: %+v", discoveryMissThreshold, peers)
+	}
+}
+
+func TestDiscoveryGracePeriodHidesFriendButKeepsRelation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{DeviceID: "friend-grace", Nickname: "好友", Relation: PeerRelation, DiscoveryVisible: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	for round := 1; round <= discoveryMissThreshold; round++ {
+		engine.removeUnseenDiscoveredPeers(map[string]struct{}{})
+	}
+	peers, err := ListPeers(ctx, PeerRelation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].DiscoveryVisible {
+		t.Fatalf("friend relation/discovery state is wrong after grace period: %+v", peers)
 	}
 }
 
