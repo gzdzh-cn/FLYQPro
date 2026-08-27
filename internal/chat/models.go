@@ -203,6 +203,9 @@ type SharedFolderStatus struct {
 	FolderCount    int    `json:"folderCount"`
 	AvailableBytes uint64 `json:"availableBytes"`
 	UpdatedAt      string `json:"updatedAt"`
+	StatsLoading   bool   `json:"statsLoading"`
+	StatsReady     bool   `json:"statsReady"`
+	StatsUpdatedAt string `json:"statsUpdatedAt,omitempty"`
 }
 
 type SharedEntry struct {
@@ -226,6 +229,7 @@ type SharedTransfer struct {
 	Status       string `json:"status"`
 	Direction    string `json:"direction"`
 	TargetPath   string `json:"targetPath"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
 }
 
 type DiagnosticItem struct {

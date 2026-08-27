@@ -719,6 +719,9 @@ export class SharedFolderStatus {
     "folderCount": number;
     "availableBytes": number;
     "updatedAt": string;
+    "statsLoading": boolean;
+    "statsReady": boolean;
+    "statsUpdatedAt"?: string;
 
     /** Creates a new SharedFolderStatus instance. */
     constructor($$source: Partial<SharedFolderStatus> = {}) {
@@ -739,6 +742,12 @@ export class SharedFolderStatus {
         }
         if (!("updatedAt" in $$source)) {
             this["updatedAt"] = "";
+        }
+        if (!("statsLoading" in $$source)) {
+            this["statsLoading"] = false;
+        }
+        if (!("statsReady" in $$source)) {
+            this["statsReady"] = false;
         }
 
         Object.assign(this, $$source);
@@ -763,6 +772,7 @@ export class SharedTransfer {
     "status": string;
     "direction": string;
     "targetPath": string;
+    "errorMessage"?: string;
 
     /** Creates a new SharedTransfer instance. */
     constructor($$source: Partial<SharedTransfer> = {}) {

@@ -40,3 +40,23 @@ func TestSharedFolderOperationsStayWithinRoot(t *testing.T) {
 		t.Fatalf("expected docs to be deleted, got %v", err)
 	}
 }
+
+func TestSharedDirectoryDetailsIncludeDescendantFileSizes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "readme.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "nested", "data.bin"), []byte("world!!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, _, err := GetSharedEntry(root, "docs", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Size != int64(len("hello")+len("world!!")) {
+		t.Fatalf("expected descendant size 12, got %d", entry.Size)
+	}
+}

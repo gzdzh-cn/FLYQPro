@@ -182,7 +182,38 @@ func GetSharedEntry(root, relative string, includeHash bool) (SharedEntry, strin
 	if err != nil {
 		return SharedEntry{}, "", err
 	}
+	if entry.IsDirectory && includeHash {
+		size, err := sharedDirectorySize(path)
+		if err != nil {
+			return SharedEntry{}, "", err
+		}
+		entry.Size = size
+	}
 	return entry, path, nil
+}
+
+// sharedDirectorySize reports the total byte size of regular files below a
+// directory. Symbolic links are intentionally excluded because shared-drive
+// paths must never escape the configured root.
+func sharedDirectorySize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }
 
 func fileSHA256(path string) (string, error) {

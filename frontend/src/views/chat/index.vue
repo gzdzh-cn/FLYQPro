@@ -99,8 +99,8 @@
         <a-modal v-model:visible="attachmentDetailsVisible" title="附件详情" :footer="false"><div v-if="attachmentDetails" class="attachment-details"><p><span>文件名</span><strong>{{ attachmentDetails.fileName }}</strong></p><p><span>类型</span><strong>{{ attachmentDetails.mimeType || '未知' }}</strong></p><p><span>大小</span><strong>{{ formatBytes(attachmentDetails.fileSize) }}</strong></p><p><span>状态</span><strong>{{ attachmentDetails.status }}</strong></p><p><span>时间</span><strong>{{ formatTime(attachmentDetails.createdAt) }}</strong></p><p><span>路径</span><strong>{{ attachmentDetails.localPath }}</strong></p><p><span>SHA256</span><strong class="mono">{{ attachmentDetails.sha256 || '未知' }}</strong></p></div></a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :style="{ height: `${composerHeight}px` }">
-          <div class="composer-tools"><button title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button><button title="打开好友共享盘" @click="openFriendSharedDrive"><icon-cloud /></button></div>
-          <div v-if="emojiOpen" class="emoji-panel"><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
+          <div class="composer-tools"><button class="emoji-toggle" title="表情" @click="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" @click="pickFile"><icon-folder /></button><button title="打开好友共享盘" @click="openFriendSharedDrive"><icon-cloud /></button></div>
+          <div v-if="emojiOpen" class="emoji-panel" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
           <textarea v-model="draft" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
           <div class="composer-foot"><span>消息将通过局域网加密传输</span><a-button type="primary" :disabled="!draft.trim() && !pendingImages.length" @click="sendMessage">发送</a-button></div>
@@ -215,7 +215,7 @@ const friendsWidth = ref(storedSize('flyqpro.friendsWidth', 310, 220, 440))
 const discoveryWidth = ref(storedSize('flyqpro.discoveryWidth', 320, 240, 460))
 const composerHeight = ref(storedSize('flyqpro.composerHeight', 158, 120, 320))
 const emojiOpen = ref(false)
-const emojis = ['😀', '😂', '😍', '👍', '🎉', '🤔', '😭', '😎', '❤️', '👏', '🙏', '🔥']
+const emojis = [...new Set('😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫡 🤭 🫢 🤫 🤥 😶 😐 😑 😬 🫠 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👿 👹 👺 🤡 💩 👻 💀 ☠️ 👽 👾 🤖 🎃 😺 😸 😹 😻 😼 😽 🙀 😿 😾 👋 🤚 🖐️ ✋ 🖖 👌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🙏 ✍️ 💅 🤝 💪 🦾 🖕 👂 🦻 👃 🧠 🫀 🫁 🦷 🦴 👀 👁️ 👅 👄 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 🆔 ⚛️ 🉑 ☢️ ☣️ 📛 🚫 ⛔ 📵 🚯 🚳 🚷 🔞 📶 🚸 ⚠️ 🔱 ♻️ ✅ ❇️ ✳️ ❎ 🌐 💠 Ⓜ️ 🌀 💤 🆚 🆗 🆕 🆓 🆒 🆘 🛑 ⛽ 🚧 🔰 ♻️ 💯 🔥 ✨ ⭐ 🌟 💫 💥 💢 💦 💨 🕳️ 💬 👁️‍🗨️ 🗨️ 🗯️ 💭 💤 🎉 🎊 🎈 🎁 🎀 🎂 🍰 🥂 🍻 ☕ 🍵 🧋 🍺 🍷 🥤 🍔 🍟 🍕 🌮 🍣 🍜 🍎 🍉 🍓 🥑 ⚽ 🏀 🏈 ⚾ 🎾 🏐 🏓 🥊 🏆 🥇 🎮 🎲 🎵 🎶 🎸 🎹 🎤 📷 📸 💻 🖥️ ⌚ 📱 💡 🔋 🔌 💰 💎 🚗 ✈️ 🚀 🛸 🏠 🏢 🌈 ☀️ 🌙 ⛅ ❄️ ☔ 🌊 🌍'.split(' '))]
 const pendingImages = ref<string[]>([])
 const messagePreviews = reactive<Record<string, string>>({})
 const retryingMessages = reactive<Record<string, boolean>>({})
@@ -886,6 +886,7 @@ function handleMessageAreaPointerDown() { cancelAutoScroll(); markActiveRead() }
 function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu() }
 function closeContextMenusOnPointerDown(event: PointerEvent) {
   const target = event.target as Element | null
+  if (!target?.closest('.emoji-panel, .emoji-toggle')) emojiOpen.value = false
   if (target?.closest('.message-context-menu, .peer-context-menu, .contact-context-menu, .delete-confirm-popover')) return
   closeMessageMenu()
   closePeerMenu()
@@ -1604,7 +1605,9 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .composer-foot { min-height: 28px; flex: 0 0 28px; gap: 12px; }
 .composer-foot > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-foot :deep(.arco-btn) { flex: 0 0 auto; min-width: 72px; }
-.emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; width: 174px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); }
+.emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; box-sizing: border-box; display: grid; grid-template-columns: repeat(8, 1fr); align-content: start; gap: 4px; width: 360px; height: 272px; max-width: calc(100vw - 36px); padding: 10px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); }
+.emoji-panel button { display: flex; width: 36px; height: 36px; align-items: center; justify-content: center; border-radius: 7px; font-size: 22px; line-height: 1; }
+.emoji-panel button:hover { background: var(--hover); }
 .pending-images { flex: 0 0 auto; max-height: 50px; overflow-x: auto; flex-wrap: nowrap; padding: 3px 0; }
 .pending-image { width: 44px; height: 44px; flex: 0 0 44px; }
 

@@ -14,14 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const sharedDriveCapability = "shared-drive-v1"
 
 type sharedTransferSession struct {
+	mu     sync.Mutex
 	conn   net.Conn
 	cancel chan struct{}
+	stop   context.CancelFunc
 }
 
 func (e *Engine) sharedAccessAllowed(deviceID string) bool {
@@ -117,6 +120,10 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 }
 
 func (e *Engine) dialSharedPeer(peer Peer) (net.Conn, *json.Decoder, ProtocolDialect, error) {
+	return e.dialSharedPeerContext(context.Background(), peer)
+}
+
+func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn, *json.Decoder, ProtocolDialect, error) {
 	if peer.IP == "" || peer.Port == 0 {
 		return nil, nil, ProtocolDialect{}, fmt.Errorf("好友地址不可用")
 	}
@@ -132,10 +139,17 @@ func (e *Engine) dialSharedPeer(peer Peer) (net.Conn, *json.Decoder, ProtocolDia
 		dialects = protocolDialects
 	}
 	var lastErr error
+	dialer := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 5 * time.Second}, Config: clientTLS}
 	for _, dialect := range dialects {
-		conn, dialErr := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+		rawConn, dialErr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)))
 		if dialErr != nil {
 			lastErr = dialErr
+			continue
+		}
+		conn, ok := rawConn.(*tls.Conn)
+		if !ok {
+			_ = rawConn.Close()
+			lastErr = fmt.Errorf("好友连接类型无效")
 			continue
 		}
 		if err := verifyPeerCertificate(conn, peer); err != nil {
@@ -220,25 +234,68 @@ func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relati
 	if err != nil || peer.Relation != PeerRelation {
 		return transfer, fmt.Errorf("FRIENDSHIP_REQUIRED")
 	}
-	conn, decoder, _, err := e.dialSharedPeer(peer)
+	cancel := make(chan struct{})
+	downloadCtx, stop := context.WithCancel(context.Background())
+	session := &sharedTransferSession{cancel: cancel, stop: stop}
+	e.mu.Lock()
+	e.sharedTransfers[transfer.TransferID] = session
+	e.mu.Unlock()
+	transfer.FileName = filepath.Base(filepath.FromSlash(relativePath))
+	e.emitSharedProgress(transfer)
+	go func() {
+		defer func() {
+			e.mu.Lock()
+			delete(e.sharedTransfers, transfer.TransferID)
+			e.mu.Unlock()
+		}()
+		result, downloadErr := e.downloadFriendSharedEntry(downloadCtx, peer, transfer, targetPath, session)
+		stop()
+		if downloadErr != nil && result.Status != "canceled" {
+			result.Status = "failed"
+			result.ErrorMessage = downloadErr.Error()
+		}
+		e.emitSharedProgress(result)
+	}()
+	return transfer, nil
+}
+
+func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, transfer SharedTransfer, targetPath string, session *sharedTransferSession) (SharedTransfer, error) {
+	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
 	if err != nil {
+		select {
+		case <-session.cancel:
+			transfer.Status = "canceled"
+			return transfer, nil
+		default:
+		}
 		return transfer, err
 	}
-	defer conn.Close()
-	cancel := make(chan struct{})
-	e.mu.Lock()
-	e.sharedTransfers[transfer.TransferID] = &sharedTransferSession{conn: conn, cancel: cancel}
-	e.mu.Unlock()
+	session.mu.Lock()
+	session.conn = conn
+	session.mu.Unlock()
 	defer func() {
-		e.mu.Lock()
-		delete(e.sharedTransfers, transfer.TransferID)
-		e.mu.Unlock()
+		_ = conn.Close()
+		session.mu.Lock()
+		session.conn = nil
+		session.mu.Unlock()
 	}()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, RelativePath: relativePath}); err != nil {
+	select {
+	case <-session.cancel:
+		transfer.Status = "canceled"
+		return transfer, nil
+	default:
+	}
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, RelativePath: transfer.RelativePath}); err != nil {
 		return transfer, err
 	}
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil {
+		select {
+		case <-session.cancel:
+			transfer.Status = "canceled"
+			return transfer, nil
+		default:
+		}
 		return transfer, err
 	}
 	if response.Type == "share_error" {
@@ -270,11 +327,9 @@ func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relati
 	for {
 		select {
 		case <-ctx.Done():
-			close(cancel)
-			_ = conn.Close()
 			transfer.Status = "canceled"
-			return transfer, ctx.Err()
-		case <-cancel:
+			return transfer, nil
+		case <-session.cancel:
 			transfer.Status = "canceled"
 			return transfer, nil
 		default:
@@ -282,7 +337,7 @@ func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relati
 		var message wireMessage
 		if err := decoder.Decode(&message); err != nil {
 			select {
-			case <-cancel:
+			case <-session.cancel:
 				transfer.Status = "canceled"
 				return transfer, nil
 			default:
@@ -320,7 +375,6 @@ func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relati
 			}
 			transfer.TargetPath, transfer.Status = finalPath, "completed"
 			transfer.Transferred = transfer.FileSize
-			e.emitSharedProgress(transfer)
 			return transfer, nil
 		}
 	}
@@ -342,7 +396,15 @@ func (e *Engine) CancelSharedTransfer(transferID string) error {
 	default:
 		close(session.cancel)
 	}
-	_ = session.conn.Close()
+	if session.stop != nil {
+		session.stop()
+	}
+	session.mu.Lock()
+	conn := session.conn
+	session.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 	return nil
 }
 
