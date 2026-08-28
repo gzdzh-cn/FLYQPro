@@ -1628,6 +1628,19 @@ func (s *ChatService) PickFile() string {
 	return result
 }
 
+// PickFiles opens the native file picker in multi-selection mode. Keep the
+// single-file PickFile method for avatar and other existing callers.
+func (s *ChatService) PickFiles() []string {
+	result, err := application.Get().Dialog.OpenFile().
+		SetTitle("选择要发送的文件").
+		CanChooseFiles(true).
+		PromptForMultipleSelection()
+	if err != nil {
+		return []string{}
+	}
+	return result
+}
+
 func (s *ChatService) PickDirectory() string {
 	result, err := application.Get().Dialog.OpenFile().SetTitle("选择文件保存目录").CanChooseDirectories(true).CanChooseFiles(false).PromptForSingleSelection()
 	if err != nil {

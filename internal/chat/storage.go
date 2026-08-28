@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -418,41 +417,10 @@ func requestTimeAfter(left, right string) bool {
 }
 
 func ListFriendRequests(ctx context.Context, status string) ([]FriendRequest, error) {
-	rows, err := listFriendRequestRows(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	// The database keeps the complete lifecycle for audit/history, but the
-	// friends UI must have exactly one row per device. Pick the newest request
-	// cycle, so a new pending request replaces an old accepted one visually.
-	latestByDevice := make(map[string]FriendRequest)
-	activeByDevice := make(map[string]FriendRequest)
-	for _, request := range rows {
-		if isActiveFriendRequest(request.Status) {
-			current, exists := activeByDevice[request.DeviceID]
-			if !exists || requestIsNewer(request, current) {
-				activeByDevice[request.DeviceID] = request
-			}
-			continue
-		}
-		current, exists := latestByDevice[request.DeviceID]
-		if !exists || requestIsNewer(request, current) {
-			latestByDevice[request.DeviceID] = request
-		}
-	}
-	for deviceID, request := range activeByDevice {
-		latestByDevice[deviceID] = request
-	}
-	result := make([]FriendRequest, 0, len(latestByDevice))
-	for _, request := range latestByDevice {
-		if status == "" || request.Status == status {
-			result = append(result, request)
-		}
-	}
-	sort.SliceStable(result, func(i, j int) bool {
-		return requestTimeAfter(result[i].UpdatedAt, result[j].UpdatedAt)
-	})
-	return result, nil
+	// Keep the complete lifecycle in the service response. The desktop UI
+	// collapses it to one current row per device, while exact request IDs remain
+	// available for accept/reject and response handling.
+	return listFriendRequestRows(ctx, status)
 }
 
 func requestIsNewer(candidate, current FriendRequest) bool {
@@ -464,7 +432,31 @@ func requestIsNewer(candidate, current FriendRequest) bool {
 	if candidateCreated.Before(currentCreated) {
 		return false
 	}
-	return requestTimeAfter(candidate.UpdatedAt, current.UpdatedAt)
+	if requestTimeAfter(candidate.UpdatedAt, current.UpdatedAt) {
+		return true
+	}
+	if requestTimeAfter(current.UpdatedAt, candidate.UpdatedAt) {
+		return false
+	}
+	if friendRequestStatusRank(candidate.Status) != friendRequestStatusRank(current.Status) {
+		return friendRequestStatusRank(candidate.Status) > friendRequestStatusRank(current.Status)
+	}
+	return candidate.RequestID > current.RequestID
+}
+
+func friendRequestStatusRank(status string) int {
+	switch status {
+	case "accepted":
+		return 5
+	case "rejected":
+		return 4
+	case "failed":
+		return 3
+	case "superseded":
+		return 2
+	default:
+		return 1
+	}
 }
 
 // SupersedeActiveFriendRequests marks older in-flight requests as historical
@@ -477,14 +469,28 @@ func SupersedeActiveFriendRequests(ctx context.Context, deviceID, direction stri
 	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND direction=? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, direction)
 }
 
-// SupersedeActiveFriendRequestsExcept is used after the new request has been
-// durably inserted. Keeping the insert first means a restart cannot lose the
-// incoming request, while excluding its request ID keeps the new row pending.
-func SupersedeActiveFriendRequestsExcept(ctx context.Context, deviceID, direction, requestID string) error {
+// SupersedeActiveFriendRequestsForNew keeps the newest active request in the
+// opposite direction so a simultaneous request can be projected as mutual.
+// Older requests in the new request's direction are always superseded.
+func SupersedeActiveFriendRequestsForNew(ctx context.Context, deviceID, direction, keepRequestID, preserveOppositeID string) error {
+	now := nowString()
 	if direction == "" {
-		return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND request_id<>? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, requestID)
+		return nil
 	}
-	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND direction=? AND request_id<>? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, direction, requestID)
+	if preserveOppositeID == "" {
+		return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=?
+			WHERE device_id=? AND request_id<>? AND direction=? AND status IN ('queued', 'sent', 'pending')`, now, deviceID, keepRequestID, direction)
+	}
+	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=?
+		WHERE device_id=? AND status IN ('queued', 'sent', 'pending') AND
+		request_id<>? AND (direction=? OR request_id<>?)`, now, deviceID, keepRequestID, direction, preserveOppositeID)
+}
+
+// SupersedeActiveFriendRequestsExcept closes every other in-flight request
+// for the device, regardless of direction. requestID is the only request
+// that remains actionable for this approval cycle.
+func SupersedeActiveFriendRequestsExcept(ctx context.Context, deviceID, requestID string) error {
+	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND request_id<>? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, requestID)
 }
 
 func ClearFriendRequestHistory(ctx context.Context) error {

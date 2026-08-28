@@ -288,6 +288,16 @@ export function PickFile(): $CancellablePromise<string> {
     return $Call.ByID(2768914208);
 }
 
+/**
+ * PickFiles opens the native file picker in multi-selection mode. Keep the
+ * single-file PickFile method for avatar and other existing callers.
+ */
+export function PickFiles(): $CancellablePromise<string[]> {
+    return $Call.ByID(573458345).then(($result: any) => {
+        return $$createType22($result);
+    });
+}
+
 export function PickSharedDirectory(): $CancellablePromise<string> {
     return $Call.ByID(1091777130);
 }
@@ -354,7 +364,7 @@ export function RevealSharedEntry(relativePath: string): $CancellablePromise<voi
 
 export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticResult> {
     return $Call.ByID(3959132677).then(($result: any) => {
-        return $$createType22($result);
+        return $$createType23($result);
     });
 }
 
@@ -509,4 +519,5 @@ const $$createType18 = $Create.Array($$createType17);
 const $$createType19 = $Create.Array($$createType8);
 const $$createType20 = chat$0.AttachmentMigrationResult.createFrom;
 const $$createType21 = chat$0.NetworkStatus.createFrom;
-const $$createType22 = chat$0.DiagnosticResult.createFrom;
+const $$createType22 = $Create.Array($Create.Any);
+const $$createType23 = chat$0.DiagnosticResult.createFrom;

@@ -78,7 +78,7 @@
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop="showAttachmentDetails(message)">详情</button></div>
               </template>
               <template v-else>{{ message.content }}</template>
-              <small>{{ formatTime(message.createdAt) }}<template v-if="message.senderDeviceId === deviceInfo?.deviceId && messageStatusText(message.status, message.kind, message.attachmentStatus)"> <span class="message-status">{{ messageStatusText(message.status, message.kind, message.attachmentStatus) }}</span></template></small>
+              <small>{{ formatTime(message.createdAt) }}<template v-if="messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) && (message.kind === 'file' || message.senderDeviceId === deviceInfo?.deviceId)"> <span class="message-status" :class="{ rejected: (message.attachmentStatus || message.status) === 'rejected' }">{{ messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) }}</span></template></small>
             </div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
           </div>
@@ -205,7 +205,6 @@ const friendSearch = ref('')
 const draft = ref('')
 const quoteMessageId = ref('')
 const quoteContent = ref('')
-const pickedFile = ref('')
 const sendingMessage = ref(false)
 const showPeerInfo = ref(false)
 const selectedRequest = ref<FriendRequest>()
@@ -323,12 +322,13 @@ function formatTime(value: string) {
   return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
 }
 function formatLastSeen(value: string) { return value ? formatTime(value) : '未知' }
-function messageStatusText(status: string, kind = 'text', attachmentStatus = '') {
+function messageStatusText(status: string, kind = 'text', attachmentStatus = '', sentByMe = false) {
   if (kind === 'file') {
     const fileStatus = attachmentStatus || status
     if (fileStatus === 'sent' || fileStatus === 'delivered') return '发送成功'
     if (fileStatus === 'read') return ''
-    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', pending: '等待接收', receiving: '接收中', rejected: '对方拒绝', canceled: '已取消', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
+    if (fileStatus === 'rejected') return sentByMe ? '对方已拒绝' : '我已拒绝'
+    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', pending: '等待接收', receiving: '接收中', canceled: '已取消', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
   }
   if (status === 'sent') return '已发送'
   return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[status] || status
@@ -336,7 +336,7 @@ function messageStatusText(status: string, kind = 'text', attachmentStatus = '')
 function conversationForPeer(deviceId: string) { return store.conversations.find((conversation) => conversation.peerDeviceId === deviceId) }
 function unreadCount(deviceId: string) { return conversationForPeer(deviceId)?.unreadCount || 0 }
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
-function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
+function requestStatusText(status: string, direction = '') { if (status === 'accepted') return '双方已成为好友'; if (status === 'pending' && direction === 'mutual') return '双方已申请'; return ({ pending: '待处理', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
 function isIncomingPending(request: FriendRequest) { return request.status === 'pending' && request.direction !== 'sent' }
 async function selectEmoji(emoji: string) {
   draft.value += emoji
@@ -750,7 +750,23 @@ function updateDesktopForeground() {
   desktopForeground.value = visible
   if (visible) pendingNotificationTone = false
 }
-async function pickFile() { if (!activePeerCanSend.value || !activePeer.value) return; pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); notifyAttachmentResult(message) } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
+async function pickFile() {
+  if (!activePeerCanSend.value || !activePeer.value) return
+  const peerId = activePeer.value.deviceId
+  const files = await ChatService.PickFiles()
+  if (!files?.length) return
+  await Promise.all(files.filter(Boolean).map(async (path) => {
+    if (activePeer.value?.deviceId !== peerId) return
+    try {
+      scrollToBottom()
+      const message = await ChatService.SendFile(peerId, path)
+      await appendSentMessage(message)
+      notifyAttachmentResult(message)
+    } catch (error: any) {
+      Message.error(error?.message || '文件发送失败')
+    }
+  }))
+}
 async function retryMessage(message: any) {
   if (!message?.messageId || retryingMessages[message.messageId]) return
   retryingMessages[message.messageId] = true
@@ -1744,6 +1760,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .message-line { align-items: center; gap: 8px; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .message-status { display: inline-flex; width: 52px; height: 17px; margin-left: 6px; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255, 255, 255, .2); font-size: 10px; vertical-align: middle; }
+.message-status.rejected { width: auto; min-width: 52px; padding: 0 6px; color: #d4380d; background: #fff1f0; font-weight: 600; }
+.chat-app.theme-dark .message-status.rejected { color: #ffb4ab; background: #4a2525; }
 .transfer-progress { width: min(260px, 100%); margin-top: 8px; padding-top: 7px; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
 .transfer-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; opacity: .82; }
 .transfer-progress-head strong { font-size: 11px; font-weight: 700; }

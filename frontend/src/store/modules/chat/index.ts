@@ -9,7 +9,17 @@ function requestTime(request: FriendRequest) {
   return Number.isFinite(updated) ? updated : Number.isFinite(created) ? created : 0
 }
 
-/** Keep history in state, but expose one current row per device to the UI. */
+function requestStatusRank(status: string) {
+  switch (status) {
+    case 'accepted': return 5
+    case 'rejected': return 4
+    case 'failed': return 3
+    case 'superseded': return 2
+    default: return 1
+  }
+}
+
+/** Keep history in state, but expose one current request projection per device. */
 function latestRequestsByDevice(requests: FriendRequest[]) {
   const grouped = new Map<string, FriendRequest[]>()
   requests.forEach((request) => {
@@ -21,10 +31,15 @@ function latestRequestsByDevice(requests: FriendRequest[]) {
   return [...grouped.values()]
     .map((list) => {
       const active = list.filter((request) => requestInProgress.has(request.status))
-      return [...(active.length ? active : list)].sort((left, right) => {
+      const incoming = active.filter((request) => request.direction !== 'sent')
+      const outgoing = active.filter((request) => request.direction === 'sent')
+      const mutual = incoming.length > 0 && outgoing.length > 0
+      const candidates = mutual ? incoming : active.length ? active : list
+      const selected = [...candidates].sort((left, right) => {
         const timeDelta = requestTime(right) - requestTime(left)
-        return timeDelta || right.requestId.localeCompare(left.requestId)
+        return timeDelta || requestStatusRank(right.status) - requestStatusRank(left.status) || right.requestId.localeCompare(left.requestId)
       })[0]
+      return selected && mutual ? { ...selected, direction: 'mutual' } : selected
     })
     .filter(Boolean) as FriendRequest[]
 }
@@ -55,7 +70,7 @@ export const useChatStore = defineStore('chat', {
     // reload merely because the peer was rediscovered.
     contacts: (state) => state.peers.filter((peer) => peer.relation === 'friend' && peer.friendshipState !== 'removed'),
     friends: (state) => state.peers.filter((peer) => !state.hiddenFriendIds[peer.deviceId] && peer.visibleInFriends !== false && (peer.relation === 'friend' || peer.friendshipState === 'removed')),
-    discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online && peer.relation !== 'friend'),
+    discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online),
     visibleRequests: (state) => latestRequestsByDevice(state.requests),
     pendingRequests: (state) => latestRequestsByDevice(state.requests).filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
@@ -70,21 +85,17 @@ export const useChatStore = defineStore('chat', {
           : peer)
       }
       if (name === 'chat:friend-request' && value?.requestId) {
-        // The database retains the complete lifecycle, while the friends UI
-        // shows one current request per device. A new request must replace the
-        // old visual row even when its request id is different.
-        this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId && item.deviceId !== value.deviceId)]
+        // Keep the raw lifecycle by request id. The getter projects it to one
+        // row per device, preserving both directions for mutual requests.
+        this.requests = [value, ...this.requests.filter((item) => item.requestId !== value.requestId)]
       }
       if (name === 'chat:friend-request-updated') {
         if (value?.status === 'accepted' && value?.deviceId) delete this.hiddenFriendIds[value.deviceId]
         const index = this.requests.findIndex((item) => item.requestId === value?.requestId)
         if (index < 0 && value?.requestId) {
-          const current = this.requests.find((item) => item.deviceId === value.deviceId)
-          const valueTime = Date.parse(value.updatedAt || value.createdAt || '')
-          const currentTime = Date.parse(current?.updatedAt || current?.createdAt || '')
-          if (!current || !Number.isFinite(currentTime) || (Number.isFinite(valueTime) && valueTime >= currentTime)) {
-            this.requests = [value, ...this.requests.filter((item) => item.deviceId !== value.deviceId)]
-          }
+          // Supersede events may arrive before the initial list refresh. Keep
+          // them as history; projection hides them when an active row exists.
+          this.requests = [value, ...this.requests]
         }
         else if (index >= 0) this.requests[index] = { ...this.requests[index], ...value }
       }

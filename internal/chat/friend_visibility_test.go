@@ -120,6 +120,64 @@ func TestFriendRequestDoesNotPrecedeWithRestore(t *testing.T) {
 	}
 }
 
+func TestFriendRequestCycleSupersedesBothDirectionsAndKeepsHistory(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	requests := []FriendRequest{
+		{RequestID: "old-accepted", DeviceID: "peer-cycle", Status: "accepted", Direction: "sent", CreatedAt: "2026-01-01T00:00:00Z", AcceptedAt: "2026-01-01T00:00:01Z"},
+		{RequestID: "old-sent", DeviceID: "peer-cycle", Status: "sent", Direction: "sent", CreatedAt: "2026-01-02T00:00:00Z"},
+		{RequestID: "old-pending", DeviceID: "peer-cycle", Status: "pending", Direction: "received", CreatedAt: "2026-01-03T00:00:00Z"},
+	}
+	for _, request := range requests {
+		if err := SaveFriendRequest(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Creating a new received request supersedes only the older received
+	// request, while the latest outgoing request remains for mutual display.
+	if err := SupersedeActiveFriendRequestsForNew(ctx, "peer-cycle", "received", "new-pending", "old-sent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveFriendRequest(ctx, FriendRequest{RequestID: "new-pending", DeviceID: "peer-cycle", Status: "pending", Direction: "received", CreatedAt: "2026-01-04T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := ListFriendRequests(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("申请历史不应被覆盖: got %d rows", len(all))
+	}
+	byID := make(map[string]FriendRequest, len(all))
+	for _, request := range all {
+		byID[request.RequestID] = request
+	}
+	if byID["old-accepted"].Status != "accepted" || byID["old-sent"].Status != "sent" || byID["old-pending"].Status != "superseded" || byID["new-pending"].Status != "pending" {
+		t.Fatalf("同设备申请未正确收敛: %+v", byID)
+	}
+	// Once one side resolves the cycle, the opposite active request is also
+	// superseded and remains available only as historical data.
+	if err := SupersedeActiveFriendRequestsExcept(ctx, "peer-cycle", "new-pending"); err != nil {
+		t.Fatal(err)
+	}
+	all, err = ListFriendRequests(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID = make(map[string]FriendRequest, len(all))
+	for _, request := range all {
+		byID[request.RequestID] = request
+	}
+	if byID["old-sent"].Status != "superseded" || byID["new-pending"].Status != "pending" {
+		t.Fatalf("申请解决后另一方向未收敛: %+v", byID)
+	}
+}
+
 func TestIncomingRequestAfterDatabaseResetIsPending(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
@@ -593,6 +651,28 @@ func TestStaleFriendRemovedFrameCannotUndoReaddedFriendship(t *testing.T) {
 	}
 	if len(peers) != 1 || peers[0].Relation != PeerRelation {
 		t.Fatalf("旧关系删除通知错误解除新好友关系: %+v", peers)
+	}
+}
+
+func TestUnversionedFriendRemovedFrameCannotUndoVersionedFriendship(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	ctx := context.Background()
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-versioned-legacy", Relation: PeerRelation, RelationshipVersion: "relationship-new", LastSeen: nowString()}); err != nil {
+		t.Fatal(err)
+	}
+
+	NewEngine().handleWire(nil, wireMessage{DeviceID: "peer-versioned-legacy"}, wireMessage{Type: "friend_removed"}, nil)
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Relation != PeerRelation {
+		t.Fatalf("无版本旧关系删除通知错误解除新好友关系: %+v", peers)
 	}
 }
 
