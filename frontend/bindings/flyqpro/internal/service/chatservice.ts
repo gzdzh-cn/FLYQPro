@@ -124,19 +124,25 @@ export function GetFriendSharedEntryThumbnail(deviceID: string, relativePath: st
     return $Call.ByID(3581863860, deviceID, relativePath);
 }
 
+export function GetFriendSharedEntryThumbnails(deviceID: string, requests: chat$0.SharedThumbnailRequest[]): $CancellablePromise<chat$0.SharedThumbnailResult[]> {
+    return $Call.ByID(3720797765, deviceID, requests).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
 /**
  * GetMessage bootstraps the selected image before the viewer loads the full
  * conversation history for previous/next navigation.
  */
 export function GetMessage(messageID: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(3688160572, messageID).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function GetProfile(): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(633746438).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -160,7 +166,7 @@ export function GetSharedEntryThumbnail(relativePath: string): $CancellablePromi
 
 export function GetSharedFolderSettings(): $CancellablePromise<chat$0.SharedFolderStatus> {
     return $Call.ByID(2793273685).then(($result: any) => {
-        return $$createType8($result);
+        return $$createType10($result);
     });
 }
 
@@ -170,67 +176,67 @@ export function HideFriendAndClearLocalData(deviceID: string): $CancellablePromi
 
 export function ImportSharedFiles(relativePath: string): $CancellablePromise<chat$0.SharedEntry[]> {
     return $Call.ByID(2212335558, relativePath).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
 export function ImportSharedFolder(relativePath: string): $CancellablePromise<chat$0.SharedEntry[]> {
     return $Call.ByID(2740777515, relativePath).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
 export function ListConversations(): $CancellablePromise<chat$0.Conversation[]> {
     return $Call.ByID(225306197).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType13($result);
     });
 }
 
 export function ListFriendRequests(): $CancellablePromise<chat$0.FriendRequest[]> {
     return $Call.ByID(4045668969).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType15($result);
     });
 }
 
 export function ListFriendSharedEntries(deviceID: string, relativePath: string): $CancellablePromise<chat$0.SharedEntry[]> {
     return $Call.ByID(2894093430, deviceID, relativePath).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
 export function ListFriendSharedEntriesPage(deviceID: string, relativePath: string, offset: number, limit: number): $CancellablePromise<chat$0.SharedEntriesPage> {
     return $Call.ByID(3330820637, deviceID, relativePath, offset, limit).then(($result: any) => {
-        return $$createType14($result);
+        return $$createType16($result);
     });
 }
 
 export function ListFriends(): $CancellablePromise<chat$0.Peer[]> {
     return $Call.ByID(3341120740).then(($result: any) => {
-        return $$createType16($result);
+        return $$createType18($result);
     });
 }
 
 export function ListMessages(conversationID: string): $CancellablePromise<chat$0.Message[]> {
     return $Call.ByID(2803775171, conversationID).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType19($result);
     });
 }
 
 export function ListPeers(): $CancellablePromise<chat$0.Peer[]> {
     return $Call.ByID(1603588904).then(($result: any) => {
-        return $$createType16($result);
+        return $$createType18($result);
     });
 }
 
 export function ListSharedEntries(relativePath: string): $CancellablePromise<chat$0.SharedEntry[]> {
     return $Call.ByID(772166362, relativePath).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
 export function ListSharedEntriesPage(relativePath: string, offset: number, limit: number): $CancellablePromise<chat$0.SharedEntriesPage> {
     return $Call.ByID(3021393633, relativePath, offset, limit).then(($result: any) => {
-        return $$createType14($result);
+        return $$createType16($result);
     });
 }
 
@@ -244,7 +250,7 @@ export function MarkConversationUnread(deviceID: string): $CancellablePromise<vo
 
 export function MigrateAttachmentStorage(targetRoot: string): $CancellablePromise<chat$0.AttachmentMigrationResult> {
     return $Call.ByID(3167525510, targetRoot).then(($result: any) => {
-        return $$createType18($result);
+        return $$createType20($result);
     });
 }
 
@@ -254,7 +260,7 @@ export function MoveSharedEntry(relativePath: string, targetDirectory: string): 
 
 export function NetworkStatus(): $CancellablePromise<chat$0.NetworkStatus> {
     return $Call.ByID(175001069).then(($result: any) => {
-        return $$createType19($result);
+        return $$createType21($result);
     });
 }
 
@@ -304,7 +310,7 @@ export function RenameSharedEntry(relativePath: string, newName: string): $Cance
 
 export function ResetAvatar(): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(3245822307).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -324,13 +330,13 @@ export function ResumeSharedTransfer(transferID: string): $CancellablePromise<ch
 
 export function RetryAttachment(messageID: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(2148764198, messageID).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function RetryMessage(messageID: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(2933069522, messageID).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
@@ -348,7 +354,7 @@ export function RevealSharedEntry(relativePath: string): $CancellablePromise<voi
 
 export function RunNetworkDiagnostic(): $CancellablePromise<chat$0.DiagnosticResult> {
     return $Call.ByID(3959132677).then(($result: any) => {
-        return $$createType20($result);
+        return $$createType22($result);
     });
 }
 
@@ -378,43 +384,43 @@ export function ScanPeers(): $CancellablePromise<void> {
 
 export function SendFile(deviceID: string, path: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(184536515, deviceID, path).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function SendFriendRequest(deviceID: string, message: string): $CancellablePromise<chat$0.FriendRequest> {
     return $Call.ByID(3674668394, deviceID, message).then(($result: any) => {
-        return $$createType12($result);
+        return $$createType14($result);
     });
 }
 
 export function SendImage(deviceID: string, dataURL: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(1964687738, deviceID, dataURL).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function SendMessage(deviceID: string, content: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(3289858148, deviceID, content).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function SendMessageWithMetadata(deviceID: string, content: string, quoteMessageID: string, quoteContent: string, forwardedFrom: string): $CancellablePromise<chat$0.Message> {
     return $Call.ByID(1947523705, deviceID, content, quoteMessageID, quoteContent, forwardedFrom).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType8($result);
     });
 }
 
 export function SetAutoSave(value: boolean): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(865606631, value).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
 export function SetAvatar(sourcePath: string): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(1280700672, sourcePath).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -424,19 +430,19 @@ export function SetConversationPinned(deviceID: string, pinned: boolean): $Cance
 
 export function SetDiscoverable(value: boolean): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(4207746782, value).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
 export function SetFileSavePath(path: string): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(3137600833, path).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
 export function SetLaunchAtStartup(value: boolean): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(3105969280, value).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -450,19 +456,19 @@ export function SetPeerRemark(deviceID: string, remark: string): $CancellablePro
 
 export function SetSharedEnabled(enabled: boolean): $CancellablePromise<chat$0.SharedFolderStatus> {
     return $Call.ByID(3617952977, enabled).then(($result: any) => {
-        return $$createType8($result);
+        return $$createType10($result);
     });
 }
 
 export function SetSharedFolder(path: string, enabled: boolean): $CancellablePromise<chat$0.SharedFolderStatus> {
     return $Call.ByID(593339220, path, enabled).then(($result: any) => {
-        return $$createType8($result);
+        return $$createType10($result);
     });
 }
 
 export function SetTheme(theme: string): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(3854263238, theme).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -476,7 +482,7 @@ export function Stop(): $CancellablePromise<void> {
 
 export function UpdateProfile(profile: chat$0.Profile): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(1127029007, profile).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -487,18 +493,20 @@ const $$createType2 = chat$0.SharedEntry.createFrom;
 const $$createType3 = chat$0.SharedTransfer.createFrom;
 const $$createType4 = chat$0.AttachmentDetails.createFrom;
 const $$createType5 = chat$0.DeviceInfo.createFrom;
-const $$createType6 = chat$0.Message.createFrom;
-const $$createType7 = chat$0.Profile.createFrom;
-const $$createType8 = chat$0.SharedFolderStatus.createFrom;
-const $$createType9 = $Create.Array($$createType2);
-const $$createType10 = chat$0.Conversation.createFrom;
-const $$createType11 = $Create.Array($$createType10);
-const $$createType12 = chat$0.FriendRequest.createFrom;
+const $$createType6 = chat$0.SharedThumbnailResult.createFrom;
+const $$createType7 = $Create.Array($$createType6);
+const $$createType8 = chat$0.Message.createFrom;
+const $$createType9 = chat$0.Profile.createFrom;
+const $$createType10 = chat$0.SharedFolderStatus.createFrom;
+const $$createType11 = $Create.Array($$createType2);
+const $$createType12 = chat$0.Conversation.createFrom;
 const $$createType13 = $Create.Array($$createType12);
-const $$createType14 = chat$0.SharedEntriesPage.createFrom;
-const $$createType15 = chat$0.Peer.createFrom;
-const $$createType16 = $Create.Array($$createType15);
-const $$createType17 = $Create.Array($$createType6);
-const $$createType18 = chat$0.AttachmentMigrationResult.createFrom;
-const $$createType19 = chat$0.NetworkStatus.createFrom;
-const $$createType20 = chat$0.DiagnosticResult.createFrom;
+const $$createType14 = chat$0.FriendRequest.createFrom;
+const $$createType15 = $Create.Array($$createType14);
+const $$createType16 = chat$0.SharedEntriesPage.createFrom;
+const $$createType17 = chat$0.Peer.createFrom;
+const $$createType18 = $Create.Array($$createType17);
+const $$createType19 = $Create.Array($$createType8);
+const $$createType20 = chat$0.AttachmentMigrationResult.createFrom;
+const $$createType21 = chat$0.NetworkStatus.createFrom;
+const $$createType22 = chat$0.DiagnosticResult.createFrom;

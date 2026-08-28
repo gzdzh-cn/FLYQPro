@@ -478,6 +478,14 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		// record still exists because the remote removal notification was lost.
 		// Only an identical request_id is idempotent; an old accepted request
 		// must never auto-accept or hide a new request.
+		// Older clients did not always include request_id. Give those requests
+		// a durable local identity before deduplication and persistence; an empty
+		// primary key would make every legacy request overwrite the same row and
+		// could make the request appear to disappear after a restart.
+		requestID := strings.TrimSpace(message.RequestID)
+		if requestID == "" {
+			requestID = newID()
+		}
 		requests, listErr := listFriendRequestRows(context.Background(), "")
 		if listErr != nil {
 			if conn != nil {
@@ -486,7 +494,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		for _, existing := range requests {
-			if existing.RequestID != message.RequestID {
+			if existing.RequestID != requestID {
 				continue
 			}
 			if conn != nil {
@@ -504,10 +512,20 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			log.Printf("好友申请被拒绝: device=%s, reason=DISCOVERY_DISABLED", hello.DeviceID)
 			return
 		}
-		// A fresh request supersedes only older in-flight received requests.
-		// Terminal history, especially an earlier accepted request, remains
-		// visible to the user.
-		_ = SupersedeActiveFriendRequests(context.Background(), hello.DeviceID, "received")
+		request := FriendRequest{RequestID: requestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
+		if err := SaveFriendRequest(context.Background(), request); err != nil {
+			log.Printf("保存好友申请失败: device=%s, request=%s, error=%v", hello.DeviceID, requestID, err)
+			if conn != nil {
+				_ = writeWire(conn, wireMessage{Type: "error", Status: "REQUEST_STORAGE_UNAVAILABLE"})
+			}
+			return
+		}
+		// Persist first. A later peer-state update must never be able to make a
+		// newly received request disappear from the next startup. Only older
+		// in-flight requests are superseded; terminal history stays intact.
+		if err := SupersedeActiveFriendRequestsExcept(context.Background(), hello.DeviceID, "received", requestID); err != nil {
+			log.Printf("更新旧好友申请状态失败: device=%s, error=%v", hello.DeviceID, err)
+		}
 		if e.isFriend(hello.DeviceID) {
 			version := e.currentRelationshipVersion(hello.DeviceID)
 			known, _ := e.peer(hello.DeviceID)
@@ -518,16 +536,12 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
 			e.setPeerDiscoveryVisible(hello.DeviceID, false)
 		}
-		request := FriendRequest{RequestID: message.RequestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
-		if err := SaveFriendRequest(context.Background(), request); err != nil {
-			return
-		}
 		e.emit("chat:friend-request", request)
 		e.emit("chat:peer-updated", e.Peers())
 		if conn != nil {
 			_ = writeWire(conn, wireMessage{Type: "friend_request_response", RequestID: request.RequestID, Status: "pending"})
 		}
-		log.Printf("收到新的好友申请并已保存: device=%s, request=%s", hello.DeviceID, message.RequestID)
+		log.Printf("收到新的好友申请并已保存: device=%s, request=%s", hello.DeviceID, requestID)
 	case "friend_request_response":
 		status := message.Status
 		request, ok := friendRequestByID(message.RequestID)
@@ -616,7 +630,6 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
 		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
 		_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
-		_ = SupersedeActiveFriendRequests(context.Background(), hello.DeviceID, "")
 		e.updatePeerRelation(hello.DeviceID, DiscoveredState)
 		e.setPeerVisibleInFriends(hello.DeviceID, true)
 		e.setPeerFriendshipState(hello.DeviceID, "removed")
@@ -626,6 +639,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		e.handleSharedListRequest(conn, hello, message)
 	case "share_thumbnail_request":
 		e.handleSharedThumbnailRequest(conn, hello, message)
+	case "share_thumbnail_batch_request":
+		e.handleSharedThumbnailBatchRequest(conn, hello, message)
 	case "share_download_request":
 		e.handleSharedDownloadRequest(conn, hello, message, session)
 	case "message":
@@ -1604,6 +1619,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 		capabilities = append(capabilities, "file-progress-v1", "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
+	capabilities = append(capabilities, sharedThumbnailBatchCapability)
 	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 }
 

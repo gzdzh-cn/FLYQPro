@@ -800,6 +800,59 @@ export class SharedFolderStatus {
     }
 }
 
+export class SharedThumbnailRequest {
+    "relativePath": string;
+    "entryId"?: string;
+    "fileSize"?: number;
+    "modifiedAt"?: string;
+
+    /** Creates a new SharedThumbnailRequest instance. */
+    constructor($$source: Partial<SharedThumbnailRequest> = {}) {
+        if (!("relativePath" in $$source)) {
+            this["relativePath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedThumbnailRequest instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedThumbnailRequest {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedThumbnailRequest($$parsedSource as Partial<SharedThumbnailRequest>);
+    }
+}
+
+export class SharedThumbnailResult {
+    "relativePath": string;
+    "status": string;
+    "mimeType"?: string;
+    "thumbnailMime"?: string;
+    "payload"?: string;
+    "error"?: string;
+
+    /** Creates a new SharedThumbnailResult instance. */
+    constructor($$source: Partial<SharedThumbnailResult> = {}) {
+        if (!("relativePath" in $$source)) {
+            this["relativePath"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedThumbnailResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedThumbnailResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedThumbnailResult($$parsedSource as Partial<SharedThumbnailResult>);
+    }
+}
+
 export class SharedTransfer {
     "transferId": string;
     "deviceId": string;

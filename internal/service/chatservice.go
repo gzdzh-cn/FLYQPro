@@ -43,6 +43,7 @@ type ChatService struct {
 	sharedStats   sharedStatsState
 
 	sharedThumbnailStore *sharedThumbnailStore
+	remoteThumbnailCache *remoteThumbnailCache
 	sharedThumbnailStop  chan struct{}
 	sharedThumbnailOnce  sync.Once
 }
@@ -51,6 +52,7 @@ func NewChatService() *ChatService {
 	service := &ChatService{
 		engine:               chat.NewEngine(),
 		sharedThumbnailStore: newSharedThumbnailStore(),
+		remoteThumbnailCache: newRemoteThumbnailCache(),
 		sharedThumbnailStop:  make(chan struct{}),
 	}
 	service.engine.SetSharedThumbnailProvider(func(root, relativePath string) (string, string, error) {
@@ -85,6 +87,18 @@ func NewChatService() *ChatService {
 
 func (s *ChatService) Start() error {
 	s.sharedThumbnailStore.startJanitor(s.sharedThumbnailStop)
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.remoteThumbnailCache.prune()
+			case <-s.sharedThumbnailStop:
+				return
+			}
+		}
+	}()
 	return s.engine.Start(gctx.New())
 }
 func (s *ChatService) Stop() {
@@ -674,6 +688,89 @@ func (s *ChatService) GetFriendSharedEntryPreview(deviceID, relativePath string)
 
 func (s *ChatService) GetFriendSharedEntryThumbnail(deviceID, relativePath string) (string, error) {
 	return s.engine.GetFriendSharedEntryThumbnail(gctx.New(), strings.TrimSpace(deviceID), relativePath)
+}
+
+func (s *ChatService) GetFriendSharedEntryThumbnails(deviceID string, requests []chat.SharedThumbnailRequest) ([]chat.SharedThumbnailResult, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if len(requests) > 24 {
+		requests = requests[:24]
+	}
+	results := make([]chat.SharedThumbnailResult, len(requests))
+	misses := make([]chat.SharedThumbnailRequest, 0, len(requests))
+	for index, request := range requests {
+		if cached, ok := s.remoteThumbnailCache.cached(deviceID, request); ok {
+			results[index] = cached
+		} else {
+			misses = append(misses, request)
+		}
+	}
+	if len(misses) == 0 {
+		return results, nil
+	}
+	remote, err := s.engine.GetFriendSharedEntryThumbnails(gctx.New(), deviceID, misses)
+	if err != nil && canFallbackSharedThumbnailBatch(err) {
+		remote = make([]chat.SharedThumbnailResult, 0, len(misses))
+		for _, request := range misses {
+			url, singleErr := s.engine.GetFriendSharedEntryThumbnail(gctx.New(), deviceID, request.RelativePath)
+			result := chat.SharedThumbnailResult{RelativePath: request.RelativePath, Status: "pending"}
+			if singleErr != nil {
+				result.Status = "unavailable"
+				result.Error = singleErr.Error()
+			} else if url != "" {
+				parts := strings.SplitN(url, ",", 2)
+				if len(parts) == 2 {
+					result.Status = "ready"
+					result.Payload = parts[1]
+					result.ThumbnailMime = strings.TrimSuffix(strings.TrimPrefix(strings.SplitN(parts[0], ";", 2)[0], "data:"), "")
+					result.MimeType = result.ThumbnailMime
+				}
+			}
+			remote = append(remote, result)
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	byPath := make(map[string]chat.SharedThumbnailResult, len(remote))
+	for index, result := range remote {
+		request := chat.SharedThumbnailRequest{RelativePath: result.RelativePath}
+		if index < len(misses) {
+			request = misses[index]
+		}
+		if result.RelativePath == "" {
+			result.RelativePath = request.RelativePath
+		}
+		if result.Status == "ready" && result.Payload != "" {
+			result = s.remoteThumbnailCache.put(deviceID, request, result)
+		}
+		byPath[result.RelativePath] = result
+	}
+	for index, request := range requests {
+		if results[index].Status == "ready" {
+			continue
+		}
+		if result, ok := byPath[request.RelativePath]; ok {
+			results[index] = result
+		}
+	}
+	return results, nil
+}
+
+// Older Android builds may advertise the shared-drive capability but not the
+// batch thumbnail frame (for example after a partial upgrade). The directory
+// itself is still perfectly usable, so fall back to the compatible single
+// thumbnail request instead of leaving every visible card stuck in loading.
+// Permission and friendship failures are terminal and must be surfaced.
+func canFallbackSharedThumbnailBatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToUpper(err.Error())
+	for _, terminal := range []string{"FRIENDSHIP_REQUIRED", "SHARED_DISABLED", "SHARED_UNAVAILABLE", "SHARED_PATH_INVALID"} {
+		if strings.Contains(message, terminal) {
+			return false
+		}
+	}
+	return strings.Contains(message, "UNSUPPORTED") || strings.Contains(message, "超时") || strings.Contains(message, "TIMEOUT") || strings.Contains(message, "EOF") || strings.Contains(message, "响应") || strings.Contains(message, "连接")
 }
 
 func (s *ChatService) DownloadFriendSharedEntry(deviceID, relativePath string) (chat.SharedTransfer, error) {

@@ -100,9 +100,9 @@
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :class="{ 'composer-disabled': !activePeerCanSend }" :style="{ height: `${composerHeight}px` }">
           <div class="composer-tools"><button class="emoji-toggle" title="表情" :disabled="!activePeerCanSend" @mousedown.prevent.stop="emojiOpen = !emojiOpen" @keydown.enter.space.prevent="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" :disabled="!activePeerCanSend" @mousedown.prevent.stop="pickFile" @keydown.enter.space.prevent="pickFile"><icon-folder /></button><button title="打开好友共享盘" :disabled="!activePeerCanSend" @mousedown.prevent.stop="openFriendSharedDrive" @keydown.enter.space.prevent="openFriendSharedDrive"><icon-cloud /></button></div>
-          <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
+          <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @pointerdown.prevent.stop="selectEmoji(emoji)" @keydown.enter.prevent.stop="selectEmoji(emoji)">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
-          <textarea v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
+          <textarea ref="composerInput" v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
           <div class="composer-foot"><span>{{ activePeerCanSend ? '消息将通过局域网加密传输' : '当前不是好友，请重新申请好友' }}</span><a-button type="primary" :loading="sendingMessage" :disabled="sendingMessage || !activePeerCanSend || (!draft.trim() && !pendingImages.length)" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
@@ -133,14 +133,14 @@
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
         <div class="discovery-scroll">
-          <div class="discover-group" @contextmenu.prevent><div class="group-title-row"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-if="store.requests.length" class="clear-requests" @click.stop="clearRequestHistory">清除历史</button></div><button v-for="request in store.requests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId }" @click="selectRequest(request)"><div class="avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}</div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span>{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span></div></button></div>
+          <div class="discover-group" @contextmenu.prevent><div class="group-title-row"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-if="store.requests.length" class="clear-requests" @click.stop="clearRequestHistory">清除历史</button></div><button v-for="request in store.visibleRequests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId, 'pending-request': isIncomingPending(request) }" @click="selectRequest(request)"><div class="avatar request-avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}<i v-if="isIncomingPending(request)" class="request-pending-dot" /></div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span class="request-status-line"><span class="request-status-text">{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span><em v-if="isIncomingPending(request)" class="pending-request-mark">待处理</em></span></div></button></div>
           <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已是好友 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
           <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.remark || peer.nickname }}</strong><span>已是好友 · {{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
         </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
         <main class="detail-pane" v-if="selectedRequest" @click="clearDiscoverySelection">
-        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><div class="tags"><a-tag>{{ requestDeviceLabel(selectedRequest) }}</a-tag><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status, selectedRequest.direction) }}</a-tag></div><p>{{ selectedRequest.message || (selectedRequest.direction === 'mutual' ? '双方都发起了好友申请' : '想和你成为好友') }}</p><div class="request-times"><span>申请时间<strong>{{ formatTime(selectedRequest.createdAt) }}</strong></span><span v-if="selectedRequest.acceptedAt">同意时间<strong>{{ formatTime(selectedRequest.acceptedAt) }}</strong></span></div><a-button v-if="selectedRequest.status === 'accepted' && isFriend(selectedRequest.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedRequest.deviceId)">打开聊天</a-button><div v-else-if="selectedRequest.status === 'pending'" class="detail-actions"><a-button type="primary" @click="acceptRequest">同意</a-button><a-button status="danger" @click="rejectRequest">拒绝</a-button></div></div>
+        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2>{{ selectedRequest.nickname }}</h2><div class="tags"><a-tag>{{ requestDeviceLabel(selectedRequest) }}</a-tag><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status, selectedRequest.direction) }}</a-tag></div><p>{{ selectedRequest.message || (selectedRequest.direction === 'mutual' ? '双方都发起了好友申请' : '想和你成为好友') }}</p><div class="request-times"><span>申请时间<strong>{{ formatTime(selectedRequest.createdAt) }}</strong></span><span v-if="selectedRequest.acceptedAt">同意时间<strong>{{ formatTime(selectedRequest.acceptedAt) }}</strong></span></div><a-button v-if="selectedRequest.status === 'accepted' && isFriend(selectedRequest.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedRequest.deviceId)">打开聊天</a-button><div v-else-if="isIncomingPending(selectedRequest)" class="detail-actions"><a-button type="primary" :loading="processingRequests[selectedRequest.requestId]" @click="acceptRequest">同意</a-button><a-button status="danger" :disabled="processingRequests[selectedRequest.requestId]" @click="rejectRequest">拒绝</a-button></div></div>
       </main>
       <main class="detail-pane" v-else-if="selectedDiscovery" @click="clearDiscoverySelection">
         <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname)">{{ initials(selectedDiscovery.nickname) }}</div><h2>{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag :color="selectedDiscovery.friendshipState === 'removed' ? 'red' : selectedDiscovery.relation === 'friend' ? 'green' : 'arcoblue'">{{ selectedDiscovery.friendshipState === 'removed' ? '不是好友' : selectedDiscovery.relation === 'friend' ? '已是好友' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.friendshipState === 'removed' ? '好友关系已解除，请重新发送申请。' : selectedDiscovery.relation === 'friend' ? '已是好友，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
@@ -210,6 +210,7 @@ const sendingMessage = ref(false)
 const showPeerInfo = ref(false)
 const selectedRequest = ref<FriendRequest>()
 const selectedDiscovery = ref<Peer>()
+const processingRequests = reactive<Record<string, boolean>>({})
 const termsVisible = ref(false)
 const diagnostic = ref<any>()
 const deviceInfo = ref<any>()
@@ -230,6 +231,7 @@ const friendsWidth = ref(storedSize('flyqpro.friendsWidth', 310, 220, 440))
 const discoveryWidth = ref(storedSize('flyqpro.discoveryWidth', 320, 240, 460))
 const composerHeight = ref(storedSize('flyqpro.composerHeight', 158, 120, 320))
 const emojiOpen = ref(false)
+const composerInput = ref<HTMLTextAreaElement>()
 const emojis = [...new Set('😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫡 🤭 🫢 🤫 🤥 😶 😐 😑 😬 🫠 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👿 👹 👺 🤡 💩 👻 💀 ☠️ 👽 👾 🤖 🎃 😺 😸 😹 😻 😼 😽 🙀 😿 😾 👋 🤚 🖐️ ✋ 🖖 👌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🙏 ✍️ 💅 🤝 💪 🦾 🖕 👂 🦻 👃 🧠 🫀 🫁 🦷 🦴 👀 👁️ 👅 👄 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 🆔 ⚛️ 🉑 ☢️ ☣️ 📛 🚫 ⛔ 📵 🚯 🚳 🚷 🔞 📶 🚸 ⚠️ 🔱 ♻️ ✅ ❇️ ✳️ ❎ 🌐 💠 Ⓜ️ 🌀 💤 🆚 🆗 🆕 🆓 🆒 🆘 🛑 ⛽ 🚧 🔰 ♻️ 💯 🔥 ✨ ⭐ 🌟 💫 💥 💢 💦 💨 🕳️ 💬 👁️‍🗨️ 🗨️ 🗯️ 💭 💤 🎉 🎊 🎈 🎁 🎀 🎂 🍰 🥂 🍻 ☕ 🍵 🧋 🍺 🍷 🥤 🍔 🍟 🍕 🌮 🍣 🍜 🍎 🍉 🍓 🥑 ⚽ 🏀 🏈 ⚾ 🎾 🏐 🏓 🥊 🏆 🥇 🎮 🎲 🎵 🎶 🎸 🎹 🎤 📷 📸 💻 🖥️ ⌚ 📱 💡 🔋 🔌 💰 💎 🚗 ✈️ 🚀 🛸 🏠 🏢 🌈 ☀️ 🌙 ⛅ ❄️ ☔ 🌊 🌍'.split(' '))]
 const pendingImages = ref<string[]>([])
 const messagePreviews = reactive<Record<string, string>>({})
@@ -335,6 +337,17 @@ function conversationForPeer(deviceId: string) { return store.conversations.find
 function unreadCount(deviceId: string) { return conversationForPeer(deviceId)?.unreadCount || 0 }
 function unreadLabel(count: number) { return count > 99 ? '99+' : String(count) }
 function requestStatusText(status: string, direction = '') { if (direction === 'mutual' && status !== 'accepted' && status !== 'rejected') return '双方已申请'; return ({ pending: '待处理', accepted: '已同意', rejected: '已拒绝', sent: '等待对方处理', queued: '等待发送' } as Record<string, string>)[status] || '申请记录' }
+function isIncomingPending(request: FriendRequest) { return request.status === 'pending' && request.direction !== 'sent' }
+async function selectEmoji(emoji: string) {
+  draft.value += emoji
+  emojiOpen.value = false
+  await nextTick()
+  const input = composerInput.value
+  if (!input || input.disabled) return
+  input.focus()
+  const cursor = input.value.length
+  input.setSelectionRange(cursor, cursor)
+}
 function requestDeviceLabel(request: FriendRequest) { const peer = store.peers.find((item) => item.deviceId === request.deviceId); if (!peer) return '设备信息同步中'; return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function peerDeviceLabel(peer: Peer) { return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
@@ -585,8 +598,30 @@ function selectContact(peer: Peer) {
   selectedDiscovery.value = peer
 }
 async function addPeer() { if (!selectedDiscovery.value || isFriend(selectedDiscovery.value.deviceId)) return; try { const request = await ChatService.SendFriendRequest(selectedDiscovery.value.deviceId, '你好，我想和你成为好友'); store.requests = [request, ...store.requests.filter((item) => item.requestId !== request.requestId && item.deviceId !== request.deviceId)]; Message.success('好友申请已发送') } catch (error: any) { Message.error(error?.message || '发送申请失败') } }
-async function acceptRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; const deviceId = selectedRequest.value.deviceId; await ChatService.AcceptFriendRequest(selectedRequest.value.requestId); store.clearHiddenFriend(deviceId); Message.success('已添加好友'); selectedRequest.value = undefined; selectedDiscovery.value = undefined; store.requests = await ChatService.ListFriendRequests(); store.peers = await ChatService.ListPeers() }
-async function rejectRequest() { if (!selectedRequest.value || selectedRequest.value.status !== 'pending') return; await ChatService.RejectFriendRequest(selectedRequest.value.requestId); selectedRequest.value = undefined; store.requests = await ChatService.ListFriendRequests() }
+async function processFriendRequest(request: FriendRequest, action: 'accept' | 'reject') {
+  if (!isIncomingPending(request) || processingRequests[request.requestId]) return
+  processingRequests[request.requestId] = true
+  try {
+    if (action === 'accept') {
+      await ChatService.AcceptFriendRequest(request.requestId)
+      store.clearHiddenFriend(request.deviceId)
+      Message.success('已添加好友')
+    } else {
+      await ChatService.RejectFriendRequest(request.requestId)
+      Message.success('已拒绝好友申请')
+    }
+    store.requests = await ChatService.ListFriendRequests()
+    store.peers = await ChatService.ListPeers()
+    if (selectedRequest.value?.requestId === request.requestId) selectedRequest.value = undefined
+    selectedDiscovery.value = undefined
+  } catch (error: any) {
+    Message.error(error?.message || (action === 'accept' ? '同意申请失败' : '拒绝申请失败'))
+  } finally {
+    delete processingRequests[request.requestId]
+  }
+}
+async function acceptRequest() { if (selectedRequest.value) await processFriendRequest(selectedRequest.value, 'accept') }
+async function rejectRequest() { if (selectedRequest.value) await processFriendRequest(selectedRequest.value, 'reject') }
 async function appendSentMessage(message: any) {
   const isNewActiveMessage = conversationVisible.value && message?.conversationId === `conv-${activePeer.value?.deviceId}` && !activeMessages.value.some((item) => item.messageId === message.messageId)
   store.handleEvent('chat:message', message)
@@ -1856,4 +1891,19 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
   .message-scroll { padding-left: 14px; padding-right: 14px; }
 }
 
+.discovery-pane .pending-request { border-left: 3px solid #ff7d00; padding-left: 15px; background: #fff7e8; }
+.chat-app .discovery-pane .pending-request,
+.chat-app .discovery-pane .pending-request:hover,
+.chat-app .discovery-pane .pending-request.selected { background: #fff7e8; border-left-color: #ff7d00; }
+.request-avatar { position: relative; }
+.discovery-pane .avatar i.request-pending-dot { position: absolute; top: -2px; right: -2px; bottom: auto; width: 9px; height: 9px; border: 2px solid #fff; border-radius: 50%; background: #f53f3f !important; }
+.request-status-line { display: flex; align-items: center; min-width: 0; gap: 6px; overflow: visible !important; white-space: normal !important; }
+.request-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-request-mark { flex: 0 0 auto; color: #d25f00; background: #fff0d4; border-radius: 10px; padding: 2px 7px; font-size: 11px; font-style: normal; font-weight: 600; line-height: 1.2; }
+.chat-app.theme-dark .pending-request { background: #392c1e; border-left-color: #ffb65c; }
+.chat-app.theme-dark .discovery-pane .pending-request,
+.chat-app.theme-dark .discovery-pane .pending-request:hover,
+.chat-app.theme-dark .discovery-pane .pending-request.selected { background: #392c1e; border-left-color: #ffb65c; }
+.chat-app.theme-dark .pending-request-mark { color: #ffd591; background: #513719; }
+.chat-app.theme-dark .request-pending-dot { border-color: #253249; }
 </style>

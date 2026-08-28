@@ -1,6 +1,34 @@
 import { defineStore } from 'pinia'
 import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress } from './types'
 
+const requestInProgress = new Set(['queued', 'sent', 'pending'])
+
+function requestTime(request: FriendRequest) {
+  const updated = Date.parse(request.updatedAt || '')
+  const created = Date.parse(request.createdAt || '')
+  return Number.isFinite(updated) ? updated : Number.isFinite(created) ? created : 0
+}
+
+/** Keep history in state, but expose one current row per device to the UI. */
+function latestRequestsByDevice(requests: FriendRequest[]) {
+  const grouped = new Map<string, FriendRequest[]>()
+  requests.forEach((request) => {
+    const key = request.deviceId || request.requestId
+    const list = grouped.get(key) || []
+    list.push(request)
+    grouped.set(key, list)
+  })
+  return [...grouped.values()]
+    .map((list) => {
+      const active = list.filter((request) => requestInProgress.has(request.status))
+      return [...(active.length ? active : list)].sort((left, right) => {
+        const timeDelta = requestTime(right) - requestTime(left)
+        return timeDelta || right.requestId.localeCompare(left.requestId)
+      })[0]
+    })
+    .filter(Boolean) as FriendRequest[]
+}
+
 export const useChatStore = defineStore('chat', {
   state: () => ({
     profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false, sharedRootPath: '', sharedEnabled: false, sharedDriveMultiWindow: true } as Profile,
@@ -28,7 +56,8 @@ export const useChatStore = defineStore('chat', {
     contacts: (state) => state.peers.filter((peer) => peer.relation === 'friend' && peer.friendshipState !== 'removed'),
     friends: (state) => state.peers.filter((peer) => !state.hiddenFriendIds[peer.deviceId] && peer.visibleInFriends !== false && (peer.relation === 'friend' || peer.friendshipState === 'removed')),
     discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online && peer.relation !== 'friend'),
-    pendingRequests: (state) => state.requests.filter((request) => request.status === 'pending' && request.direction !== 'sent'),
+    visibleRequests: (state) => latestRequestsByDevice(state.requests),
+    pendingRequests: (state) => latestRequestsByDevice(state.requests).filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },
   actions: {

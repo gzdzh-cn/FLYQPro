@@ -154,6 +154,42 @@ func TestIncomingRequestAfterDatabaseResetIsPending(t *testing.T) {
 	}
 }
 
+func TestPendingFriendRequestSurvivesDatabaseReopen(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	ctx := context.Background()
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	request := FriendRequest{
+		RequestID: "request-persisted",
+		DeviceID:  "peer-persisted",
+		Nickname:  "持久化申请",
+		Message:   "请通过好友申请",
+		Status:    "pending",
+		Direction: "received",
+		CreatedAt: nowString(),
+	}
+	if err := SaveFriendRequest(ctx, request); err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	if err := db.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	requests, err := ListFriendRequests(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].RequestID != request.RequestID || requests[0].Status != "pending" || requests[0].Direction != "received" {
+		t.Fatalf("待处理好友申请重启后未恢复: %+v", requests)
+	}
+}
+
 func TestNewRequestIsNotHiddenByAcceptedHistory(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
@@ -500,6 +536,41 @@ func TestFriendRemovedFrameDowngradesRemotePeer(t *testing.T) {
 	removed, err := IsFriendRemoved(ctx, "peer-removed-notify")
 	if err != nil || !removed {
 		t.Fatalf("解除好友帧未留下关系删除标记: %v, %v", err, removed)
+	}
+}
+
+func TestFriendRemovedFrameDoesNotClearNewPendingRequest(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	ctx := context.Background()
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-pending-after-remove", Relation: PeerRelation, RelationshipVersion: "old-version"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveFriendRequest(ctx, FriendRequest{
+		RequestID: "readd-pending",
+		DeviceID:  "peer-pending-after-remove",
+		Nickname:  "重新申请设备",
+		Status:    "pending",
+		Direction: "received",
+		CreatedAt: nowString(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	NewEngine().handleWire(nil, wireMessage{DeviceID: "peer-pending-after-remove"}, wireMessage{
+		Type:                "friend_removed",
+		RelationshipVersion: "old-version",
+	}, nil)
+	requests, err := ListFriendRequests(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].RequestID != "readd-pending" || requests[0].Status != "pending" {
+		t.Fatalf("关系同步不应清除新的待处理申请: %+v", requests)
 	}
 }
 

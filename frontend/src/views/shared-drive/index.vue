@@ -128,9 +128,10 @@ const thumbnailUrls = reactive<Record<string, string>>({})
 const thumbnailLoading = reactive(new Set<string>())
 const thumbnailFailed = reactive(new Set<string>())
 const thumbnailQueued = new Set<string>()
-const thumbnailQueue: Array<{ entry: Entry; generation: number }> = []
+const thumbnailQueue: Array<{ entry: Entry; generation: number; attempt: number }> = []
 let thumbnailActive = 0
 let thumbnailGeneration = 0
+let thumbnailBatchTimer: number | undefined
 let thumbnailObserver: IntersectionObserver | undefined
 const settings = reactive({ enabled: false, rootPath: '', fileCount: 0, folderCount: 0, availableBytes: 0, statsLoading: false, statsReady: false, statsUpdatedAt: '' })
 const context = reactive({ visible: false, x: 0, y: 0, entry: undefined as Entry | undefined })
@@ -177,10 +178,18 @@ function enqueueThumbnail(entry: Entry) {
   if (!isImageEntry(entry) || thumbnailUrls[path] || thumbnailLoading.has(path) || thumbnailFailed.has(path) || thumbnailQueued.has(path)) return
   thumbnailQueued.add(path)
   thumbnailLoading.add(path)
-  thumbnailQueue.push({ entry, generation: thumbnailGeneration })
+  thumbnailQueue.push({ entry, generation: thumbnailGeneration, attempt: 0 })
   void drainThumbnailQueue()
 }
 async function drainThumbnailQueue() {
+  if (mode.value === 'friend') {
+    if (thumbnailBatchTimer !== undefined) return
+    thumbnailBatchTimer = window.setTimeout(() => {
+      thumbnailBatchTimer = undefined
+      void drainFriendThumbnailQueue()
+    }, 35)
+    return
+  }
   while (thumbnailActive < 3 && thumbnailQueue.length) {
     const item = thumbnailQueue.shift()
     if (!item) return
@@ -190,6 +199,68 @@ async function drainThumbnailQueue() {
       thumbnailActive--
       void drainThumbnailQueue()
     })
+  }
+}
+async function drainFriendThumbnailQueue() {
+  while (thumbnailActive < 2 && thumbnailQueue.length) {
+    const first = thumbnailQueue.shift()
+    if (!first) return
+    const batch = [first]
+    while (batch.length < 16 && thumbnailQueue.length) {
+      const next = thumbnailQueue.shift()
+      if (next) batch.push(next)
+    }
+    batch.forEach((item) => thumbnailQueued.delete(item.entry.relativePath))
+    thumbnailActive++
+    void loadThumbnailBatch(batch, first.generation).finally(() => {
+      thumbnailActive--
+      void drainFriendThumbnailQueue()
+    })
+  }
+}
+function retryThumbnail(item: { entry: Entry; generation: number; attempt: number }) {
+  if (item.generation !== thumbnailGeneration || item.attempt >= 4) {
+    if (item.generation === thumbnailGeneration) {
+      thumbnailLoading.delete(item.entry.relativePath)
+      thumbnailFailed.add(item.entry.relativePath)
+    }
+    return
+  }
+  const delays = [300, 700, 1500, 3000]
+  window.setTimeout(() => {
+    if (item.generation !== thumbnailGeneration || thumbnailUrls[item.entry.relativePath]) return
+    thumbnailQueued.add(item.entry.relativePath)
+    thumbnailQueue.push({ ...item, attempt: item.attempt + 1 })
+    void drainThumbnailQueue()
+  }, delays[item.attempt] || 3000)
+}
+async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: number; attempt: number }>, generation: number) {
+  if (generation !== thumbnailGeneration) return
+  try {
+    const results = await ChatService.GetFriendSharedEntryThumbnails(deviceId, items.map(({ entry }) => ({
+      relativePath: entry.relativePath,
+      entryId: entry.entryId,
+      fileSize: entry.size,
+      modifiedAt: entry.modifiedAt,
+    })))
+    if (generation !== thumbnailGeneration) return
+    const byPath = new Map((results || []).map((result: any) => [result.relativePath, result]))
+    items.forEach((item) => {
+      const path = item.entry.relativePath
+      const result: any = byPath.get(path)
+      if (result?.status === 'ready' && result.payload) {
+        const mime = result.thumbnailMime || result.mimeType || 'image/jpeg'
+        thumbnailUrls[path] = `data:${mime};base64,${result.payload}`
+        thumbnailLoading.delete(path)
+      } else if (result?.status === 'pending') {
+        retryThumbnail(item)
+      } else {
+        thumbnailLoading.delete(path)
+        thumbnailFailed.add(path)
+      }
+    })
+  } catch {
+    items.forEach((item) => retryThumbnail(item))
   }
 }
 async function loadThumbnail(entry: Entry, generation: number) {
@@ -264,7 +335,7 @@ function applyTheme(theme: string) {
 }
 async function loadTheme() { try { const profile = await ChatService.GetProfile(); applyTheme(profile.theme || 'system') } catch { applyTheme('system') } }
 async function loadSettings() { if (mode.value !== 'owner') return; const result = await ChatService.GetSharedFolderSettings(); Object.assign(settings, result); sharedDisabled.value = false }
-function resetThumbnailState() { thumbnailGeneration++; thumbnailQueue.length = 0; thumbnailQueued.clear(); Object.keys(thumbnailUrls).forEach((key) => delete thumbnailUrls[key]); thumbnailLoading.clear(); thumbnailFailed.clear() }
+function resetThumbnailState() { thumbnailGeneration++; if (thumbnailBatchTimer !== undefined) { window.clearTimeout(thumbnailBatchTimer); thumbnailBatchTimer = undefined }; thumbnailQueue.length = 0; thumbnailQueued.clear(); Object.keys(thumbnailUrls).forEach((key) => delete thumbnailUrls[key]); thumbnailLoading.clear(); thumbnailFailed.clear() }
 function resetViewState() { relativePath.value = ''; search.value = ''; searchVisible.value = false; entries.value = []; selected.clear(); hasMore.value = false; nextOffset.value = 0; loadingMore.value = false; resetThumbnailState(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
 async function loadEntriesPage(append = false) {
   if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) return
@@ -388,7 +459,7 @@ function handlePointerDown(event: PointerEvent) {
 }
 watch([viewMode, search], () => scheduleInitialThumbnails())
 onMounted(async () => { try { isMac.value = System.IsMac() } catch {} thumbnailObserver = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((items) => { for (const item of items) { if (!item.isIntersecting) continue; const path = (item.target as HTMLElement).dataset.thumbnailPath || ''; const entry = filteredEntries.value.find((candidate) => candidate.relativePath === path); if (entry) enqueueThumbnail(entry); thumbnailObserver?.unobserve(item.target) } }, { root: document.querySelector('.file-list'), rootMargin: '160px' }) : undefined; resetViewState(); window.addEventListener('pointerdown', handlePointerDown); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status?.rootPath === settings.rootPath) Object.assign(settings, status) }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; cancelThemeEvent = Events.On('chat:profile-updated', (event: any) => { const profile = event?.data ?? event; if (profile?.theme) applyTheme(profile.theme); else void loadTheme() }); await loadTheme(); await refresh() })
-onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerDown); window.removeEventListener('keydown', handleKeydown); thumbnailObserver?.disconnect(); thumbnailObserver = undefined; cancelSharedEvents?.(); cancelThemeEvent?.() })
+onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerDown); window.removeEventListener('keydown', handleKeydown); thumbnailObserver?.disconnect(); thumbnailObserver = undefined; resetThumbnailState(); cancelSharedEvents?.(); cancelThemeEvent?.() })
 </script>
 
 <style scoped lang="less">

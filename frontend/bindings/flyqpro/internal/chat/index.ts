@@ -18,5 +18,7 @@ export {
     SharedEntriesPage,
     SharedEntry,
     SharedFolderStatus,
+    SharedThumbnailRequest,
+    SharedThumbnailResult,
     SharedTransfer
 } from "./models.js";

@@ -20,6 +20,7 @@ import (
 )
 
 const sharedDriveCapability = "shared-drive-v1"
+const sharedThumbnailBatchCapability = "shared-thumbnail-batch-v1"
 const maxSharedPreviewSize = 32 * 1024 * 1024
 
 type sharedTransferSession struct {
@@ -102,6 +103,54 @@ func (e *Engine) handleSharedThumbnailRequest(conn net.Conn, hello, message wire
 		status = "pending"
 	}
 	_ = writeWire(conn, wireMessage{Type: "share_thumbnail_response", Status: status, RelativePath: message.RelativePath, MimeType: mimeType, Payload: data})
+}
+
+func (e *Engine) handleSharedThumbnailBatchRequest(conn net.Conn, hello, message wireMessage) {
+	if !e.sharedAccessAllowed(hello.DeviceID) {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
+		return
+	}
+	requests := message.ThumbnailRequests
+	if len(requests) == 0 {
+		_ = writeWire(conn, wireMessage{Type: "share_thumbnail_batch_response", Status: "ok", ThumbnailResults: []SharedThumbnailResult{}})
+		return
+	}
+	if len(requests) > 24 {
+		requests = requests[:24]
+	}
+	profile := e.Profile()
+	e.mu.RLock()
+	provider := e.sharedThumbnailProvider
+	e.mu.RUnlock()
+	results := make([]SharedThumbnailResult, 0, len(requests))
+	for _, request := range requests {
+		clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(request.RelativePath)))
+		result := SharedThumbnailResult{RelativePath: clean, Status: "unavailable"}
+		if clean == "." || strings.Contains(clean, "..") {
+			result.Error = SharedPathInvalidError
+			results = append(results, result)
+			continue
+		}
+		var data, mimeType string
+		var err error
+		if provider != nil {
+			data, mimeType, err = provider(profile.SharedRootPath, clean)
+		} else {
+			data, mimeType, err = GetSharedEntryThumbnail(profile.SharedRootPath, clean)
+		}
+		if err != nil {
+			result.Error = "SHARED_THUMBNAIL_UNAVAILABLE"
+		} else if data == "" {
+			result.Status = "pending"
+		} else {
+			result.Status = "ready"
+			result.MimeType = mimeType
+			result.ThumbnailMime = mimeType
+			result.Payload = data
+		}
+		results = append(results, result)
+	}
+	_ = writeWire(conn, wireMessage{Type: "share_thumbnail_batch_response", Status: "ok", ThumbnailResults: results})
 }
 
 func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireMessage, session *wireSession) {
@@ -210,6 +259,10 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 			continue
 		}
 		decoder := json.NewDecoder(conn)
+		// A remote SAF provider can be slow or disappear while resolving the
+		// shared tree. Never leave a shared-drive page spinning forever while
+		// waiting for the hello response.
+		_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
 		var response wireMessage
 		if err := decoder.Decode(&response); err != nil {
 			_ = conn.Close()
@@ -232,6 +285,7 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 			lastErr = fmt.Errorf("FRIENDSHIP_REQUIRED")
 			continue
 		}
+		_ = conn.SetReadDeadline(time.Time{})
 		responseDialect, compatible := protocolDialectForMessage(response)
 		if !compatible || !hasCapability(response.Capabilities, sharedDriveCapability) {
 			_ = conn.Close()
@@ -267,10 +321,12 @@ func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, rela
 	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath, ListOffset: offset, ListLimit: limit}); err != nil {
 		return SharedEntriesPage{}, err
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	var response wireMessage
 	if err := decoder.Decode(&response); err != nil {
 		return SharedEntriesPage{}, err
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	if response.Type == "share_error" {
 		return SharedEntriesPage{}, fmt.Errorf("%s", response.Status)
 	}
@@ -545,6 +601,49 @@ func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, re
 		mimeType = "image/jpeg"
 	}
 	return "data:" + mimeType + ";base64," + response.Payload, nil
+}
+
+// GetFriendSharedEntryThumbnails fetches a group of bounded previews over one
+// authenticated connection. A pending result is intentionally non-blocking:
+// the remote peer generates it in the background and the caller can retry.
+func (e *Engine) GetFriendSharedEntryThumbnails(ctx context.Context, deviceID string, requests []SharedThumbnailRequest) ([]SharedThumbnailResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(requests) == 0 {
+		return []SharedThumbnailResult{}, nil
+	}
+	if len(requests) > 24 {
+		requests = requests[:24]
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation != PeerRelation {
+		return nil, fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
+	if len(peer.Capabilities) == 0 || !hasCapability(peer.Capabilities, sharedThumbnailBatchCapability) {
+		return nil, fmt.Errorf("SHARED_THUMBNAIL_BATCH_UNSUPPORTED")
+	}
+	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if err := writeWire(conn, wireMessage{Type: "share_thumbnail_batch_request", ThumbnailRequests: requests}); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	var response wireMessage
+	if err := decoder.Decode(&response); err != nil {
+		return nil, err
+	}
+	if response.Type == "share_error" {
+		return nil, fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "share_thumbnail_batch_response" {
+		return nil, fmt.Errorf("共享图片缩略图批量响应无效")
+	}
+	return response.ThumbnailResults, nil
 }
 
 func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relativePath, targetPath string) (SharedTransfer, error) {

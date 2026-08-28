@@ -477,6 +477,16 @@ func SupersedeActiveFriendRequests(ctx context.Context, deviceID, direction stri
 	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND direction=? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, direction)
 }
 
+// SupersedeActiveFriendRequestsExcept is used after the new request has been
+// durably inserted. Keeping the insert first means a restart cannot lose the
+// incoming request, while excluding its request ID keeps the new row pending.
+func SupersedeActiveFriendRequestsExcept(ctx context.Context, deviceID, direction, requestID string) error {
+	if direction == "" {
+		return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND request_id<>? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, requestID)
+	}
+	return exec(ctx, `UPDATE friend_requests SET status='superseded', updated_at=? WHERE device_id=? AND direction=? AND request_id<>? AND status IN ('queued', 'sent', 'pending')`, nowString(), deviceID, direction, requestID)
+}
+
 func ClearFriendRequestHistory(ctx context.Context) error {
 	database := db.DB()
 	if database == nil {
