@@ -102,8 +102,8 @@
           <div class="composer-tools"><button class="emoji-toggle" title="表情" :disabled="!activePeerCanSend" @mousedown.prevent.stop="emojiOpen = !emojiOpen" @keydown.enter.space.prevent="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" :disabled="!activePeerCanSend" @mousedown.prevent.stop="pickFile" @keydown.enter.space.prevent="pickFile"><icon-folder /></button><button title="打开好友共享盘" :disabled="!activePeerCanSend" @mousedown.prevent.stop="openFriendSharedDrive" @keydown.enter.space.prevent="openFriendSharedDrive"><icon-cloud /></button></div>
           <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @click="draft += emoji">{{ emoji }}</button></div>
           <div v-if="pendingImages.length" class="pending-images"><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
-          <textarea v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent="sendMessage" />
-          <div class="composer-foot"><span>{{ activePeerCanSend ? '消息将通过局域网加密传输' : '当前不是好友，请重新申请好友' }}</span><a-button type="primary" :disabled="!activePeerCanSend || (!draft.trim() && !pendingImages.length)" @click="sendMessage">发送</a-button></div>
+          <textarea v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
+          <div class="composer-foot"><span>{{ activePeerCanSend ? '消息将通过局域网加密传输' : '当前不是好友，请重新申请好友' }}</span><a-button type="primary" :loading="sendingMessage" :disabled="sendingMessage || !activePeerCanSend || (!draft.trim() && !pendingImages.length)" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
       </main>
@@ -206,6 +206,7 @@ const draft = ref('')
 const quoteMessageId = ref('')
 const quoteContent = ref('')
 const pickedFile = ref('')
+const sendingMessage = ref(false)
 const showPeerInfo = ref(false)
 const selectedRequest = ref<FriendRequest>()
 const selectedDiscovery = ref<Peer>()
@@ -592,7 +593,47 @@ async function appendSentMessage(message: any) {
   if (isNewActiveMessage) scheduleScrollToBottom(false, 'animated')
   await nextTick()
 }
-async function sendMessage() { if (!activePeerCanSend.value || !activePeer.value || (!draft.value.trim() && !pendingImages.value.length)) return; scrollToBottom(); try { if (draft.value.trim()) { const message = await ChatService.SendMessageWithMetadata(activePeer.value.deviceId, draft.value.trim(), quoteMessageId.value, quoteContent.value, ''); await appendSentMessage(message) } for (const image of pendingImages.value) { const message = await ChatService.SendImage(activePeer.value.deviceId, image); await appendSentMessage(message) } draft.value = ''; quoteMessageId.value = ''; quoteContent.value = ''; pendingImages.value = [] } catch (error: any) { Message.error(error?.message || '发送失败') } }
+async function sendMessage() {
+  // Enter can produce several key events before the asynchronous Wails call
+  // returns. Claim the current draft synchronously so a rapid Enter or button
+  // double-click cannot create multiple messages with new IDs. A later draft
+  // typed while this send is in flight is kept for the next send.
+  if (sendingMessage.value || !activePeerCanSend.value || !activePeer.value) return
+  const peer = activePeer.value
+  const content = draft.value.trim()
+  const images = [...pendingImages.value]
+  const quotedMessageId = quoteMessageId.value
+  const quotedContent = quoteContent.value
+  if (!content && !images.length) return
+  sendingMessage.value = true
+  draft.value = ''
+  quoteMessageId.value = ''
+  quoteContent.value = ''
+  pendingImages.value = []
+  scrollToBottom()
+  try {
+    if (content) {
+      const message = await ChatService.SendMessageWithMetadata(peer.deviceId, content, quotedMessageId, quotedContent, '')
+      await appendSentMessage(message)
+    }
+    for (const image of images) {
+      const message = await ChatService.SendImage(peer.deviceId, image)
+      await appendSentMessage(message)
+    }
+  } catch (error: any) {
+    // Restore the consumed draft only when the user did not start composing a
+    // new one while the original request was running.
+    if (!draft.value && !pendingImages.value.length && activePeer.value?.deviceId === peer.deviceId) {
+      draft.value = content
+      quoteMessageId.value = quotedMessageId
+      quoteContent.value = quotedContent
+      pendingImages.value = images
+    }
+    Message.error(error?.message || '发送失败')
+  } finally {
+    sendingMessage.value = false
+  }
+}
 function handlePaste(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); files.forEach((file) => { const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') pendingImages.value.push(reader.result) }; reader.readAsDataURL(file) }) }
 async function loadMessagePreview(message: any) {
   if (!message?.attachmentId || !isImageMessage(message)) return
