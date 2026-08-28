@@ -13,6 +13,8 @@ import (
 type AppBadgeService struct {
 	dock *dock.DockService
 	mu   sync.Mutex
+	last int
+	set  bool
 }
 
 func NewAppBadgeService(dockService *dock.DockService) *AppBadgeService {
@@ -26,8 +28,19 @@ func (s *AppBadgeService) SetCount(count int) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if count <= 0 {
-		return s.dock.RemoveBadge()
+	if s.set && s.last == count {
+		return nil
 	}
-	return s.dock.SetBadge(strconv.Itoa(count))
+	if count <= 0 {
+		err := s.dock.RemoveBadge()
+		if err == nil {
+			s.last, s.set = 0, true
+		}
+		return err
+	}
+	err := s.dock.SetBadge(strconv.Itoa(count))
+	if err == nil {
+		s.last, s.set = count, true
+	}
+	return err
 }

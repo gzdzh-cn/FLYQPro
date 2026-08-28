@@ -257,6 +257,9 @@ let resizeState: { kind: 'friends' | 'discover' | 'composer'; startX: number; st
 let notificationAudio: AudioContext | undefined
 let audioUnlocked = false
 let pendingNotificationTone = false
+const desktopForeground = ref(true)
+const knownRequestStates = new Map<string, string>()
+let requestWatchReady = false
 let suppressScrollReadUntil = 0
 let scrollScheduleFrame = 0
 let scrollAnimationFrame = 0
@@ -666,6 +669,11 @@ function playNotificationTone() {
     else play()
   } catch { /* browser audio may be unavailable */ }
 }
+function updateDesktopForeground() {
+  const visible = document.visibilityState === 'visible' && document.hasFocus()
+  desktopForeground.value = visible
+  if (visible) pendingNotificationTone = false
+}
 async function pickFile() { if (!activePeerCanSend.value || !activePeer.value) return; pickedFile.value = await ChatService.PickFile(); if (pickedFile.value && activePeer.value) { try { scrollToBottom(); const message = await ChatService.SendFile(activePeer.value.deviceId, pickedFile.value); await appendSentMessage(message); notifyAttachmentResult(message) } catch (error: any) { Message.error(error?.message || '文件发送失败') } finally { pickedFile.value = '' } } }
 async function retryMessage(message: any) {
   if (!message?.messageId || retryingMessages[message.messageId]) return
@@ -1061,8 +1069,27 @@ watch(() => store.lastMessageEvent, (message) => {
   }
   if (isActiveConversation && userNearBottom.value) scheduleScrollToBottom(true, 'animated')
   else if (isActiveConversation) newMessageCount.value += 1
+  // Keep the audible cue available while the app is open as well as when it
+  // is backgrounded. System banners remain a background-only concern.
   playNotificationTone()
 })
+watch(() => store.requests, (requests) => {
+  const next = new Map(requests.map((request) => [request.requestId, `${request.status}:${request.updatedAt || request.createdAt}`]))
+  if (!requestWatchReady) {
+    knownRequestStates.clear()
+    next.forEach((value, key) => knownRequestStates.set(key, value))
+    requestWatchReady = true
+    return
+  }
+  const hasNewPending = requests.some((request) => {
+    if (request.status !== 'pending' || request.direction === 'sent') return false
+    const state = `${request.status}:${request.updatedAt || request.createdAt}`
+    return knownRequestStates.get(request.requestId) !== state
+  })
+  if (hasNewPending) playNotificationTone()
+  knownRequestStates.clear()
+  next.forEach((value, key) => knownRequestStates.set(key, value))
+}, { deep: true })
 watch(section, (value, previous) => {
   if (previous === 'friends' && value !== 'friends') saveActiveScrollPosition()
   if (value !== 'friends') closePeerInfo()
@@ -1076,6 +1103,10 @@ watch(() => store.peers, () => {
   else if (!store.discovered.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId) && !store.contacts.some((peer) => peer.deviceId === selectedDiscovery.value?.deviceId)) selectedDiscovery.value = undefined
 }, { deep: true })
 onMounted(async () => {
+  updateDesktopForeground()
+  document.addEventListener('visibilitychange', updateDesktopForeground)
+  window.addEventListener('focus', updateDesktopForeground)
+  window.addEventListener('blur', updateDesktopForeground)
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
   window.addEventListener('pointerdown', closeContextMenusOnPointerDown)
@@ -1083,7 +1114,7 @@ onMounted(async () => {
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
