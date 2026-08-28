@@ -216,6 +216,39 @@ func TestDiscoveryGracePeriodKeepsStrangerForTwoMisses(t *testing.T) {
 	}
 }
 
+func TestDiscoveryLeaseKeepsRecentlySeenStrangerVisible(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{
+		DeviceID:         "stranger-lease",
+		Nickname:         "设备",
+		Relation:         DiscoveredState,
+		DiscoveryVisible: true,
+		Online:           true,
+		LastSeen:         nowString(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+	for round := 0; round < discoveryMissThreshold+2; round++ {
+		engine.removeUnseenDiscoveredPeers(map[string]struct{}{})
+	}
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || !peers[0].DiscoveryVisible || !peers[0].Online {
+		t.Fatalf("recently announced peer should remain visible during scan loss: %+v", peers)
+	}
+}
+
 func TestDiscoveryGracePeriodHidesFriendButKeepsRelation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))

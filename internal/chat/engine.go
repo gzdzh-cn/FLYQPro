@@ -184,6 +184,12 @@ var (
 
 const discoveryMissThreshold = 3
 
+// A discovery scan is only a sampling window. Keep a peer with a recent
+// announce visible while one or more scan responses are lost; explicit
+// offline/withdraw packets still remove it immediately. The miss threshold
+// is applied after this lease expires, so a healthy peer does not flicker.
+const discoveryLeaseDuration = 30 * time.Second
+
 func NewEngine() *Engine {
 	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time)}
 }
@@ -1571,6 +1577,12 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 			e.resetDiscoveryMiss(peer.DeviceID)
 			continue
 		}
+		if peer.DiscoveryVisible && discoveryLeaseIsFresh(peer.LastSeen) {
+			// The peer announced recently; this scan likely lost a response.
+			// Keep both visibility and online state unchanged until the lease
+			// expires or an explicit offline/withdraw is received.
+			continue
+		}
 
 		e.discoveryMu.Lock()
 		if e.discoveryMisses == nil {
@@ -1603,6 +1615,11 @@ func (e *Engine) removeUnseenDiscoveredPeers(seen map[string]struct{}) {
 		}
 		e.forgetDiscoveredPeer(peer.DeviceID)
 	}
+}
+
+func discoveryLeaseIsFresh(lastSeen string) bool {
+	seenAt := parseTime(lastSeen)
+	return !seenAt.IsZero() && time.Since(seenAt) < discoveryLeaseDuration
 }
 
 func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {
@@ -1940,12 +1957,13 @@ func (e *Engine) SendFriendRequest(ctx context.Context, deviceID, message string
 				}
 			}
 		}
-		if !removed && sentActive {
-			if receivedActive {
-				return latestReceived, fmt.Errorf("双方已申请，等待任一方处理")
-			}
-			return latestSent, nil
+		if !removed && sentActive && receivedActive {
+			return latestReceived, fmt.Errorf("双方已申请，等待任一方处理")
 		}
+		// A single older outgoing request is deliberately not a hard block.
+		// The recipient may have cleared its request history, so the user must
+		// be able to send a fresh request_id. prepareNewFriendRequest below
+		// supersedes the old outgoing row before persisting the new one.
 	}
 	// A new outgoing request supersedes only the previous outgoing request;
 	// the latest incoming request, if any, remains for mutual projection.
