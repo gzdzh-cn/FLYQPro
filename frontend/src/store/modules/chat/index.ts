@@ -19,6 +19,12 @@ function requestStatusRank(status: string) {
   }
 }
 
+const discoveryNameCollator = new Intl.Collator('zh-Hans-u-co-pinyin', { sensitivity: 'base', numeric: true })
+
+function peerDisplayName(peer: Peer) {
+  return (peer.remark || peer.nickname || '').trim()
+}
+
 /** Keep history in state, but expose one current request projection per device. */
 function latestRequestsByDevice(requests: FriendRequest[]) {
   const grouped = new Map<string, FriendRequest[]>()
@@ -70,7 +76,9 @@ export const useChatStore = defineStore('chat', {
     // reload merely because the peer was rediscovered.
     contacts: (state) => state.peers.filter((peer) => peer.relation === 'friend' && peer.friendshipState !== 'removed'),
     friends: (state) => state.peers.filter((peer) => !state.hiddenFriendIds[peer.deviceId] && peer.visibleInFriends !== false && (peer.relation === 'friend' || peer.friendshipState === 'removed')),
-    discovered: (state) => state.peers.filter((peer) => peer.discoveryVisible && peer.online),
+    discovered: (state) => state.peers
+      .filter((peer) => peer.discoveryVisible && peer.online)
+      .sort((left, right) => discoveryNameCollator.compare(peerDisplayName(left), peerDisplayName(right)) || left.deviceId.localeCompare(right.deviceId)),
     visibleRequests: (state) => latestRequestsByDevice(state.requests),
     pendingRequests: (state) => latestRequestsByDevice(state.requests).filter((request) => request.status === 'pending' && request.direction !== 'sent'),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),

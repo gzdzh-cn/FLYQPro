@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type Engine struct {
 	attachmentMigration     bool
 	friendRestoreAt         map[string]time.Time
 	discoveryMisses         map[string]int
+	discoveryPresenceAt     map[string]int64
 	locallyHiddenFriends    map[string]struct{}
 	friendRemovalSyncAt     map[string]time.Time
 	friendRemovalSyncMu     sync.Mutex
@@ -188,10 +190,15 @@ const discoveryMissThreshold = 3
 // announce visible while one or more scan responses are lost; explicit
 // offline/withdraw packets still remove it immediately. The miss threshold
 // is applied after this lease expires, so a healthy peer does not flicker.
-const discoveryLeaseDuration = 30 * time.Second
+// Android sends the same heartbeat every 30 seconds. Keep a few heartbeat
+// intervals in the lease so scheduling jitter or a single lost broadcast
+// cannot make the discovery row blink.
+const discoveryLeaseDuration = 90 * time.Second
+
+const discoveryPresencePrefix = "presence:"
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -1343,15 +1350,24 @@ func (e *Engine) discoveryLoop() {
 			}
 		case "announce":
 			message.DiscoveryScope = e.compatibilityDiscoveryScope(message)
+			if isDiscoveryPresence(message.RequestID) {
+				if message.DiscoveryScope != DiscoveryScopePublic {
+					continue
+				}
+				// Presence is an unsolicited heartbeat, not a response to the
+				// current scan. It refreshes the lease directly.
+				_ = e.handleAnnounce(message)
+				continue
+			}
 			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID, message.DiscoveryScope) {
 				continue
 			}
 			message.IP = addr.IP.String()
 			e.handleAnnounce(message)
 		case "withdraw":
-			e.handleWithdraw(message.DeviceID)
+			e.handleWithdraw(message.DeviceID, message.RequestID)
 		case "offline":
-			e.handleOffline(message.DeviceID)
+			e.handleOffline(message.DeviceID, message.RequestID)
 		}
 	}
 }
@@ -1365,6 +1381,11 @@ func (e *Engine) scanLoop() {
 		case <-ticker.C:
 			unicastProbe := time.Since(lastUnicastProbe) >= 30*time.Second
 			e.scanNetwork(unicastProbe)
+			// Keep discovery presence independent from scan responses. A live
+			// peer therefore remains visible even when one scan is lost.
+			if e.Profile().Discoverable {
+				e.broadcastPresence("announce")
+			}
 			// Discovery has no explicit "goodbye" packet. Re-publish the
 			// computed presence so the UI can turn stale peers offline.
 			e.emit("chat:peer-updated", e.Peers())
@@ -1739,20 +1760,30 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 	if message.DiscoveryScope == DiscoveryScopeFriend && !e.isFriend(message.DeviceID) {
 		return errors.New("FRIEND_DISCOVERY_NOT_ALLOWED")
 	}
+	if discoveryVisible {
+		if isDiscoveryPresence(message.RequestID) {
+			if e.stalePresenceControl(message.DeviceID, message.RequestID) {
+				return nil
+			}
+		}
+	}
 	if err := e.upsertWirePeer(message, discoveryVisible); err != nil {
 		return err
 	}
 	if discoveryVisible {
 		e.resetDiscoveryMiss(message.DeviceID)
+		// Only a public announce is authoritative for the discovery list. A
+		// friend-scoped announce is a directed health response and must not
+		// clear a public presence that was received moments earlier.
+		e.setPeerDiscoveryVisible(message.DeviceID, true)
 	}
-	e.setPeerDiscoveryVisible(message.DeviceID, discoveryVisible)
 	e.emit("chat:peer-updated", e.Peers())
 	if discoveryVisible {
 		if peer, err := e.peer(message.DeviceID); err == nil && peer.FriendshipState == "removed" {
 			e.maybeSyncFriendRemoval(peer)
 		}
 	}
-	if wasFriend {
+	if wasFriend && !isDiscoveryPresence(message.RequestID) {
 		if peer, err := e.peer(message.DeviceID); err == nil {
 			e.maybeSendFriendRestore(peer)
 		}
@@ -1788,6 +1819,10 @@ func (e *Engine) maybeSyncFriendRemoval(peer Peer) {
 func compatibleProtocol(message wireMessage) bool {
 	_, ok := protocolDialectForMessage(message)
 	return ok
+}
+
+func isDiscoveryPresence(requestID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(requestID), discoveryPresencePrefix)
 }
 
 func (e *Engine) maybeSendFriendRestore(peer Peer) {
@@ -3092,7 +3127,10 @@ func (e *Engine) setPeerOnline(deviceID string, online bool) bool {
 	return true
 }
 
-func (e *Engine) handleOffline(deviceID string) {
+func (e *Engine) handleOffline(deviceID string, requestIDs ...string) {
+	if len(requestIDs) > 0 && e.stalePresenceControl(deviceID, requestIDs[0]) {
+		return
+	}
 	peer, err := e.peer(deviceID)
 	if err != nil {
 		return
@@ -3638,6 +3676,15 @@ func (e *Engine) broadcastPresence(kind string) {
 			continue
 		}
 		message := e.helloMessageForDialect(kind, dialect)
+		if kind == "announce" || kind == "offline" || kind == "withdraw" {
+			// Presence control packets can cross on the network. Put a monotonic
+			// sender timestamp in the optional request id so an old offline or
+			// withdraw packet cannot erase a newer online heartbeat.
+			message.RequestID = fmt.Sprintf("%s%d:%s:%s", discoveryPresencePrefix, time.Now().UnixMilli(), kind, newID())
+		}
+		if kind == "announce" {
+			message.DiscoveryScope = DiscoveryScopePublic
+		}
 		for index := range targets {
 			_ = e.sendDiscovery(&targets[index], message)
 		}
@@ -3653,9 +3700,12 @@ func (e *Engine) resetDiscoveryMiss(deviceID string) {
 	e.discoveryMu.Unlock()
 }
 
-func (e *Engine) handleWithdraw(deviceID string) {
+func (e *Engine) handleWithdraw(deviceID string, requestIDs ...string) {
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
+		return
+	}
+	if len(requestIDs) > 0 && e.stalePresenceControl(deviceID, requestIDs[0]) {
 		return
 	}
 	e.resetDiscoveryMiss(deviceID)
@@ -3685,6 +3735,39 @@ func (e *Engine) forgetDiscoveredPeer(deviceID string) {
 	delete(e.peers, deviceID)
 	e.mu.Unlock()
 	e.emit("chat:peer-updated", e.Peers())
+}
+
+// stalePresenceControl rejects a delayed offline/withdraw control packet when
+// a newer heartbeat from the same device has already been observed. Legacy
+// packets without the optional timestamp remain supported.
+func (e *Engine) stalePresenceControl(deviceID, requestID string) bool {
+	timestamp, ok := discoveryPresenceTimestamp(requestID)
+	if !ok {
+		return false
+	}
+	e.discoveryMu.Lock()
+	defer e.discoveryMu.Unlock()
+	if e.discoveryPresenceAt == nil {
+		e.discoveryPresenceAt = make(map[string]int64)
+	}
+	if previous := e.discoveryPresenceAt[deviceID]; previous > timestamp {
+		return true
+	}
+	e.discoveryPresenceAt[deviceID] = timestamp
+	return false
+}
+
+func discoveryPresenceTimestamp(requestID string) (int64, bool) {
+	if !strings.HasPrefix(requestID, discoveryPresencePrefix) {
+		return 0, false
+	}
+	value := strings.TrimPrefix(requestID, discoveryPresencePrefix)
+	separator := strings.IndexByte(value, ':')
+	if separator < 1 {
+		return 0, false
+	}
+	timestamp, err := strconv.ParseInt(value[:separator], 10, 64)
+	return timestamp, err == nil && timestamp > 0
 }
 
 func (e *Engine) Peers() []Peer {
