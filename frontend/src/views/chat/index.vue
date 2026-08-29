@@ -1281,8 +1281,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .self-profile-name strong { font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .self-profile-name span, .self-profile-hint { color: var(--muted); font-size: 12px; }
 .self-profile-body { display: flex; align-items: center; gap: 22px; padding: 20px 4px 12px; }
-.profile-qr-box { width: 156px; height: 156px; flex: 0 0 156px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
-.profile-qr-box img { display: block; width: 144px; height: 144px; image-rendering: pixelated; }
+.profile-qr-box { width: 276px; height: 276px; flex: 0 0 276px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
+.profile-qr-box img { display: block; width: 260px; height: 260px; image-rendering: pixelated; }
 .profile-qr-loading { color: #86909c; font-size: 12px; }
 .self-profile-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; }
 .self-profile-fields div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }

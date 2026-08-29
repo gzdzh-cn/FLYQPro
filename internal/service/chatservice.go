@@ -5,11 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1095,46 +1095,23 @@ func (s *ChatService) GetDeviceInfo() chat.DeviceInfo { return s.engine.DeviceIn
 func (s *ChatService) GetMyQRCode() (string, error) {
 	info := s.engine.DeviceInfo()
 	profile := s.engine.Profile()
-	payload := struct {
-		Version                string `json:"v"`
-		DeviceID               string `json:"deviceId"`
-		FeiqID                 string `json:"feiqId"`
-		Nickname               string `json:"nickname"`
-		Platform               string `json:"platform"`
-		OSVersion              string `json:"osVersion"`
-		IP                     string `json:"ip,omitempty"`
-		Port                   int    `json:"port,omitempty"`
-		PublicKey              string `json:"publicKey,omitempty"`
-		CertificateFingerprint string `json:"certificateFingerprint,omitempty"`
-		Timestamp              int64  `json:"timestamp"`
-	}{
-		Version: "1", DeviceID: info.DeviceID, FeiqID: info.FeiqID,
-		Nickname: profile.Nickname, Platform: info.Platform, OSVersion: info.OSVersion,
-		IP: info.IP, Port: info.Port, PublicKey: info.PublicKeyPEM,
-		CertificateFingerprint: info.CertificateFingerprint, Timestamp: time.Now().Unix(),
-	}
-	jsonData, err := json.Marshal(payload)
+	// QR v2 is deliberately compact. Public keys and certificates made the
+	// previous code too dense for reliable camera scanning when shown inside
+	// the desktop profile card. The Android client verifies the scanned device
+	// ID against the authenticated TLS hello before it sends a friend request.
+	query := url.Values{}
+	query.Set("v", "2")
+	query.Set("id", info.DeviceID)
+	query.Set("f", info.FeiqID)
+	query.Set("n", base64.RawURLEncoding.EncodeToString([]byte(profile.Nickname)))
+	query.Set("p", info.Platform)
+	query.Set("ip", info.IP)
+	query.Set("port", fmt.Sprintf("%d", info.Port))
+	query.Set("t", fmt.Sprintf("%d", time.Now().Unix()))
+	content := "flyqpro://friend?" + query.Encode()
+	png, err := qrcode.Encode(content, qrcode.Medium, 512)
 	if err != nil {
-		return "", err
-	}
-	encoded := base64.RawURLEncoding.EncodeToString(jsonData)
-	content := "flyqpro://friend?v=1&data=" + encoded
-	png, err := qrcode.Encode(content, qrcode.Medium, 360)
-	if err != nil {
-		// A PEM key can be longer on some installations. Keep the card useful
-		// even if the full discovery payload does not fit the first QR version;
-		// the scanner can still use the device identity and rediscover it on LAN.
-		compactJSON, compactErr := json.Marshal(struct {
-			Version  string `json:"v"`
-			DeviceID string `json:"deviceId"`
-			FeiqID   string `json:"feiqId"`
-			Nickname string `json:"nickname"`
-		}{Version: "1", DeviceID: info.DeviceID, FeiqID: info.FeiqID, Nickname: profile.Nickname})
-		if compactErr != nil {
-			return "", err
-		}
-		content = "flyqpro://friend?v=1&data=" + base64.RawURLEncoding.EncodeToString(compactJSON)
-		png, err = qrcode.Encode(content, qrcode.Low, 360)
+		png, err = qrcode.Encode(content, qrcode.Low, 512)
 		if err != nil {
 			return "", err
 		}
