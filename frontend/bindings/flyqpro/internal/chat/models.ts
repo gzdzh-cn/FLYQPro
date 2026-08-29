@@ -233,6 +233,7 @@ export class DeviceInfo {
     "platform": string;
     "osVersion": string;
     "deviceId": string;
+    "feiqId"?: string;
     "publicKeyPem": string;
     "certificateFingerprint": string;
     "ip": string;

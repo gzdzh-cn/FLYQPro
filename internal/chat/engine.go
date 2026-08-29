@@ -435,8 +435,12 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	wasOnline := false
+	previousAvatarHash := ""
+	previousAvatarVersion := int64(0)
 	if existing, existingErr := e.peer(hello.DeviceID); existingErr == nil {
 		wasOnline = existing.Online
+		previousAvatarHash = existing.AvatarHash
+		previousAvatarVersion = existing.AvatarVersion
 	}
 	discoveryVisible := false
 	if existingErr == nil {
@@ -446,17 +450,18 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: err.Error()})
 		return
 	}
-	// An incoming chat/health-probe connection must not change discoveryVisible.
-	// That field belongs to the current discovery scan. Clearing it here made a
-	// visible stranger disappear whenever it probed this desktop, then reappear
-	// on the next scan.
-	if !hello.Probe || !wasOnline {
-		e.emit("chat:peer-updated", e.Peers())
-	}
 	peer, peerErr := e.peer(hello.DeviceID)
 	if peerErr != nil {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: peerErr.Error()})
 		return
+	}
+	avatarChanged := peer.AvatarHash != previousAvatarHash || peer.AvatarVersion != previousAvatarVersion
+	// An incoming chat/health-probe connection must not change discoveryVisible.
+	// That field belongs to the current discovery scan. Clearing it here made a
+	// visible stranger disappear whenever it probed this desktop, then reappear
+	// on the next scan.
+	if !hello.Probe || !wasOnline || avatarChanged {
+		e.emit("chat:peer-updated", e.Peers())
 	}
 	if verifyErr := verifyPeerCertificate(conn, peer); verifyErr != nil {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: verifyErr.Error()})
@@ -465,6 +470,16 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	e.touchPeer(hello.DeviceID)
 	ack := e.helloMessageForDialect("hello_ack", dialect)
 	ack.FriendshipState, ack.RelationshipVersion = e.friendshipStateForPeer(hello.DeviceID)
+	// Include the current avatar in the authenticated acknowledgement for
+	// trusted friends. This makes a desktop avatar change immediately visible
+	// to Android on the next connection, while the explicit avatar_request
+	// remains the fallback for larger avatars and older peers.
+	if peer.Relation == PeerRelation {
+		if avatarData, avatarMime := e.avatarPayloadForWire(); len(avatarData) <= 1_500_000 && avatarData != "" {
+			ack.AvatarData = avatarData
+			ack.AvatarMime = avatarMime
+		}
+	}
 	_ = writeWire(conn, ack)
 	session := newWireSession(conn)
 	defer e.cleanupAttachmentSession(session)
@@ -719,33 +734,9 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		_ = writeWire(conn, wireMessage{Type: "avatar_response", DeviceID: e.identity.DeviceID, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, AvatarMime: mimeType, AvatarData: base64.StdEncoding.EncodeToString(data)})
 	case "avatar_response":
-		if !e.isFriend(hello.DeviceID) || message.AvatarData == "" {
-			return
-		}
-		data, err := base64.StdEncoding.DecodeString(message.AvatarData)
-		if err != nil || len(data) == 0 || len(data) > 5*1024*1024 || sha256Hex(data) != message.AvatarHash {
-			return
-		}
-		ext := ".png"
-		if strings.HasPrefix(message.AvatarMime, "image/") {
-			ext = "." + strings.TrimPrefix(message.AvatarMime, "image/")
-		}
-		cacheDir := filepath.Join(AppDataDir(), "avatar-cache")
-		if os.MkdirAll(cacheDir, 0o700) != nil {
-			return
-		}
-		path := filepath.Join(cacheDir, safeFileName(hello.DeviceID)+ext)
-		if os.WriteFile(path, data, 0o600) != nil {
-			return
-		}
-		if SetPeerAvatar(context.Background(), hello.DeviceID, path, message.AvatarHash, message.AvatarVersion) == nil {
-			e.mu.Lock()
-			peer := e.peers[hello.DeviceID]
-			peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion = path, message.AvatarHash, message.AvatarVersion
-			e.peers[hello.DeviceID] = peer
-			e.mu.Unlock()
-			e.emit("chat:peer-updated", e.Peers())
-		}
+		// hello/hello_ack and the explicit response use the same validated,
+		// atomic cache path. This also handles a data URI from Android.
+		e.applyPeerAvatar(message, hello.DeviceID)
 	case "read_receipt":
 		for _, messageID := range message.MessageIDs {
 			if err := UpdateMessageStatus(context.Background(), messageID, "read"); err == nil {
@@ -1687,6 +1678,7 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 	if strings.TrimSpace(message.DeviceID) == "" {
 		return fmt.Errorf("设备身份为空")
 	}
+	avatarChanged := false
 	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, DiscoveryVisible: discoveryVisible, Relation: DiscoveredState, LastSeen: nowString()}
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
 		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
@@ -1702,19 +1694,47 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 			peer.CertificateFingerprint = existing.CertificateFingerprint
 		}
 		peer.Relation, peer.Remark, peer.AvatarPath = existing.Relation, existing.Remark, existing.AvatarPath
+		// Treat an empty previous hash as a real change too. The first custom
+		// avatar received from Android used to be cached successfully but did
+		// not emit peer-updated because this check required both hashes to be
+		// non-empty, leaving the desktop UI on the generated initials until a
+		// later refresh.
+		avatarChanged = (message.AvatarHash != "" && !strings.EqualFold(message.AvatarHash, existing.AvatarHash)) ||
+			(message.AvatarVersion > 0 && message.AvatarVersion != existing.AvatarVersion)
+		// A normal hello or discovery packet carries metadata only. Keep the
+		// cached image visible until the user explicitly opens the chat/profile
+		// and the authenticated avatar bytes have been fetched.
 		peer.VisibleInFriends = existing.VisibleInFriends
 		peer.RelationshipVersion = existing.RelationshipVersion
 		peer.FriendshipState = existing.FriendshipState
 		if !discoveryVisible {
 			peer.DiscoveryVisible = existing.DiscoveryVisible
 		}
-		if peer.AvatarHash == "" {
+		if peer.AvatarHash == "" && message.AvatarVersion <= 0 {
 			peer.AvatarHash, peer.AvatarVersion = existing.AvatarHash, existing.AvatarVersion
+		}
+		// Avatar updates are monotonic. Discovery and hello packets can arrive
+		// out of order when a profile is changed twice quickly; never let an
+		// older packet erase the newer cached avatar.
+		if existing.AvatarVersion > 0 && message.AvatarVersion > 0 && message.AvatarVersion < existing.AvatarVersion {
+			peer.AvatarHash = existing.AvatarHash
+			peer.AvatarVersion = existing.AvatarVersion
+			peer.AvatarPath = existing.AvatarPath
+			avatarChanged = false
+			message.AvatarData = ""
 		}
 		if peer.ProtocolName == "" || peer.ProtocolMajor == 0 {
 			peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, peer.Capabilities = existing.ProtocolName, existing.ProtocolMajor, existing.DiscoveryMagic, existing.Capabilities
 		} else if len(peer.Capabilities) == 0 {
 			peer.Capabilities = append([]string(nil), existing.Capabilities...)
+		}
+	}
+	// Accept avatar bytes only on authenticated hello/control traffic for
+	// compatibility with older peers. Public discovery packets never carry
+	// or persist full avatar data.
+	if message.AvatarData != "" && message.AvatarHash != "" && message.Type != "announce" && message.Type != "discover" {
+		if avatarPath, avatarErr := e.cachePeerAvatar(message, peer.AvatarPath); avatarErr == nil {
+			peer.AvatarPath = avatarPath
 		}
 	}
 	if err := UpsertPeer(context.Background(), peer); err != nil {
@@ -1726,11 +1746,13 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 		peer.VisibleInFriends = old.VisibleInFriends
 		peer.RelationshipVersion = old.RelationshipVersion
 		peer.FriendshipState = old.FriendshipState
-		peer.AvatarPath = old.AvatarPath
+		if peer.AvatarPath == "" && !avatarChanged {
+			peer.AvatarPath = old.AvatarPath
+		}
 		if !discoveryVisible {
 			peer.DiscoveryVisible = old.DiscoveryVisible
 		}
-		if peer.AvatarHash == "" {
+		if peer.AvatarHash == "" && message.AvatarVersion <= 0 {
 			peer.AvatarHash, peer.AvatarVersion = old.AvatarHash, old.AvatarVersion
 		}
 		if peer.ProtocolName == "" || peer.ProtocolMajor == 0 {
@@ -1743,6 +1765,94 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 	e.peers[peer.DeviceID] = peer
 	e.mu.Unlock()
 	return nil
+}
+
+func (e *Engine) cachePeerAvatar(message wireMessage, previousPath string) (string, error) {
+	encoded := message.AvatarData
+	if marker := strings.Index(encoded, "base64,"); marker >= 0 {
+		encoded = encoded[marker+len("base64,"):]
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 || len(data) > 5*1024*1024 {
+		return "", fmt.Errorf("头像数据无效")
+	}
+	if sha256Hex(data) != message.AvatarHash {
+		return "", fmt.Errorf("头像校验失败")
+	}
+	cacheDir := filepath.Join(AppDataDir(), "avatar-cache")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", err
+	}
+	ext := strings.TrimPrefix(strings.ToLower(message.AvatarMime), "image/")
+	if ext == "" || strings.ContainsAny(ext, `/\\.`) {
+		ext = "jpeg"
+	}
+	path := filepath.Join(cacheDir, safeFileName(message.DeviceID)+"."+ext)
+	if previousPath == path && message.AvatarVersion > 0 {
+		// The path is stable per device, but the file at that path may belong
+		// to the previous avatar version. Checking only os.Stat here used to
+		// keep the old bytes while saving the new hash, so both platforms could
+		// show a stale avatar indefinitely.
+		if existing, readErr := os.ReadFile(path); readErr == nil && sha256Hex(existing) == message.AvatarHash {
+			return path, nil
+		}
+	}
+	tmp := path + ".part"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return path, nil
+}
+
+// applyPeerAvatar is the single authenticated avatar write path. Avatar data
+// may arrive in hello/hello_ack or in avatar_response; both forms are checked
+// for size, hash and version before touching the peer row. Keeping this logic
+// in one place prevents a late discovery packet from replacing a newer
+// custom avatar and makes the UI event identical for both transport paths.
+func (e *Engine) applyPeerAvatar(message wireMessage, deviceID string) bool {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" || message.AvatarData == "" || !e.isFriend(deviceID) {
+		return false
+	}
+	if message.DeviceID == "" {
+		message.DeviceID = deviceID
+	}
+	current, err := e.peer(deviceID)
+	if err != nil {
+		return false
+	}
+	if current.AvatarVersion > 0 && message.AvatarVersion > 0 && message.AvatarVersion < current.AvatarVersion {
+		return false
+	}
+	if message.AvatarHash == "" {
+		return false
+	}
+	path, err := e.cachePeerAvatar(message, current.AvatarPath)
+	if err != nil {
+		return false
+	}
+	if current.AvatarHash == message.AvatarHash && current.AvatarVersion >= message.AvatarVersion && current.AvatarPath == path {
+		return false
+	}
+	if err := SetPeerAvatar(context.Background(), deviceID, path, message.AvatarHash, message.AvatarVersion); err != nil {
+		return false
+	}
+	if current.AvatarPath != "" && current.AvatarPath != path && strings.HasPrefix(filepath.Clean(current.AvatarPath), filepath.Join(AppDataDir(), "avatar-cache")+string(os.PathSeparator)) {
+		_ = os.Remove(current.AvatarPath)
+	}
+	e.mu.Lock()
+	peer := e.peers[deviceID]
+	peer.AvatarPath = path
+	peer.AvatarHash = message.AvatarHash
+	peer.AvatarVersion = message.AvatarVersion
+	e.peers[deviceID] = peer
+	e.mu.Unlock()
+	e.emit("chat:peer-updated", e.Peers())
+	return true
 }
 
 // handleAnnounce is the only discovery path that may initiate the optional
@@ -2583,7 +2693,8 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		e.mu.Unlock()
 	}()
 	decoder := json.NewDecoder(conn)
-	if err := writeWire(conn, e.helloMessageForDialect("hello", dialect)); err != nil {
+	hello := e.helloMessageForDialect("hello", dialect)
+	if err := writeWire(conn, hello); err != nil {
 		return err
 	}
 	var response wireMessage
@@ -2997,16 +3108,6 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	} else if message.Type == "friend_request" {
 		log.Printf("friend_restore skipped for friend_request: device=%s", peer.DeviceID)
 	}
-	if message.Type != "friend_request" && message.Type != "friend_removed" && peer.Relation == PeerRelation && peer.AvatarHash != "" && hasCapability(response.Capabilities, "avatar-sync-v1") && !cachedAvatarMatches(peer) {
-		_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
-		if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err == nil {
-			var avatar wireMessage
-			if decoder.Decode(&avatar) == nil && avatar.Type == "avatar_response" {
-				e.handleWire(conn, wireMessage{DeviceID: peer.DeviceID}, avatar, nil)
-			}
-		}
-		_ = conn.SetReadDeadline(time.Time{})
-	}
 	if err := writeWire(conn, message); err != nil {
 		return err
 	}
@@ -3144,6 +3245,88 @@ func (e *Engine) handleOffline(deviceID string, requestIDs ...string) {
 	}
 }
 
+// RefreshPeerAvatar performs the only client-side avatar refresh. It is
+// intentionally called by the UI when a friend conversation or profile card
+// is opened; discovery, probes and ordinary message transfers do not update
+// avatar bytes anymore.
+func (e *Engine) RefreshPeerAvatar(deviceID string) error {
+	peer, err := e.peer(strings.TrimSpace(deviceID))
+	if err != nil {
+		return err
+	}
+	if peer.Relation != PeerRelation || peer.FriendshipState == "removed" || peer.IP == "" || peer.Port == 0 {
+		return fmt.Errorf("好友地址不可用")
+	}
+	var lastErr error
+	for _, dialect := range protocolDialectsForPeer(peer) {
+		if err := e.refreshPeerAvatarWithDialect(peer, dialect); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+func (e *Engine) refreshPeerAvatarWithDialect(peer Peer, dialect ProtocolDialect) error {
+	clientTLS, err := e.clientTLSConfig()
+	if err != nil {
+		return err
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := verifyPeerCertificate(conn, peer); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(conn)
+	if err := writeWire(conn, e.helloMessageForDialect("hello", dialect)); err != nil {
+		return err
+	}
+	var response wireMessage
+	if err := decoder.Decode(&response); err != nil {
+		return fmt.Errorf("对方握手失败")
+	}
+	if response.Type == "error" {
+		return fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "hello_ack" {
+		return fmt.Errorf("对方握手失败")
+	}
+	if response.FriendshipState == "removed" || !e.isFriend(peer.DeviceID) {
+		return fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
+	responseDialect, compatible := protocolDialectForMessage(response)
+	if !compatible {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
+	if response.AvatarData != "" {
+		e.applyPeerAvatar(response, peer.DeviceID)
+		return nil
+	}
+	// Older peers may advertise avatar support but omit the bytes from
+	// hello_ack. Keep the compatibility request on this explicit UI path only.
+	if !hasCapability(response.Capabilities, "avatar-sync-v1") {
+		return nil
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	if err := writeWire(conn, wireMessage{Type: "avatar_request"}); err != nil {
+		return err
+	}
+	var avatar wireMessage
+	if err := decoder.Decode(&avatar); err != nil {
+		return nil
+	}
+	if avatar.Type == "avatar_response" && avatar.AvatarData != "" {
+		e.applyPeerAvatar(avatar, peer.DeviceID)
+	}
+	return nil
+}
+
 func (e *Engine) probePeer(peer Peer) error {
 	var lastErr error
 	for _, dialect := range protocolDialectsForPeer(peer) {
@@ -3178,8 +3361,9 @@ func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error 
 	if err := writeWire(conn, hello); err != nil {
 		return err
 	}
+	decoder := json.NewDecoder(conn)
 	var response wireMessage
-	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+	if err := decoder.Decode(&response); err != nil {
 		return err
 	}
 	if response.Type == "error" {
@@ -3198,6 +3382,35 @@ func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error 
 	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	e.touchPeer(peer.DeviceID)
 	return nil
+}
+
+func (e *Engine) avatarPayloadForWire() (string, string) {
+	profile := e.Profile()
+	if profile.AvatarPath != "" {
+		if data, err := os.ReadFile(profile.AvatarPath); err == nil && len(data) > 0 && len(data) <= 5*1024*1024 {
+			mimeType := mime.TypeByExtension(filepath.Ext(profile.AvatarPath))
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			return base64.StdEncoding.EncodeToString(data), mimeType
+		}
+	}
+	if profile.AvatarData != "" {
+		encoded := profile.AvatarData
+		mimeType := "image/jpeg"
+		if marker := strings.Index(encoded, ";base64,"); marker >= 0 {
+			if strings.HasPrefix(encoded, "data:") {
+				mimeType = strings.TrimPrefix(encoded[:marker], "data:")
+			}
+			encoded = encoded[marker+len(";base64,"):]
+		} else if marker := strings.Index(encoded, "base64,"); marker >= 0 {
+			encoded = encoded[marker+len("base64,"):]
+		}
+		if data, err := base64.StdEncoding.DecodeString(encoded); err == nil && len(data) > 0 && len(data) <= 5*1024*1024 {
+			return encoded, mimeType
+		}
+	}
+	return "", ""
 }
 
 func (e *Engine) livenessLoop() {
@@ -3628,6 +3841,7 @@ func (e *Engine) DeviceInfo() DeviceInfo {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	info := e.identity.DeviceInfo
+	info.FeiqID = FeiqID(info.DeviceID)
 	info.ProtocolName = ProtocolName
 	info.ProtocolMajor = ProtocolMajor
 	return info
@@ -3635,6 +3849,7 @@ func (e *Engine) DeviceInfo() DeviceInfo {
 
 func (e *Engine) UpdateProfile(profile Profile) {
 	e.mu.Lock()
+	previousProfile := e.profile
 	wasDiscoverable := e.profile.Discoverable
 	e.profile = profile
 	e.mu.Unlock()
@@ -3643,6 +3858,11 @@ func (e *Engine) UpdateProfile(profile Profile) {
 		// the profile is still in the state it represents. This prevents a quick
 		// off/on toggle from sending withdraw after announce (or vice versa).
 		e.schedulePresence(kind, profile.Discoverable)
+	}
+	// Keep public nickname discovery behavior, but never use discovery as an
+	// avatar transport. Avatar bytes are fetched only by RefreshPeerAvatar.
+	if previousProfile.Nickname != profile.Nickname && profile.Discoverable {
+		go e.broadcastPresence("announce")
 	}
 	e.emit("chat:profile-updated", profile)
 }
@@ -3658,19 +3878,26 @@ func discoverabilityPresenceKind(wasDiscoverable, discoverable bool) string {
 }
 
 func (e *Engine) schedulePresence(kind string, expectedDiscoverable bool) {
-	go func() {
-		e.presenceMu.Lock()
-		defer e.presenceMu.Unlock()
-		if e.Profile().Discoverable != expectedDiscoverable {
-			return
-		}
-		e.broadcastPresence(kind)
-	}()
+	// Do this synchronously, like Android's discoverability update. The
+	// packet is tiny and this prevents the UI from reporting the new setting
+	// while the old presence is still visible on other devices.
+	e.presenceMu.Lock()
+	defer e.presenceMu.Unlock()
+	if e.Profile().Discoverable != expectedDiscoverable {
+		return
+	}
+	e.broadcastPresence(kind)
 }
 
 func (e *Engine) broadcastPresence(kind string) {
 	targets := broadcastAddresses()
 	targets = append(targets, localSubnetTargets()...)
+	if kind == "withdraw" || kind == "offline" {
+		// Broadcasts can be filtered by Wi-Fi isolation. Send the control packet
+		// directly to known peers as well so closing discovery takes effect
+		// immediately on the same LAN.
+		targets = append(targets, knownPresenceTargets()...)
+	}
 	for _, dialect := range protocolDialects {
 		if kind == "offline" && dialect.Major < 2 {
 			continue
@@ -3689,6 +3916,28 @@ func (e *Engine) broadcastPresence(kind string) {
 			_ = e.sendDiscovery(&targets[index], message)
 		}
 	}
+}
+
+func knownPresenceTargets() []net.UDPAddr {
+	peers, err := ListPeers(context.Background(), "")
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	result := make([]net.UDPAddr, 0, len(peers))
+	for _, peer := range peers {
+		ip := net.ParseIP(strings.TrimSpace(peer.IP))
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		key := ip.To4().String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, net.UDPAddr{IP: ip.To4(), Port: DiscoveryPort})
+	}
+	return result
 }
 
 func (e *Engine) resetDiscoveryMiss(deviceID string) {

@@ -44,6 +44,7 @@ type DeviceInfo struct {
 	Platform               string `json:"platform"`
 	OSVersion              string `json:"osVersion"`
 	DeviceID               string `json:"deviceId"`
+	FeiqID                 string `json:"feiqId,omitempty"`
 	PublicKeyPEM           string `json:"publicKeyPem"`
 	CertificateFingerprint string `json:"certificateFingerprint"`
 	IP                     string `json:"ip"`

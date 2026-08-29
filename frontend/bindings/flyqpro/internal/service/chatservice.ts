@@ -140,6 +140,16 @@ export function GetMessage(messageID: string): $CancellablePromise<chat$0.Messag
     });
 }
 
+/**
+ * GetMyQRCode creates the local, offline friend-card QR code. It contains
+ * discoverable identity metadata only; the full DeviceID remains the value
+ * used by the authenticated protocol. Returning a data URL keeps the card
+ * usable while the application is offline and avoids an external QR service.
+ */
+export function GetMyQRCode(): $CancellablePromise<string> {
+    return $Call.ByID(1439315809);
+}
+
 export function GetProfile(): $CancellablePromise<chat$0.Profile> {
     return $Call.ByID(633746438).then(($result: any) => {
         return $$createType9($result);
@@ -300,6 +310,15 @@ export function PickFiles(): $CancellablePromise<string[]> {
 
 export function PickSharedDirectory(): $CancellablePromise<string> {
     return $Call.ByID(1091777130);
+}
+
+/**
+ * RefreshPeerAvatar is an explicit, on-demand avatar read. The engine only
+ * invokes it from a user-facing chat/profile open, so background discovery and
+ * ordinary message traffic never pull avatar bytes.
+ */
+export function RefreshPeerAvatar(deviceID: string): $CancellablePromise<void> {
+    return $Call.ByID(84600919, deviceID);
 }
 
 export function RejectAttachment(attachmentID: string): $CancellablePromise<void> {

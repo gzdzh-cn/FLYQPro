@@ -7,7 +7,7 @@
       <button type="button" class="mac-control maximise" title="最大化" @click.stop="toggleMaximise"></button>
     </div>
     <aside class="rail" :class="{ 'is-locked': store.attachmentMigration.active }">
-      <button class="profile-button" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active">
+      <button class="profile-button" :class="{ active: section === 'settings' }" @click="selfAvatarPreviewVisible = true" @keydown.enter.space.prevent="selfAvatarPreviewVisible = true" :disabled="store.attachmentMigration.active" aria-label="放大我的头像" title="放大头像">
         <div class="avatar large" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
       </button>
       <nav class="rail-nav">
@@ -25,6 +25,24 @@
         <div class="info-danger"><a-button status="danger" long :loading="clearingConversation" @click="clearCurrentConversation">清除聊天记录</a-button><span>只清除本机消息和接收的附件，不会删除好友关系。</span></div>
       </aside>
     </Transition>
+    <a-modal v-model:visible="selfAvatarPreviewVisible" title="我的资料" :footer="false" modal-class="avatar-preview-modal">
+      <div class="self-profile-card">
+        <div class="self-profile-heading">
+          <div class="avatar huge" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
+          <div class="self-profile-name"><strong>{{ store.profile.nickname || '新用户' }}</strong><span>{{ deviceInfo?.platform || '桌面端' }} · {{ store.profile.discoverable ? '允许被发现' : '未开启发现' }}</span></div>
+        </div>
+        <div class="self-profile-body">
+          <div class="profile-qr-box"><img v-if="myQRCode" :src="myQRCode" alt="我的飞秋Pro二维码" /><div v-else class="profile-qr-loading">二维码生成中</div></div>
+          <div class="self-profile-fields">
+            <div><span>飞秋号</span><strong>{{ deviceInfo?.feiqId || feiqID }}</strong></div>
+            <div><span>设备平台</span><strong>{{ deviceInfo?.platform || '未知' }}</strong></div>
+            <div><span>操作系统</span><strong>{{ deviceInfo?.osVersion || '未知' }}</strong></div>
+            <div><span>设备 ID</span><strong class="mono">{{ deviceInfo?.deviceId || '尚未生成' }}</strong></div>
+          </div>
+        </div>
+        <p class="self-profile-hint">扫一扫二维码，可以在局域网内发现并添加我</p>
+      </div>
+    </a-modal>
 
     <section v-show="section === 'friends'" class="workspace">
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
@@ -46,7 +64,7 @@
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 {{ activePeer.remark || activePeer.nickname }} 发送第一条消息</p></div>
           <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
-            <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="showPeerInfo = true">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
+            <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
             <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'is-favorite': message.isFavorite }">
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
@@ -135,7 +153,7 @@
         <div class="discovery-scroll">
           <div class="discover-group" @contextmenu.prevent><div class="group-title-row"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-if="store.requests.length" class="clear-requests" @click.stop="clearRequestHistory">清除历史</button></div><button v-for="request in store.visibleRequests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId, 'pending-request': isIncomingPending(request) }" @click="selectRequest(request)"><div class="avatar request-avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}<i v-if="isIncomingPending(request)" class="request-pending-dot" /></div><div class="request-copy"><strong>{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span class="request-status-line"><span class="request-status-text">{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span><em v-if="isIncomingPending(request)" class="pending-request-mark">待处理</em></span></div></button></div>
       <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已添加 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
-          <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.remark || peer.nickname }}</strong><span>已是好友 · {{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
+          <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong>{{ peer.remark || peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
         </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('discover', $event)" title="调整列表宽度" />
@@ -207,6 +225,8 @@ const quoteMessageId = ref('')
 const quoteContent = ref('')
 const sendingMessage = ref(false)
 const showPeerInfo = ref(false)
+const selfAvatarPreviewVisible = ref(false)
+const myQRCode = ref('')
 const selectedRequest = ref<FriendRequest>()
 const selectedDiscovery = ref<Peer>()
 const processingRequests = reactive<Record<string, boolean>>({})
@@ -302,6 +322,13 @@ const defaultAttachmentPath = ref('')
 
 function initials(value: string) { return (value || '?').trim().slice(0, 1).toUpperCase() }
 function avatarStyle(value: string, image?: string) { if (image) return { backgroundImage: `url(${image})`, backgroundSize: 'cover', backgroundPosition: 'center' }; let hash = 0; for (const char of value || '?') hash = (hash * 31 + char.charCodeAt(0)) >>> 0; const hue = hash % 360; return { background: `linear-gradient(135deg, hsl(${hue} 80% 65%), hsl(${(hue + 42) % 360} 75% 45%))` } }
+const feiqID = computed(() => {
+  const device = String(deviceInfo.value?.deviceId || '')
+  if (!device) return '未生成'
+  let hash = 2166136261
+  for (const char of device) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0
+  return `FQ${hash.toString(36).toUpperCase().padStart(10, '0').slice(0, 10)}`
+})
 function isImageMessage(message: any) { if (message?.attachmentMime) return message.attachmentMime.startsWith('image/'); return /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(message?.attachmentName || message?.content || '') }
 function formatTime(value: string) {
   if (!value) return ''
@@ -351,7 +378,8 @@ async function selectEmoji(emoji: string) {
 function requestDeviceLabel(request: FriendRequest) { const peer = store.peers.find((item) => item.deviceId === request.deviceId); if (!peer) return '设备信息同步中'; return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function peerDeviceLabel(peer: Peer) { return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
-async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
+async function refreshMyQRCode() { try { myQRCode.value = await ChatService.GetMyQRCode() } catch { myQRCode.value = '' } }
+async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); await refreshMyQRCode(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
 function chatScrollKey(deviceId: string) { return `flyqpro.chatScroll.v2.${deviceId}` }
 function legacyChatScrollKey(deviceId: string) { return `popchat.chatScroll.${deviceId}` }
 function saveActiveScrollPosition() {
@@ -455,6 +483,7 @@ async function loadConversation(peer: Peer, markRead: boolean, preserveViewport 
   const cachedMessages = Boolean(store.messages[`conv-${peer.deviceId}`])
   saveActiveScrollPosition()
   store.selectPeer(peer.deviceId)
+  void refreshPeerAvatar(peer.deviceId)
   showPeerInfo.value = false
   peerRemark.value = peer.remark || ''
   newMessageCount.value = 0
@@ -468,6 +497,9 @@ async function loadConversation(peer: Peer, markRead: boolean, preserveViewport 
     if (shouldRestore) await restoreChatScrollPosition(peer.deviceId)
     if (markRead) await ChatService.MarkConversationRead(peer.deviceId)
   } catch { /* the conversation can still be restored from the live store */ }
+}
+async function refreshPeerAvatar(deviceId: string) {
+  try { await ChatService.RefreshPeerAvatar(deviceId) } catch { /* best effort; keep the cached avatar */ }
 }
 function selectPeer(peer: Peer) { closePeerMenu(); closeContactMenu(); closeDeleteConfirm(); void loadConversation(peer, true, false, true) }
 function openDiscover() {
@@ -494,7 +526,7 @@ function enterFriends() {
   }
 }
 function openSettings(tab: string) { if (store.attachmentMigration.active) return; saveActiveScrollPosition(); section.value = 'settings'; settingsTab.value = tab }
-async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
+async function saveProfile(showMessage = true) { try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); await refreshMyQRCode(); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
 async function saveTheme(theme: string) {
   const normalized = ["light", "dark", "system"].includes(theme) ? theme : "system"
   editProfile.theme = normalized
@@ -533,8 +565,8 @@ async function migrateAttachmentPath(path: string) {
 }
 async function chooseDirectory() { const path = await ChatService.PickDirectory(); if (path) await migrateAttachmentPath(path) }
 async function resetAttachmentPath() { if (defaultAttachmentPath.value) await migrateAttachmentPath(defaultAttachmentPath.value) }
-async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
-async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme) } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
+async function chooseAvatar() { const path = await ChatService.PickFile(); if (path) { try { store.profile = await ChatService.SetAvatar(path); Object.assign(editProfile, store.profile); await refreshMyQRCode(); Message.success('头像已更新') } catch (error: any) { Message.error(error?.message || '头像更新失败') } } }
+async function resetAvatar() { try { const theme = editProfile.theme; const profile = await ChatService.ResetAvatar(); const nextProfile = { ...profile, theme: theme || profile.theme }; store.$patch({ profile: { ...store.profile, ...nextProfile } }); Object.assign(editProfile, nextProfile); applyTheme(theme || profile.theme); await refreshMyQRCode() } catch (error: any) { Message.error(error?.message || '恢复头像失败') } }
 async function refreshPeers() { if (scanning.value) return; scanning.value = true; try { await ChatService.ScanPeers(); await new Promise((resolve) => setTimeout(resolve, 700)); store.peers = await ChatService.ListPeers(); store.network = await ChatService.NetworkStatus(); Message.success('已刷新局域网设备') } catch (error: any) { Message.error(error?.message || '扫描失败') } finally { scanning.value = false } }
 function clearDiscoverySelection() { selectedRequest.value = undefined; selectedDiscovery.value = undefined; showPeerInfo.value = false; closeContactMenu(); closeDeleteConfirm() }
 function selectRequest(request: FriendRequest) {
@@ -1058,7 +1090,8 @@ function forwardMessage(message: any) { closeMessageMenu(); openForward([message
 function batchForward() { const messages = activeMessages.value.filter((message) => selectedMessageIds.has(message.messageId)); openForward(messages) }
 function quoteMessage(message: any) { closeMessageMenu(); quoteMessageId.value = message.messageId; quoteContent.value = message.content || ''; Message.info('已引用消息，请输入回复') }
 function closePeerInfo() { showPeerInfo.value = false }
-function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value }
+function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value; if (showPeerInfo.value && activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
+function openPeerInfo() { showPeerInfo.value = true; if (activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
 function handleMessageAreaPointerDown() { cancelAutoScroll(); markActiveRead() }
 function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu() }
 function closeContextMenusOnPointerDown(event: PointerEvent) {
@@ -1240,6 +1273,22 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .forward-targets { display: flex; flex-direction: column; gap: 12px; }
 .conversation-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; padding: 18px 14px; }
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
+.self-avatar-preview { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 18px 0 8px; }.self-avatar-preview .avatar { width: 220px; height: 220px; border-radius: 34px; font-size: 72px; }
+.self-profile-card { color: var(--text); padding: 4px 2px 2px; }
+.self-profile-heading { display: flex; align-items: center; gap: 14px; padding: 4px 4px 18px; border-bottom: 1px solid var(--line); }
+.self-profile-heading .avatar { width: 66px; height: 66px; border-radius: 20px; font-size: 24px; }
+.self-profile-name { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.self-profile-name strong { font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.self-profile-name span, .self-profile-hint { color: var(--muted); font-size: 12px; }
+.self-profile-body { display: flex; align-items: center; gap: 22px; padding: 20px 4px 12px; }
+.profile-qr-box { width: 156px; height: 156px; flex: 0 0 156px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
+.profile-qr-box img { display: block; width: 144px; height: 144px; image-rendering: pixelated; }
+.profile-qr-loading { color: #86909c; font-size: 12px; }
+.self-profile-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; }
+.self-profile-fields div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.self-profile-fields span { color: var(--muted); font-size: 11px; }
+.self-profile-fields strong { color: var(--text); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.self-profile-hint { margin: 4px 4px 0; text-align: center; }
 .profile-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .attachment-meta { display: block; font-size: 12px; opacity: .72; margin-top: 6px; }
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }

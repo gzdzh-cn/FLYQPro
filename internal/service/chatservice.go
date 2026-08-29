@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -21,6 +22,7 @@ import (
 	"flyqpro/internal/platform/startup"
 	"flyqpro/internal/version"
 	"github.com/gogf/gf/v2/os/gctx"
+	"github.com/skip2/go-qrcode"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -232,6 +234,13 @@ func (s *ChatService) ResetAvatar() (chat.Profile, error) {
 	profile.AvatarHash = ""
 	profile.AvatarVersion++
 	return s.UpdateProfile(profile)
+}
+
+// RefreshPeerAvatar is an explicit, on-demand avatar read. The engine only
+// invokes it from a user-facing chat/profile open, so background discovery and
+// ordinary message traffic never pull avatar bytes.
+func (s *ChatService) RefreshPeerAvatar(deviceID string) error {
+	return s.engine.RefreshPeerAvatar(deviceID)
 }
 
 func (s *ChatService) SetDiscoverable(value bool) (chat.Profile, error) {
@@ -1078,10 +1087,64 @@ func (s *ChatService) SetLaunchAtStartup(value bool) (chat.Profile, error) {
 }
 
 func (s *ChatService) GetDeviceInfo() chat.DeviceInfo { return s.engine.DeviceInfo() }
-func (s *ChatService) GetAppVersion() string          { return version.AppVersion }
-func (s *ChatService) ListPeers() []chat.Peer         { return s.engine.Peers() }
-func (s *ChatService) ScanPeers()                     { s.engine.Scan() }
-func (s *ChatService) ListFriends() []chat.Peer       { return s.engine.PeersByRelation(chat.PeerRelation) }
+
+// GetMyQRCode creates the local, offline friend-card QR code. It contains
+// discoverable identity metadata only; the full DeviceID remains the value
+// used by the authenticated protocol. Returning a data URL keeps the card
+// usable while the application is offline and avoids an external QR service.
+func (s *ChatService) GetMyQRCode() (string, error) {
+	info := s.engine.DeviceInfo()
+	profile := s.engine.Profile()
+	payload := struct {
+		Version                string `json:"v"`
+		DeviceID               string `json:"deviceId"`
+		FeiqID                 string `json:"feiqId"`
+		Nickname               string `json:"nickname"`
+		Platform               string `json:"platform"`
+		OSVersion              string `json:"osVersion"`
+		IP                     string `json:"ip,omitempty"`
+		Port                   int    `json:"port,omitempty"`
+		PublicKey              string `json:"publicKey,omitempty"`
+		CertificateFingerprint string `json:"certificateFingerprint,omitempty"`
+		Timestamp              int64  `json:"timestamp"`
+	}{
+		Version: "1", DeviceID: info.DeviceID, FeiqID: info.FeiqID,
+		Nickname: profile.Nickname, Platform: info.Platform, OSVersion: info.OSVersion,
+		IP: info.IP, Port: info.Port, PublicKey: info.PublicKeyPEM,
+		CertificateFingerprint: info.CertificateFingerprint, Timestamp: time.Now().Unix(),
+	}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(jsonData)
+	content := "flyqpro://friend?v=1&data=" + encoded
+	png, err := qrcode.Encode(content, qrcode.Medium, 360)
+	if err != nil {
+		// A PEM key can be longer on some installations. Keep the card useful
+		// even if the full discovery payload does not fit the first QR version;
+		// the scanner can still use the device identity and rediscover it on LAN.
+		compactJSON, compactErr := json.Marshal(struct {
+			Version  string `json:"v"`
+			DeviceID string `json:"deviceId"`
+			FeiqID   string `json:"feiqId"`
+			Nickname string `json:"nickname"`
+		}{Version: "1", DeviceID: info.DeviceID, FeiqID: info.FeiqID, Nickname: profile.Nickname})
+		if compactErr != nil {
+			return "", err
+		}
+		content = "flyqpro://friend?v=1&data=" + base64.RawURLEncoding.EncodeToString(compactJSON)
+		png, err = qrcode.Encode(content, qrcode.Low, 360)
+		if err != nil {
+			return "", err
+		}
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+func (s *ChatService) GetAppVersion() string    { return version.AppVersion }
+func (s *ChatService) ListPeers() []chat.Peer   { return s.engine.Peers() }
+func (s *ChatService) ScanPeers()               { s.engine.Scan() }
+func (s *ChatService) ListFriends() []chat.Peer { return s.engine.PeersByRelation(chat.PeerRelation) }
 func (s *ChatService) ListFriendRequests() []chat.FriendRequest {
 	// Return the full local request history. The frontend derives the pending
 	// count separately so accepted/rejected requests remain visible without

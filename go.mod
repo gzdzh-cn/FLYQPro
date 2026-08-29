@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/gogf/gf/contrib/drivers/sqlite/v2 v2.10.2
 	github.com/gogf/gf/v2 v2.10.2
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/wailsapp/wails/v3 v3.0.0-beta.9
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/sys v0.46.0
