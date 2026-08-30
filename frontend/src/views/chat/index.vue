@@ -1297,6 +1297,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
 .request-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 .attachment-pending { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.chat-app .message-line.mine .attachment-pending { color: var(--message-outgoing-text); font-weight: 600; }
+.chat-app .message-line.mine .attachment-pending span { text-shadow: 0 1px 2px rgba(20, 38, 84, .24); }
 
 .chat-app.theme-dark { background: #101827; color: #e5e7eb; }
 .chat-app.theme-dark .conversation-head,
@@ -1812,6 +1814,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .message-line { align-items: center; gap: 8px; }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .message-status { display: inline-flex; width: 52px; height: 17px; margin-left: 6px; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255, 255, 255, .2); font-size: 10px; vertical-align: middle; }
+.chat-app .message-line.mine .message-status { color: var(--message-outgoing-text); background: rgba(255, 255, 255, .18); }
 .message-status.rejected { width: auto; min-width: 52px; padding: 0 6px; color: #d4380d; background: #fff1f0; font-weight: 600; }
 .chat-app.theme-dark .message-status.rejected { color: #ffb4ab; background: #4a2525; }
 .transfer-progress { width: min(260px, 100%); margin-top: 8px; padding-top: 7px; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
