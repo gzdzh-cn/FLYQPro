@@ -1,5 +1,5 @@
 <template>
-  <div class="shared-drive" :class="{ dark: isDark, mac: isMac, embedded }">
+  <div class="shared-drive" :class="{ dark: isDark, mac: isMac, embedded }" @contextmenu="handleAppContextMenu">
     <div v-if="isMac && !embedded" class="mac-controls" aria-label="窗口控制"><button class="close" @click="closeWindow" /><button class="minimise" @click="Window.Minimise" /><button class="maximise" @click="Window.ToggleMaximise" /></div>
     <header class="shared-head" :class="{ draggable: isMac && !embedded }">
       <div class="head-title"><IconCloud /><div><strong>{{ mode === 'owner' ? '共享' : mode === 'friend' ? '好友共享' : '共享' }}</strong><span>{{ mode === 'owner' ? '管理本机共享文件夹' : mode === 'friend' ? '查看好友共享文件夹' : '共享窗口参数无效' }}</span></div></div>
@@ -33,12 +33,12 @@
           </div>
         </nav>
       </div>
-      <section class="file-panel card" @contextmenu.prevent>
+      <section class="file-panel card">
         <div v-if="loading" class="empty-state">正在读取共享目录…</div>
         <div v-else-if="mode === 'invalid'" class="empty-state"><IconCloud /><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备</span></div>
         <div v-else-if="sharedDisabled" class="empty-state"><IconCloud /><strong>{{ mode === 'owner' ? (settings.rootPath ? '共享已关闭' : '请先选择共享目录') : '对方已关闭共享' }}</strong><span>{{ mode === 'owner' ? '本机仍可管理共享目录，开启开关后好友才可访问' : '共享开关开启后，刷新即可继续访问' }}</span></div>
         <div v-else-if="!filteredEntries.length" class="empty-state"><IconFolder /><span>此文件夹为空</span></div>
-        <div v-else-if="viewMode === 'thumb'" class="file-list thumb-grid">
+        <div v-else-if="viewMode === 'thumb'" class="file-list thumb-grid" @scroll="closeContext">
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="thumb-card" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @dblclick="entry.isDirectory ? openPath(entry.relativePath) : preview(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" class="thumb-check" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <div class="thumb-preview">
@@ -52,7 +52,7 @@
             <span class="thumb-meta">{{ entry.isDirectory ? '文件夹' : formatBytes(entry.size) }}</span>
           </div>
         </div>
-        <div v-else class="file-list">
+        <div v-else class="file-list" @scroll="closeContext">
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="file-row" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @dblclick="entry.isDirectory ? openPath(entry.relativePath) : preview(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isImageEntry(entry) && thumbnailUrls[entry.relativePath]" class="file-icon file-thumb" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
@@ -398,7 +398,19 @@ async function openPath(path: string) {
 function goParent() { openPath(pathParts.value.slice(0, -1).join('/')) }
 function toggleSelected(entry: Entry) { selected.has(entry.relativePath) ? selected.delete(entry.relativePath) : selected.add(entry.relativePath) }
 function selectAll() { if (selected.size === entries.value.length && entries.value.length) selected.clear(); else entries.value.forEach((entry) => selected.add(entry.relativePath)) }
-function openContext(event: MouseEvent, entry: Entry) { context.visible = true; context.x = Math.min(event.clientX, innerWidth - 190); context.y = Math.min(event.clientY, innerHeight - 220); context.entry = entry }
+function handleAppContextMenu(event: MouseEvent) {
+  const target = event.target as Element | null
+  if (target?.closest('input, textarea, [contenteditable="true"]')) return
+  event.preventDefault()
+  if (target?.closest('.context-menu')) return
+  closeContext()
+}
+function openContext(event: MouseEvent, entry: Entry) {
+  context.visible = true
+  context.x = Math.max(8, Math.min(event.clientX, window.innerWidth - 198))
+  context.y = Math.max(8, Math.min(event.clientY, window.innerHeight - 228))
+  context.entry = entry
+}
 function closeContext() { context.visible = false; context.entry = undefined }
 function newContextFolder() { if (context.entry) openPath(context.entry.relativePath); closeContext() }
 function renameEntry() { if (!context.entry || mode.value !== 'owner') return; renameDialog.entry = context.entry; renameDialog.name = context.entry.name; renameDialog.visible = true; closeContext() }
@@ -451,7 +463,10 @@ async function preview(entry: Entry) {
     else Message.warning('共享窗口参数无效')
   } catch (error: any) { Message.error(error?.message || '打开预览失败') }
 }
-function handleKeydown(event: KeyboardEvent) { if (!embedded && isMac.value && event.metaKey && event.key.toLowerCase() === 'w') { event.preventDefault(); closeWindow() } }
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeContext()
+  if (!embedded && isMac.value && event.metaKey && event.key.toLowerCase() === 'w') { event.preventDefault(); closeWindow() }
+}
 function handlePointerDown(event: PointerEvent) {
   closeContext()
   const target = event.target
@@ -474,7 +489,7 @@ onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerD
 .shared-fixed-header { flex:0 0 auto; background:var(--page-bg); padding-bottom:1px; box-sizing:border-box; }
 .shared-fixed-header .management-toolbar { box-shadow:0 4px 12px color-mix(in srgb,#000 10%,transparent); }
 .shared-fixed-header .breadcrumbs { margin-bottom:12px; }
-.card{background:var(--surface);border:1px solid var(--line);border-radius:10px}.owner-summary{display:flex;align-items:center;gap:20px;padding:15px 18px;margin:8px 0 12px}.summary-main{flex:1;display:flex;flex-direction:column;gap:4px}.summary-label{font-size:12px;color:var(--muted)}.summary-main strong{font-size:17px}.summary-main span,.summary-item span{font-size:12px;color:var(--muted)}.summary-item{min-width:105px;display:flex;flex-direction:column;gap:4px;padding-left:18px;border-left:1px solid var(--line)}.summary-item strong{font-size:16px}.toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:12px}.toolbar button,.file-toolbar button,.breadcrumbs button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 10px;cursor:pointer}.toolbar button:disabled,.file-toolbar button:disabled{opacity:.45;cursor:not-allowed}.path-info{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.path-info span{font-size:11px;color:var(--muted)}.path-info strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.remote-banner{display:flex;align-items:center;gap:12px;padding:15px 18px;margin-bottom:12px}.remote-banner svg{color:var(--accent);width:22px;height:22px}.remote-banner div{flex:1;display:flex;flex-direction:column;gap:4px}.remote-banner span{font-size:12px;color:var(--muted)}.remote-banner button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 12px;cursor:pointer}.breadcrumbs{display:flex;align-items:center;gap:5px;padding:8px 12px;margin-bottom:12px;overflow:auto;white-space:nowrap}.breadcrumbs button{border:0;padding:4px 6px}.breadcrumbs button.active{color:var(--accent);font-weight:600}.file-panel{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}.file-toolbar{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}.file-toolbar input{flex:1;min-width:120px;border:1px solid var(--line);background:var(--surface);color:inherit;border-radius:6px;padding:7px 9px;outline:none}.view-note{margin-left:auto;color:var(--muted);font-size:12px}.file-list{flex:1;min-height:0;overflow:auto}.file-panel > .empty-state{flex:1;min-height:0}.file-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:default}.file-row:hover,.file-row.selected{background:color-mix(in srgb,var(--accent) 8%,var(--surface))}.file-icon{width:20px;height:20px;color:var(--muted);flex:0 0 20px}.file-icon.folder{color:#e6a23c}.file-name{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.file-name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-name span,.file-date{font-size:12px;color:var(--muted)}.file-date{width:155px;text-align:right}.row-more{border:0;background:transparent;color:var(--muted);font-size:17px;cursor:pointer}.empty-state{min-height:300px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted)}.empty-state svg{width:34px;height:34px;color:var(--accent)}.empty-state strong{color:inherit}.context-menu{position:fixed;z-index:20;min-width:150px;padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.24)}.context-menu button{display:block;width:100%;border:0;border-radius:5px;background:transparent;color:inherit;text-align:left;padding:8px 10px;cursor:pointer}.context-menu button:hover{background:color-mix(in srgb,var(--accent) 12%,var(--surface))}.context-menu .danger{color:#f53f3f}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px}.owner-summary{display:flex;align-items:center;gap:20px;padding:15px 18px;margin:8px 0 12px}.summary-main{flex:1;display:flex;flex-direction:column;gap:4px}.summary-label{font-size:12px;color:var(--muted)}.summary-main strong{font-size:17px}.summary-main span,.summary-item span{font-size:12px;color:var(--muted)}.summary-item{min-width:105px;display:flex;flex-direction:column;gap:4px;padding-left:18px;border-left:1px solid var(--line)}.summary-item strong{font-size:16px}.toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:12px}.toolbar button,.file-toolbar button,.breadcrumbs button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 10px;cursor:pointer}.toolbar button:disabled,.file-toolbar button:disabled{opacity:.45;cursor:not-allowed}.path-info{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.path-info span{font-size:11px;color:var(--muted)}.path-info strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.remote-banner{display:flex;align-items:center;gap:12px;padding:15px 18px;margin-bottom:12px}.remote-banner svg{color:var(--accent);width:22px;height:22px}.remote-banner div{flex:1;display:flex;flex-direction:column;gap:4px}.remote-banner span{font-size:12px;color:var(--muted)}.remote-banner button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:inherit;padding:6px 12px;cursor:pointer}.breadcrumbs{display:flex;align-items:center;gap:5px;padding:8px 12px;margin-bottom:12px;overflow:auto;white-space:nowrap}.breadcrumbs button{border:0;padding:4px 6px}.breadcrumbs button.active{color:var(--accent);font-weight:600}.file-panel{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}.file-toolbar{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}.file-toolbar input{flex:1;min-width:120px;border:1px solid var(--line);background:var(--surface);color:inherit;border-radius:6px;padding:7px 9px;outline:none}.view-note{margin-left:auto;color:var(--muted);font-size:12px}.file-list{flex:1;min-height:0;overflow:auto}.file-panel > .empty-state{flex:1;min-height:0}.file-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:default}.file-row:hover,.file-row.selected{background:color-mix(in srgb,var(--accent) 8%,var(--surface))}.file-icon{width:20px;height:20px;color:var(--muted);flex:0 0 20px}.file-icon.folder{color:#e6a23c}.file-name{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.file-name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-name span,.file-date{font-size:12px;color:var(--muted)}.file-date{width:155px;text-align:right}.row-more{border:0;background:transparent;color:var(--muted);font-size:17px;cursor:pointer}.empty-state{min-height:300px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted)}.empty-state svg{width:34px;height:34px;color:var(--accent)}.empty-state strong{color:inherit}.context-menu{position:fixed;z-index:20;min-width:150px;max-width:min(260px,calc(100vw - 16px));padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.24)}.context-menu button{display:block;width:100%;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;border-radius:5px;background:transparent;color:inherit;text-align:left;padding:8px 10px;cursor:pointer}.context-menu button:hover{background:color-mix(in srgb,var(--accent) 12%,var(--surface))}.context-menu .danger{color:#f53f3f}
 .load-more{display:flex;justify-content:center;padding:12px}.load-more button{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--accent);padding:6px 14px;cursor:pointer}.load-more button:disabled{opacity:.55;cursor:default}
 .rename-dialog{display:flex;flex-direction:column;gap:10px}.rename-dialog label{font-size:13px;color:var(--muted)}.rename-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
 .details-dialog{display:flex;flex-direction:column;gap:11px;min-width:360px}.detail-row{display:flex;align-items:flex-start;gap:18px}.detail-row>span{flex:0 0 64px;color:var(--muted);font-size:13px}.detail-row>strong{min-width:0;flex:1;font-size:13px;word-break:break-all}.detail-value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px!important}.detail-loading{margin-top:4px;padding:9px 10px;border-radius:6px;background:color-mix(in srgb,var(--accent) 8%,var(--surface));color:var(--accent);font-size:12px}.detail-error{margin-top:4px;color:#f53f3f;font-size:12px}

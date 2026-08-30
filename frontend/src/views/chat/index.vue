@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac, 'is-windows': !isMac }">
+  <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac, 'is-windows': !isMac }" @contextmenu="handleAppContextMenu">
     <div v-if="isMac" class="window-drag-region" aria-hidden="true"></div>
     <div v-if="isMac" class="mac-window-controls" aria-label="macOS 窗口控制">
       <button type="button" class="mac-control close" title="关闭" @click.stop="closeWindow"></button>
@@ -47,7 +47,7 @@
     <section v-show="section === 'friends'" class="workspace">
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
         <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="openDiscover" title="发现好友"><icon-plus /></button></div>
-        <div class="list-scroll">
+        <div class="list-scroll" @scroll="closeAllContextMenus">
           <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId, pinned: conversationForPeer(peer.deviceId)?.pinned }" @click="selectPeer(peer)" @contextmenu.prevent.stop="openPeerMenu($event, peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
             <div class="peer-copy"><strong><span class="nickname-ellipsis">{{ peer.remark || peer.nickname }}</span><i v-if="conversationForPeer(peer.deviceId)?.pinned" class="pin-mark">置顶</i></strong><span class="peer-device">{{ peerDeviceLabel(peer) }}</span><span class="peer-preview">{{ peer.friendshipState === 'removed' || peer.relation === 'removed' ? '不是好友' : (conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线')) }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
@@ -61,12 +61,12 @@
           <div class="head-peer"><strong class="nickname-ellipsis">{{ activePeer.remark || activePeer.nickname }}</strong><span class="head-status" :class="{ onlineText: activePeer.online }"><i :class="{ online: activePeer.online }" />{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div>
           <a-button type="text" aria-label="好友资料" title="好友资料" @pointerdown.prevent.stop="togglePeerInfo" @keydown.enter.space.prevent="togglePeerInfo"><icon-more /></a-button>
         </header>
-        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
+        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
+          <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
-            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'is-favorite': message.isFavorite }">
+            <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'is-favorite': message.isFavorite }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
@@ -150,7 +150,7 @@
     <section v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
-        <div class="discovery-scroll">
+        <div class="discovery-scroll" @scroll="closeAllContextMenus">
           <div class="discover-group" @contextmenu.prevent><div class="group-title-row"><button class="group-title" @click="groups.requests = !groups.requests"><span><icon-down v-if="groups.requests" /><icon-right v-else />新的朋友</span><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button><button v-if="store.requests.length" class="clear-requests" @click.stop="clearRequestHistory">清除历史</button></div><button v-for="request in store.visibleRequests" v-show="groups.requests" :key="request.requestId" class="request-row" :class="{ selected: selectedRequest?.requestId === request.requestId, 'pending-request': isIncomingPending(request) }" @click="selectRequest(request)"><div class="avatar request-avatar" :style="avatarStyle(request.nickname)">{{ initials(request.nickname) }}<i v-if="isIncomingPending(request)" class="request-pending-dot" /></div><div class="request-copy"><strong class="nickname-ellipsis">{{ request.nickname || request.deviceId }}</strong><span>{{ requestDeviceLabel(request) }}</span><span class="request-status-line"><span class="request-status-text">{{ requestStatusText(request.status, request.direction) }} · {{ request.message || (request.direction === 'mutual' ? '双方都发起了好友申请' : request.direction === 'sent' ? '我发起的好友申请' : '请求添加你为好友') }}</span><em v-if="isIncomingPending(request)" class="pending-request-mark">待处理</em></span></div></button></div>
       <div class="discover-group" @contextmenu.prevent><button class="group-title" @click="groups.discovered = !groups.discovered"><span><icon-down v-if="groups.discovered" /><icon-right v-else />已发现</span><b>{{ store.discovered.length }}</b></button><button v-for="peer in store.discovered" v-show="groups.discovered" :key="peer.deviceId" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectDiscovery(peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong class="nickname-ellipsis">{{ peer.nickname }}</strong><span>{{ peer.relation === 'friend' ? '已添加 · ' : '' }}{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
           <div class="discover-group" @contextmenu.prevent="closeContactMenu"><button class="group-title" @click="groups.contacts = !groups.contacts"><span><icon-down v-if="groups.contacts" /><icon-right v-else />通讯录</span><b>{{ store.contacts.length }}</b></button><button v-for="peer in store.contacts" v-show="groups.contacts" :key="`contact-${peer.deviceId}`" class="request-row" :class="{ selected: selectedDiscovery?.deviceId === peer.deviceId }" @click="selectContact(peer)" @contextmenu.prevent.stop="openContactMenu($event, peer)"><div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div><div><strong class="nickname-ellipsis">{{ peer.remark || peer.nickname }}</strong><span>{{ peer.platform }} · {{ peer.online ? '在线' : '离线' }}</span></div></button></div>
@@ -311,7 +311,18 @@ const filteredFriends = computed(() => {
   if (!keyword) return orderedFriends.value
   return orderedFriends.value.filter((peer) => `${peer.remark || ''} ${peer.nickname}`.toLowerCase().includes(keyword))
 })
-const totalUnreadCount = computed(() => store.conversations.reduce((total, conversation) => total + Math.max(0, conversation.unreadCount || 0), 0))
+const totalUnreadCount = computed(() => {
+  // Only conversations that still have a visible row contribute to the
+  // Friends badge.  A hide/clear operation can briefly race with a queued
+  // peer or message event; counting every conversation would leave a badge
+  // behind even though the corresponding friend has disappeared.
+  const visiblePeerIds = new Set(store.friends.map((peer) => peer.deviceId))
+  return store.conversations.reduce((total, conversation) => (
+    visiblePeerIds.has(conversation.peerDeviceId)
+      ? total + Math.max(0, conversation.unreadCount || 0)
+      : total
+  ), 0)
+})
 const appBadgeCount = computed(() => totalUnreadCount.value + store.pendingRequests.length)
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
@@ -937,14 +948,42 @@ function closeMessageMenu() { messageMenu.visible = false; messageMenu.message =
 function closePeerMenu() { peerMenu.visible = false; peerMenu.peer = undefined }
 function closeContactMenu() { contactMenu.visible = false; contactMenu.peer = undefined }
 function closeDeleteConfirm() { deleteConfirm.visible = false; deleteConfirm.peer = undefined }
-function openMessageMenu(event: MouseEvent, message: ChatMessage) {
+function closeAllContextMenus() {
+  closeMessageMenu()
   closePeerMenu()
-	closeContactMenu()
-	closePeerInfo()
+  closeContactMenu()
+  closeDeleteConfirm()
+}
+function handleAppContextMenu(event: MouseEvent) {
+  const target = event.target as Element | null
+  // Keep the browser's native editing menu for editable controls. Every
+  // other part of the app has either a business menu on its row/bubble or no
+  // context actions at all.
+  if (target?.closest('input, textarea, [contenteditable="true"]')) return
+  event.preventDefault()
+  if (target?.closest('.message-context-menu, .peer-context-menu, .contact-context-menu, .delete-confirm-popover')) return
+  closeAllContextMenus()
+}
+function handleContextMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeAllContextMenus()
+}
+function canOpenMessageMenu(message: ChatMessage): boolean {
+  if (message.kind !== 'file') return true
+  return attachmentHasLocalFile(message)
+}
+function openMessageMenu(event: MouseEvent, message: ChatMessage) {
+  if (!canOpenMessageMenu(message)) {
+    closeAllContextMenus()
+    return
+  }
+  closePeerMenu()
+  closeContactMenu()
+  closeDeleteConfirm()
+  closePeerInfo()
   messageMenu.message = message
-  messageMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 190))
-  messageMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 300))
-	messageMenu.visible = true
+  messageMenu.x = Math.max(8, Math.min(event.clientX, window.innerWidth - 198))
+  messageMenu.y = Math.max(8, Math.min(event.clientY, window.innerHeight - 308))
+  messageMenu.visible = true
 }
 function openPeerMenu(event: MouseEvent, peer: Peer) {
   closeMessageMenu()
@@ -1030,6 +1069,10 @@ async function confirmPendingDelete() {
         if (message.attachmentId) delete store.transferProgress[message.attachmentId]
       }
       delete store.messages[`conv-${peer.deviceId}`]
+      // Remove the local conversation snapshot as well.  The backend clears
+      // it too, but removing it here closes the small race with stale
+      // peer/message events and keeps the Friends badge in sync immediately.
+      store.clearConversationLocal(peer.deviceId)
     }
     if (store.activePeerId === peer.deviceId && kind === 'hide') {
       store.selectPeer('')
@@ -1096,15 +1139,12 @@ function closePeerInfo() { showPeerInfo.value = false }
 function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value; if (showPeerInfo.value && activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
 function openPeerInfo() { showPeerInfo.value = true; if (activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
 function handleMessageAreaPointerDown() { cancelAutoScroll(); markActiveRead() }
-function handleMessageAreaClick() { closePeerInfo(); closeMessageMenu(); closePeerMenu() }
+function handleMessageAreaClick() { closePeerInfo(); closeAllContextMenus() }
 function closeContextMenusOnPointerDown(event: PointerEvent) {
   const target = event.target as Element | null
   if (!target?.closest('.emoji-panel, .emoji-toggle')) emojiOpen.value = false
   if (target?.closest('.message-context-menu, .peer-context-menu, .contact-context-menu, .delete-confirm-popover')) return
-  closeMessageMenu()
-  closePeerMenu()
-  closeContactMenu()
-  closeDeleteConfirm()
+  closeAllContextMenus()
 }
 function handleComposerFocus() { closePeerInfo(); markActiveRead() }
 function markActiveRead() { if (!conversationVisible.value || !activePeer.value) return; store.clearConversationUnread(activePeer.value.deviceId); void ChatService.MarkConversationRead(activePeer.value.deviceId) }
@@ -1237,12 +1277,13 @@ onMounted(async () => {
   window.addEventListener('blur', updateDesktopForeground)
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
+  window.addEventListener('keydown', handleContextMenuKeydown)
   window.addEventListener('pointerdown', closeContextMenusOnPointerDown)
   try { isMac.value = System.IsMac() } catch { isMac.value = false }
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -1934,7 +1975,10 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 /* Context actions and confirmations are opaque, anchored surfaces so the app remains visible. */
 .message-context-menu,
 .peer-context-menu,
-.contact-context-menu { background: var(--surface-1); color: var(--text); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
+.contact-context-menu { max-width: min(260px, calc(100vw - 16px)); box-sizing: border-box; background: var(--surface-1); color: var(--text); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(20, 30, 60, .28); }
+.message-context-menu button,
+.peer-context-menu button,
+.contact-context-menu button { max-width: min(240px, calc(100vw - 24px)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .contact-context-menu { position: fixed; z-index: 9999; min-width: 150px; padding: 6px; display: flex; flex-direction: column; border-radius: 9px; }
 .contact-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; font-size: 13px; padding: 8px 10px; border-radius: 6px; }
 .contact-context-menu button:hover { background: rgba(55, 103, 232, .12); }
