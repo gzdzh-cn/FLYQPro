@@ -124,6 +124,16 @@ export function GetFriendSharedEntryThumbnail(deviceID: string, relativePath: st
     return $Call.ByID(3581863860, deviceID, relativePath);
 }
 
+/**
+ * GetFriendSharedEntryThumbnailCached serves the desktop-side cached preview
+ * when the shared-drive list has already fetched it.  A cache miss is still a
+ * single bounded request; the Android side may return an empty payload while
+ * generating the thumbnail, so the viewer never waits for generation.
+ */
+export function GetFriendSharedEntryThumbnailCached(deviceID: string, relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<string> {
+    return $Call.ByID(3610340958, deviceID, relativePath, entryID, fileSize, modifiedAt);
+}
+
 export function GetFriendSharedEntryThumbnails(deviceID: string, requests: chat$0.SharedThumbnailRequest[]): $CancellablePromise<chat$0.SharedThumbnailResult[]> {
     return $Call.ByID(3720797765, deviceID, requests).then(($result: any) => {
         return $$createType7($result);

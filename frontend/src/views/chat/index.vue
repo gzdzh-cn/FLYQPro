@@ -161,7 +161,7 @@
         <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedRequest.nickname)">{{ initials(selectedRequest.nickname) }}</div><h2 class="nickname-ellipsis">{{ selectedRequest.nickname }}</h2><div class="tags"><a-tag>{{ requestDeviceLabel(selectedRequest) }}</a-tag><a-tag :color="selectedRequest.status === 'accepted' ? 'green' : selectedRequest.status === 'rejected' ? 'red' : 'arcoblue'">{{ requestStatusText(selectedRequest.status, selectedRequest.direction) }}</a-tag></div><p>{{ selectedRequest.message || (selectedRequest.direction === 'mutual' ? '双方都发起了好友申请' : '想和你成为好友') }}</p><div class="request-times"><span>申请时间<strong>{{ formatTime(selectedRequest.createdAt) }}</strong></span><span v-if="selectedRequest.acceptedAt">同意时间<strong>{{ formatTime(selectedRequest.acceptedAt) }}</strong></span></div><a-button v-if="selectedRequest.status === 'accepted' && isFriend(selectedRequest.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedRequest.deviceId)">打开聊天</a-button><div v-else-if="isIncomingPending(selectedRequest)" class="detail-actions"><a-button type="primary" :loading="processingRequests[selectedRequest.requestId]" @click="acceptRequest">同意</a-button><a-button status="danger" :disabled="processingRequests[selectedRequest.requestId]" @click="rejectRequest">拒绝</a-button></div></div>
       </main>
       <main class="detail-pane" v-else-if="selectedDiscovery" @click="clearDiscoverySelection">
-        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname, selectedDiscovery.avatarData)">{{ selectedDiscovery.avatarData ? '' : initials(selectedDiscovery.nickname) }}</div><h2 class="nickname-ellipsis">{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag :color="selectedDiscovery.friendshipState === 'removed' ? 'red' : selectedDiscovery.relation === 'friend' ? 'green' : 'arcoblue'">{{ selectedDiscovery.friendshipState === 'removed' ? '不是好友' : selectedDiscovery.relation === 'friend' ? '已添加' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.friendshipState === 'removed' ? '好友关系已解除，请重新发送申请。' : selectedDiscovery.relation === 'friend' ? '已添加，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
+        <div class="detail-card" @click.stop><div class="avatar huge" :style="avatarStyle(selectedDiscovery.nickname, selectedDiscovery.avatarData)">{{ selectedDiscovery.avatarData ? '' : initials(selectedDiscovery.nickname) }}</div><h2 class="nickname-ellipsis">{{ selectedDiscovery.nickname }}</h2><div class="tags"><a-tag>{{ selectedDiscovery.platform }}</a-tag><a-tag :color="selectedDiscovery.relation === 'friend' ? 'green' : 'arcoblue'">{{ selectedDiscovery.relation === 'friend' ? '已添加' : (selectedDiscovery.online ? '在线' : '最近可见') }}</a-tag></div><div class="basic-info"><label>设备类型<strong>{{ selectedDiscovery.platform }}</strong></label><label>操作系统<strong>{{ selectedDiscovery.osVersion }}</strong></label><label>状态<strong>{{ selectedDiscovery.online ? '在线' : '最近可见' }}</strong></label></div><a-button v-if="isFriend(selectedDiscovery.deviceId)" class="detail-primary-button" type="primary" long @click="openFriendChat(selectedDiscovery.deviceId)">打开聊天</a-button><a-button v-else class="detail-primary-button" type="primary" long @click="addPeer">发送好友申请</a-button><p class="subtle">{{ selectedDiscovery.relation === 'friend' ? '已添加，无需重复发送申请。' : '成为好友后，才会显示 IP、端口和完整设备指纹。' }}</p></div>
       </main>
       <main v-else class="blank-state"><div class="brand-mark">⌕</div><h2>发现局域网好友</h2><p>已开启“允许被发现”的设备会显示在这里</p><a-button type="primary" :loading="scanning" :disabled="scanning" @click="refreshPeers">立即扫描</a-button></main>
       <div v-if="contactMenu.visible && contactMenu.peer" class="contact-context-menu" :style="contactMenuStyle" @click.stop @pointerdown.stop>
@@ -1390,15 +1390,15 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 
 /* Final surface system: the app is intentionally divided into distinct layers. */
 .chat-app:not(.theme-dark) {
-  --app-bg: #edf0f3;
-  --surface-1: #f7f8fa;
-  --surface-2: #e6eaef;
+  --app-bg: var(--fp-light-page);
+  --surface-1: var(--fp-light-surface);
+  --surface-2: var(--fp-light-muted-surface);
   --surface-3: #dde3e9;
   --surface-4: #d3dae2;
-  --line: #cfd6de;
-  --text: #20252b;
-  --muted: #5d6874;
-  --hover: #e1e7ef;
+  --line: var(--fp-light-line);
+  --text: var(--fp-light-text);
+  --muted: var(--fp-light-muted);
+  --hover: var(--fp-light-hover);
   --list-bg: #f1f3f6;
   --accent: #5c7398;
   --shadow: 0 12px 30px rgba(37, 48, 62, .08);
@@ -1409,15 +1409,15 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
   --scroll-thumb: #b7c0cb;
 }
 .chat-app.theme-dark {
-  --app-bg: #0f1115;
-  --surface-1: #15181d;
-  --surface-2: #1b2027;
+  --app-bg: var(--fp-dark-page);
+  --surface-1: var(--fp-dark-surface);
+  --surface-2: var(--fp-dark-muted-surface);
   --surface-3: #242a32;
   --surface-4: #2d343d;
-  --line: #39424d;
-  --text: #f0f2f5;
-  --muted: #a4adb8;
-  --hover: #2a3442;
+  --line: var(--fp-dark-line);
+  --text: var(--fp-dark-text);
+  --muted: var(--fp-dark-muted);
+  --hover: var(--fp-dark-hover);
   --list-bg: #202428;
   --accent: #7897d0;
   --shadow: 0 14px 36px rgba(0, 0, 0, .28);
@@ -2056,4 +2056,73 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .delete-confirm-popover > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail-card > .nickname-ellipsis,
 .info-profile > .nickname-ellipsis { width: 100%; text-align: center; }
+
+/* Shared list primitives: keep high-frequency rows aligned across friends,
+   contacts, requests and the discovery view while leaving their business
+   actions and platform-specific layout intact. */
+.chat-app .peer-row,
+.chat-app .request-row {
+  min-height: var(--fp-row-height);
+  box-sizing: border-box;
+}
+.chat-app .peer-row > .avatar,
+.chat-app .request-row > .avatar {
+  width: var(--fp-avatar-lg);
+  height: var(--fp-avatar-lg);
+  flex: 0 0 var(--fp-avatar-lg);
+  border-radius: var(--fp-radius-lg);
+}
+.chat-app .peer-row,
+.chat-app .request-row { gap: var(--fp-space-3); }
+.chat-app .request-row > div:not(.avatar),
+.chat-app .peer-row .peer-copy { min-width: 0; }
+.chat-app .request-row strong,
+.chat-app .peer-row strong,
+.chat-app .detail-card h2,
+.chat-app .head-peer strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-app .pane-title,
+.chat-app .conversation-head,
+.chat-app .settings-head {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+.chat-app .icon-button,
+.chat-app .scan-button,
+.chat-app .composer-tools button {
+  min-width: var(--fp-control-sm);
+  min-height: var(--fp-control-sm);
+  border-radius: var(--fp-radius-md);
+}
+.chat-app .group-title,
+.chat-app .clear-requests { color: var(--muted); }
+.chat-app .group-title:hover,
+.chat-app .clear-requests:hover { color: var(--accent); }
+.chat-app .message-status,
+.chat-app .pending-request-mark,
+.chat-app .pin-mark { border-radius: 999px; }
+.chat-app .message-context-menu,
+.chat-app .peer-context-menu,
+.chat-app .contact-context-menu,
+.chat-app .delete-confirm-popover {
+  border-radius: var(--fp-radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+}
+.chat-app:not(.theme-dark) .message-context-menu,
+.chat-app:not(.theme-dark) .peer-context-menu,
+.chat-app:not(.theme-dark) .contact-context-menu,
+.chat-app:not(.theme-dark) .delete-confirm-popover {
+  box-shadow: 0 12px 30px rgba(20, 30, 60, .18);
+}
+.chat-app.theme-dark .message-context-menu,
+.chat-app.theme-dark .peer-context-menu,
+.chat-app.theme-dark .contact-context-menu,
+.chat-app.theme-dark .delete-confirm-popover {
+  box-shadow: 0 16px 38px rgba(0, 0, 0, .42);
+}
 </style>

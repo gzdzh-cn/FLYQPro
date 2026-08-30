@@ -700,6 +700,31 @@ func (s *ChatService) GetFriendSharedEntryThumbnail(deviceID, relativePath strin
 	return s.engine.GetFriendSharedEntryThumbnail(gctx.New(), strings.TrimSpace(deviceID), relativePath)
 }
 
+// GetFriendSharedEntryThumbnailCached serves the desktop-side cached preview
+// when the shared-drive list has already fetched it.  A cache miss is still a
+// single bounded request; the Android side may return an empty payload while
+// generating the thumbnail, so the viewer never waits for generation.
+func (s *ChatService) GetFriendSharedEntryThumbnailCached(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) (string, error) {
+	request := chat.SharedThumbnailRequest{
+		RelativePath: relativePath,
+		EntryID:      entryID,
+		FileSize:     fileSize,
+		ModifiedAt:   modifiedAt,
+	}
+	results, err := s.GetFriendSharedEntryThumbnails(deviceID, []chat.SharedThumbnailRequest{request})
+	if err != nil || len(results) == 0 || results[0].Status != "ready" || results[0].Payload == "" {
+		return "", err
+	}
+	mimeType := results[0].ThumbnailMime
+	if mimeType == "" {
+		mimeType = results[0].MimeType
+	}
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+	return "data:" + mimeType + ";base64," + results[0].Payload, nil
+}
+
 func (s *ChatService) GetFriendSharedEntryThumbnails(deviceID string, requests []chat.SharedThumbnailRequest) ([]chat.SharedThumbnailResult, error) {
 	deviceID = strings.TrimSpace(deviceID)
 	if len(requests) > 24 {

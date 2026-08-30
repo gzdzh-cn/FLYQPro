@@ -65,6 +65,17 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 }
 
 func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
+	return s.openSharedPreviewWithMetadata(relativePath, "", 0, "")
+}
+
+// OpenSharedPreviewFast accepts the metadata already present in the shared
+// list. It lets the viewer address the same remote thumbnail cache entry
+// instead of starting a second path-only lookup.
+func (s *ImageViewerService) OpenSharedPreviewFast(relativePath, entryID string, fileSize int64, modifiedAt string) error {
+	return s.openSharedPreviewWithMetadata(relativePath, entryID, fileSize, modifiedAt)
+}
+
+func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID string, fileSize int64, modifiedAt string) error {
 	if s.chatService == nil {
 		return fmt.Errorf("共享预览服务尚未初始化")
 	}
@@ -79,6 +90,15 @@ func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
 	query := url.Values{}
 	query.Set("source", "shared-owner")
 	query.Set("relativePath", filepath.ToSlash(relativePath))
+	if entryID != "" {
+		query.Set("entryId", entryID)
+	}
+	if fileSize > 0 {
+		query.Set("fileSize", fmt.Sprintf("%d", fileSize))
+	}
+	if modifiedAt != "" {
+		query.Set("modifiedAt", modifiedAt)
+	}
 	if isPDFMime(entry.MimeType, entry.Name) {
 		query.Set("previewType", "pdf")
 	} else {
@@ -88,6 +108,16 @@ func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
 }
 
 func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, relativePath string) error {
+	return s.openFriendSharedPreviewWithMetadata(deviceID, relativePath, "", 0, "")
+}
+
+// OpenFriendSharedPreviewFast carries the shared-entry identity to the
+// viewer. The old method remains for older frontend bundles.
+func (s *ImageViewerService) OpenFriendSharedPreviewFast(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
+	return s.openFriendSharedPreviewWithMetadata(deviceID, relativePath, entryID, fileSize, modifiedAt)
+}
+
+func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
 	if s.chatService == nil {
 		return fmt.Errorf("共享预览服务尚未初始化")
 	}
@@ -116,6 +146,15 @@ func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, relativePath stri
 	query.Set("source", "shared-friend")
 	query.Set("deviceId", deviceID)
 	query.Set("relativePath", filepath.ToSlash(relativePath))
+	if entryID != "" {
+		query.Set("entryId", entryID)
+	}
+	if fileSize > 0 {
+		query.Set("fileSize", fmt.Sprintf("%d", fileSize))
+	}
+	if modifiedAt != "" {
+		query.Set("modifiedAt", modifiedAt)
+	}
 	if isPDFMime("", relativePath) {
 		query.Set("previewType", "pdf")
 	} else {

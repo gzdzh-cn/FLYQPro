@@ -16,10 +16,27 @@ export function OpenFriendSharedPreview(deviceID: string, relativePath: string):
     return $Call.ByID(509701049, deviceID, relativePath);
 }
 
+/**
+ * OpenFriendSharedPreviewFast carries the shared-entry identity to the
+ * viewer. The old method remains for older frontend bundles.
+ */
+export function OpenFriendSharedPreviewFast(deviceID: string, relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
+    return $Call.ByID(95895251, deviceID, relativePath, entryID, fileSize, modifiedAt);
+}
+
 export function OpenImageViewer(conversationID: string, messageID: string): $CancellablePromise<void> {
     return $Call.ByID(433471697, conversationID, messageID);
 }
 
 export function OpenSharedPreview(relativePath: string): $CancellablePromise<void> {
     return $Call.ByID(2171153429, relativePath);
+}
+
+/**
+ * OpenSharedPreviewFast accepts the metadata already present in the shared
+ * list. It lets the viewer address the same remote thumbnail cache entry
+ * instead of starting a second path-only lookup.
+ */
+export function OpenSharedPreviewFast(relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
+    return $Call.ByID(195604383, relativePath, entryID, fileSize, modifiedAt);
 }

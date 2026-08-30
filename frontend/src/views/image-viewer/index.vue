@@ -56,9 +56,12 @@ const previewSource = computed(() => String(route.query.source || ''))
 const sharedPreviewType = computed(() => String(route.query.previewType || '').toLowerCase())
 const sharedDeviceId = computed(() => String(route.query.deviceId || '').trim())
 const sharedRelativePath = computed(() => String(route.query.relativePath || ''))
+const sharedEntryId = computed(() => String(route.query.entryId || ''))
+const sharedFileSize = computed(() => Number(route.query.fileSize || 0))
+const sharedModifiedAt = computed(() => String(route.query.modifiedAt || ''))
 const isSharedPreview = computed(() => previewSource.value === 'shared-owner' || previewSource.value === 'shared-friend')
 const messages = ref<any[]>([])
-type SharedPreviewEntry = { name: string; relativePath: string; mimeType?: string; isDirectory?: boolean }
+type SharedPreviewEntry = { name: string; relativePath: string; mimeType?: string; isDirectory?: boolean; entryId?: string; size?: number; modifiedAt?: string }
 const sharedEntries = ref<SharedPreviewEntry[]>([])
 const sharedCurrentPath = ref(sharedRelativePath.value)
 const currentIndex = ref(0)
@@ -257,9 +260,15 @@ async function sharedSourceFor(relativePath: string) {
   throw new Error('共享预览参数无效')
 }
 
-async function sharedThumbnailFor(relativePath: string) {
+async function sharedThumbnailFor(relativePath: string, entry?: SharedPreviewEntry) {
   if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryThumbnail(relativePath)
-  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryThumbnail(sharedDeviceId.value, relativePath)
+  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
+    const entryId = entry?.entryId || sharedEntryId.value
+    const fileSize = entry?.size || sharedFileSize.value
+    const modifiedAt = entry?.modifiedAt || sharedModifiedAt.value
+    if (entryId || fileSize || modifiedAt) return ChatService.GetFriendSharedEntryThumbnailCached(sharedDeviceId.value, relativePath, entryId, fileSize, modifiedAt)
+    return ChatService.GetFriendSharedEntryThumbnail(sharedDeviceId.value, relativePath)
+  }
   throw new Error('共享预览参数无效')
 }
 
@@ -313,19 +322,14 @@ async function loadCurrent() {
       }
       return
     }
-    // The viewer opens immediately. If the shared folder has no cached
-    // thumbnail yet, keep the window responsive while the thumbnail service
-    // generates it in the background.
+    // Open immediately. Thumbnail generation and the streaming original are
+    // independent so a cache miss never delays the first usable preview.
     loading.value = false
     thumbnailPending.value = true
     void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
     void (async () => {
       let thumbnail = ''
-      for (let attempt = 0; attempt < 24 && !thumbnail; attempt++) {
-        try { thumbnail = await sharedThumbnailFor(activePath) } catch { /* placeholder remains */ }
-        if (thumbnail || token !== loadToken) break
-        await new Promise((resolve) => window.setTimeout(resolve, Math.min(750, 220 + attempt * 25)))
-      }
+      try { thumbnail = await sharedThumbnailFor(activePath, entry) } catch { /* placeholder remains */ }
       if (token !== loadToken) return
       if (thumbnail) {
         thumbnailSource.value = thumbnail
@@ -333,14 +337,16 @@ async function loadCurrent() {
         source.value = thumbnail
       }
       thumbnailPending.value = false
+    })()
+    void (async () => {
       originalLoading.value = true
       try {
         const original = await sharedOriginalFor(activePath)
         if (token !== loadToken) return
         if (original) originalSource.value = original
-        else if (!thumbnail) error.value = '图片原图暂时无法读取'
+        else if (!thumbnailSource.value) error.value = '图片原图暂时无法读取'
       } catch {
-        if (token === loadToken && !thumbnail) error.value = '共享图片暂时无法读取'
+        if (token === loadToken && !thumbnailSource.value) error.value = '共享图片暂时无法读取'
       } finally {
         if (token === loadToken) originalLoading.value = false
       }
@@ -427,7 +433,7 @@ async function loadMessages() {
     // the selected image.  The selected path is enough for the thumbnail and
     // preview services; the directory request only fills the adjacent-image
     // gallery in the background.
-    sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' }]
+    sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value }]
     currentIndex.value = 0
     void loadCurrent()
     try {
@@ -437,12 +443,12 @@ async function loadMessages() {
         : await ChatService.ListFriendSharedEntriesPage(sharedDeviceId.value, parentPath, 0, 100)
       const images = (page.entries || []).filter((entry: SharedPreviewEntry) => isImageSharedEntry(entry))
       if (!images.some((entry: SharedPreviewEntry) => entry.relativePath === requestedPath)) {
-        images.push({ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' })
+        images.push({ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value })
       }
       sharedEntries.value = images
       currentIndex.value = Math.max(0, images.findIndex((entry: SharedPreviewEntry) => entry.relativePath === requestedPath))
     } catch {
-      sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*' }]
+      sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value }]
       currentIndex.value = 0
     }
     return
