@@ -145,6 +145,7 @@ func (s *ChatService) profileWithAvatar(profile chat.Profile) chat.Profile {
 }
 
 func (s *ChatService) UpdateProfile(profile chat.Profile) (chat.Profile, error) {
+	profile.Nickname = chat.NormalizeNickname(profile.Nickname)
 	if strings.TrimSpace(profile.Nickname) == "" {
 		return chat.Profile{}, fmt.Errorf("昵称不能为空")
 	}

@@ -485,7 +485,7 @@ func TestRemoteFriendshipRejectionDowngradesLocalPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
+	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || !peers[0].DiscoveryVisible {
 		t.Fatalf("收到远端好友关系拒绝后列表项或关系状态错误: %+v", peers)
 	}
 	removed, err := IsFriendRemoved(ctx, "peer-remote-removed")
@@ -588,7 +588,7 @@ func TestFriendRemovedFrameDowngradesRemotePeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || peers[0].DiscoveryVisible {
+	if len(peers) != 1 || peers[0].Relation != DiscoveredState || peers[0].FriendshipState != "removed" || !peers[0].VisibleInFriends || !peers[0].DiscoveryVisible {
 		t.Fatalf("解除好友帧未保留列表项并降级关系: %+v", peers)
 	}
 	removed, err := IsFriendRemoved(ctx, "peer-removed-notify")

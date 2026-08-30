@@ -249,6 +249,49 @@ func TestDiscoveryLeaseKeepsRecentlySeenStrangerVisible(t *testing.T) {
 	}
 }
 
+func TestFriendScopedAnnouncePreservesPublicDiscoveryVisibility(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	ctx := context.Background()
+	if err := UpsertPeer(ctx, Peer{
+		DeviceID:         "friend-public-presence",
+		Nickname:         "好友设备",
+		Relation:         PeerRelation,
+		DiscoveryVisible: true,
+		Online:           true,
+		LastSeen:         nowString(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+	if err := engine.handleAnnounce(wireMessage{
+		Magic:          DiscoveryMagic,
+		Protocol:       ProtocolName,
+		Major:          ProtocolMajor,
+		MinMajor:       ProtocolMajor,
+		Type:           "announce",
+		DeviceID:       "friend-public-presence",
+		Nickname:       "好友设备",
+		DiscoveryScope: DiscoveryScopeFriend,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	peers, err := ListPeers(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || !peers[0].DiscoveryVisible || peers[0].Relation != PeerRelation {
+		t.Fatalf("friend-scoped announce cleared public discovery state: %+v", peers)
+	}
+}
+
 func TestDiscoveryGracePeriodHidesFriendButKeepsRelation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))

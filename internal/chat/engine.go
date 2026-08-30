@@ -651,8 +651,10 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		// Control message only; it has no UI or message side effects.
 	case "friend_removed":
 		// A contact removal is an authenticated, one-way relationship change.
-		// Keep the peer record as a discovered device so the next public scan
-		// can refresh its address and show it again when discoverable.
+		// Relationship state and public discovery presence are independent. If
+		// a fresh public announce already made the peer visible, this control
+		// frame must not hide it until the next announce (which caused a visible
+		// announce/remove flicker while tombstones were being synchronized).
 		if strings.TrimSpace(hello.DeviceID) == "" {
 			return
 		}
@@ -672,11 +674,9 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		_ = MarkFriendRemovedWithVersion(context.Background(), hello.DeviceID, version, knownPeer.PublicKeyPEM, knownPeer.CertificateFingerprint)
 		_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
 		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
-		_ = SetPeerDiscoveryVisible(context.Background(), hello.DeviceID, false)
 		e.updatePeerRelation(hello.DeviceID, DiscoveredState)
 		e.setPeerVisibleInFriends(hello.DeviceID, true)
 		e.setPeerFriendshipState(hello.DeviceID, "removed")
-		e.setPeerDiscoveryVisible(hello.DeviceID, false)
 		e.emit("chat:peer-updated", e.Peers())
 	case "share_list_request":
 		e.handleSharedListRequest(conn, hello, message)
@@ -1877,7 +1877,16 @@ func (e *Engine) handleAnnounce(message wireMessage) error {
 			}
 		}
 	}
-	if err := e.upsertWirePeer(message, discoveryVisible); err != nil {
+	// A directed friend response is useful for address/online refreshes but it
+	// is not an instruction to remove a public discovery entry. Preserve the
+	// latest public lease until an explicit withdraw/offline or lease expiry.
+	persistedDiscoveryVisible := discoveryVisible
+	if !discoveryVisible {
+		if existing, err := e.peer(message.DeviceID); err == nil {
+			persistedDiscoveryVisible = existing.DiscoveryVisible
+		}
+	}
+	if err := e.upsertWirePeer(message, persistedDiscoveryVisible); err != nil {
 		return err
 	}
 	if discoveryVisible {
@@ -1913,7 +1922,7 @@ func (e *Engine) maybeSyncFriendRemoval(peer Peer) {
 	now := time.Now()
 	e.friendRemovalSyncMu.Lock()
 	last := e.friendRemovalSyncAt[peer.DeviceID]
-	if !last.IsZero() && now.Sub(last) < 10*time.Second {
+	if !last.IsZero() && now.Sub(last) < 5*time.Minute {
 		e.friendRemovalSyncMu.Unlock()
 		return
 	}
@@ -3236,6 +3245,13 @@ func (e *Engine) handleOffline(deviceID string, requestIDs ...string) {
 	if err != nil {
 		return
 	}
+	// Legacy clients may send an unversioned offline packet while restarting
+	// their discovery listener. If a public announce was received recently,
+	// that packet is only a transient transport event. New clients include a
+	// monotonic presence timestamp and remain authoritative above.
+	if (len(requestIDs) == 0 || !isDiscoveryPresence(strings.TrimSpace(requestIDs[0]))) && peer.DiscoveryVisible && discoveryLeaseIsFresh(peer.LastSeen) {
+		return
+	}
 	if peer.Relation != PeerRelation {
 		e.forgetDiscoveredPeer(deviceID)
 		return
@@ -3606,11 +3622,9 @@ func (e *Engine) handleRemoteFriendshipRequired(deviceID string) {
 	_ = SetPeerRelation(context.Background(), deviceID, DiscoveredState)
 	_ = SetPeerVisibleInFriends(context.Background(), deviceID, true)
 	e.clearLocallyHiddenFriend(deviceID)
-	_ = SetPeerDiscoveryVisible(context.Background(), deviceID, false)
 	e.updatePeerRelation(deviceID, DiscoveredState)
 	e.setPeerVisibleInFriends(deviceID, true)
 	e.setPeerFriendshipState(deviceID, "removed")
-	e.setPeerDiscoveryVisible(deviceID, false)
 	e.emit("chat:peer-updated", e.Peers())
 }
 
@@ -3960,6 +3974,12 @@ func (e *Engine) handleWithdraw(deviceID string, requestIDs ...string) {
 	e.resetDiscoveryMiss(deviceID)
 	peer, err := e.peer(deviceID)
 	if err != nil {
+		return
+	}
+	// Do not let a legacy, unversioned withdraw produced during a brief
+	// listener restart erase a freshly announced discovery row. Versioned
+	// withdraw packets remain authoritative and are handled immediately.
+	if (len(requestIDs) == 0 || !isDiscoveryPresence(strings.TrimSpace(requestIDs[0]))) && peer.DiscoveryVisible && discoveryLeaseIsFresh(peer.LastSeen) {
 		return
 	}
 	if peer.Relation == PeerRelation {

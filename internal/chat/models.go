@@ -1,6 +1,22 @@
 package chat
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+const MaxNicknameLength = 10
+
+// NormalizeNickname is the single boundary for local and remote profile data.
+// Count runes instead of bytes so Chinese and other multi-byte characters are
+// treated as one visible character.
+func NormalizeNickname(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > MaxNicknameLength {
+		runes = runes[:MaxNicknameLength]
+	}
+	return string(runes)
+}
 
 const (
 	ProtocolName         = "dzhgo"
