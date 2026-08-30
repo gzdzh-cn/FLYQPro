@@ -218,6 +218,9 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := MigrateHiddenFriendDevices(ctx); err != nil {
+		return err
+	}
 	if profile.AvatarPath != "" && profile.AvatarHash == "" {
 		if data, avatarErr := os.ReadFile(profile.AvatarPath); avatarErr == nil && len(data) > 0 && len(data) <= 5*1024*1024 {
 			profile.AvatarHash = sha256Hex(data)
@@ -673,9 +676,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		_ = MarkFriendRemovedWithVersion(context.Background(), hello.DeviceID, version, knownPeer.PublicKeyPEM, knownPeer.CertificateFingerprint)
 		_ = SetPeerRelation(context.Background(), hello.DeviceID, DiscoveredState)
-		_ = SetPeerVisibleInFriends(context.Background(), hello.DeviceID, true)
+		e.showPeerUnlessLocallyHidden(context.Background(), hello.DeviceID)
 		e.updatePeerRelation(hello.DeviceID, DiscoveredState)
-		e.setPeerVisibleInFriends(hello.DeviceID, true)
 		e.setPeerFriendshipState(hello.DeviceID, "removed")
 		e.emit("chat:peer-updated", e.Peers())
 	case "share_list_request":
@@ -1664,7 +1666,15 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)
-	return wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
+	message := wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
+	if kind == "announce" {
+		if data, mimeType, hash := e.avatarPreviewPayloadForWire(); data != "" {
+			message.AvatarPreviewData = data
+			message.AvatarPreviewMime = mimeType
+			message.AvatarPreviewHash = hash
+		}
+	}
+	return message
 }
 
 func (e *Engine) upsertWirePeer(message wireMessage, discoveryVisible bool) error {
@@ -1729,11 +1739,17 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 			peer.Capabilities = append([]string(nil), existing.Capabilities...)
 		}
 	}
-	// Accept avatar bytes only on authenticated hello/control traffic for
-	// compatibility with older peers. Public discovery packets never carry
-	// or persist full avatar data.
-	if message.AvatarData != "" && message.AvatarHash != "" && message.Type != "announce" && message.Type != "discover" {
-		if avatarPath, avatarErr := e.cachePeerAvatar(message, peer.AvatarPath); avatarErr == nil {
+	// Authenticated traffic may carry the full avatar. Public discovery carries
+	// only AvatarPreviewData, which is validated independently and cached as a
+	// normal peer avatar so the discovery list can render it immediately.
+	avatarMessage := message
+	if avatarMessage.AvatarData == "" && avatarMessage.AvatarPreviewData != "" {
+		avatarMessage.AvatarData = avatarMessage.AvatarPreviewData
+		avatarMessage.AvatarHash = avatarMessage.AvatarPreviewHash
+		avatarMessage.AvatarMime = avatarMessage.AvatarPreviewMime
+	}
+	if avatarMessage.AvatarData != "" && avatarMessage.AvatarHash != "" {
+		if avatarPath, avatarErr := e.cachePeerAvatar(avatarMessage, peer.AvatarPath); avatarErr == nil {
 			peer.AvatarPath = avatarPath
 		}
 	}
@@ -1765,6 +1781,22 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 	e.peers[peer.DeviceID] = peer
 	e.mu.Unlock()
 	return nil
+}
+
+func (e *Engine) avatarPreviewPayloadForWire() (encoded, mimeType, hash string) {
+	encoded, sourceMime := e.avatarPayloadForWire()
+	if encoded == "" {
+		return "", "", ""
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 {
+		return "", "", ""
+	}
+	preview, previewMime, previewBytes, err := buildAvatarPreview(data, sourceMime)
+	if err != nil || len(previewBytes) == 0 {
+		return "", "", ""
+	}
+	return preview, previewMime, sha256Hex(previewBytes)
 }
 
 func (e *Engine) cachePeerAvatar(message wireMessage, previousPath string) (string, error) {
@@ -3073,10 +3105,8 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 			if e.shouldApplyFriendRemoval(peer.DeviceID, response.RelationshipVersion) {
 				_ = MarkFriendRemovedWithVersion(context.Background(), peer.DeviceID, peer.RelationshipVersion, peer.PublicKeyPEM, peer.CertificateFingerprint)
 				_ = SetPeerRelation(context.Background(), peer.DeviceID, DiscoveredState)
-				_ = SetPeerVisibleInFriends(context.Background(), peer.DeviceID, true)
-				e.clearLocallyHiddenFriend(peer.DeviceID)
+				e.showPeerUnlessLocallyHidden(context.Background(), peer.DeviceID)
 				e.updatePeerRelation(peer.DeviceID, DiscoveredState)
-				e.setPeerVisibleInFriends(peer.DeviceID, true)
 				e.setPeerFriendshipState(peer.DeviceID, "removed")
 			} else {
 				log.Printf("保留当前好友关系，忽略旧的远端解除好友状态: device=%s", peer.DeviceID)
@@ -3546,6 +3576,12 @@ func (e *Engine) peer(deviceID string) (Peer, error) {
 	peer, ok := e.peers[deviceID]
 	e.mu.RUnlock()
 	if ok {
+		// A connection/discovery worker can hold an older in-memory snapshot
+		// than SQLite. Re-apply the durable local-hide decision here as well as
+		// in Peers(), so permission and restore checks see the same state.
+		if hidden, err := IsHiddenFriend(context.Background(), deviceID); err == nil && hidden {
+			peer.VisibleInFriends = false
+		}
 		return peer, nil
 	}
 	peers, err := ListPeers(context.Background(), "")
@@ -3620,10 +3656,8 @@ func (e *Engine) handleRemoteFriendshipRequired(deviceID string) {
 	}
 	_ = MarkFriendRemovedWithVersion(context.Background(), deviceID, version, publicKey, certificateFingerprint)
 	_ = SetPeerRelation(context.Background(), deviceID, DiscoveredState)
-	_ = SetPeerVisibleInFriends(context.Background(), deviceID, true)
-	e.clearLocallyHiddenFriend(deviceID)
+	e.showPeerUnlessLocallyHidden(context.Background(), deviceID)
 	e.updatePeerRelation(deviceID, DiscoveredState)
-	e.setPeerVisibleInFriends(deviceID, true)
 	e.setPeerFriendshipState(deviceID, "removed")
 	e.emit("chat:peer-updated", e.Peers())
 }
@@ -3812,6 +3846,30 @@ func (e *Engine) setPeerVisibility(ctx context.Context, deviceID string, visible
 	e.setPeerVisibleInFriends(deviceID, visible)
 	e.emit("chat:peer-updated", e.Peers())
 	return nil
+}
+
+// showPeerUnlessLocallyHidden is used by passive relationship/liveness
+// updates. Those events may change relation or discovery state, but they are
+// not an explicit request to restore a row hidden from the local friends
+// list. Only an explicit contact action, an incoming text message, or an
+// accepted friend request may clear the durable hidden marker.
+func (e *Engine) showPeerUnlessLocallyHidden(ctx context.Context, deviceID string) {
+	hidden, err := IsHiddenFriend(ctx, deviceID)
+	if err != nil {
+		// A storage error must never turn a hidden row into a visible one.
+		e.markLocallyHiddenFriend(deviceID)
+		e.setPeerVisibleInFriends(deviceID, false)
+		return
+	}
+	if hidden {
+		e.markLocallyHiddenFriend(deviceID)
+		e.setPeerVisibleInFriends(deviceID, false)
+		return
+	}
+	if err := SetPeerVisibleInFriends(ctx, deviceID, true); err == nil {
+		e.clearLocallyHiddenFriend(deviceID)
+		e.setPeerVisibleInFriends(deviceID, true)
+	}
 }
 
 func (e *Engine) RemovePeerFromMemory(deviceID string) {

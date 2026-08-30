@@ -291,22 +291,28 @@ type DiagnosticResult struct {
 }
 
 type wireMessage struct {
-	Magic               string                   `json:"magic,omitempty"`
-	Type                string                   `json:"type"`
-	Protocol            string                   `json:"protocol,omitempty"`
-	Major               int                      `json:"major,omitempty"`
-	Minor               int                      `json:"minor,omitempty"`
-	MinMajor            int                      `json:"minMajor,omitempty"`
-	MinMinor            int                      `json:"minMinor,omitempty"`
-	RequestID           string                   `json:"requestId,omitempty"`
-	DiscoveryScope      string                   `json:"discoveryScope,omitempty"`
-	MessageID           string                   `json:"messageId,omitempty"`
-	DeviceID            string                   `json:"deviceId,omitempty"`
-	Nickname            string                   `json:"nickname,omitempty"`
-	AvatarHash          string                   `json:"avatarHash,omitempty"`
-	AvatarVersion       int64                    `json:"avatarVersion,omitempty"`
-	AvatarData          string                   `json:"avatarData,omitempty"`
-	AvatarMime          string                   `json:"avatarMime,omitempty"`
+	Magic          string `json:"magic,omitempty"`
+	Type           string `json:"type"`
+	Protocol       string `json:"protocol,omitempty"`
+	Major          int    `json:"major,omitempty"`
+	Minor          int    `json:"minor,omitempty"`
+	MinMajor       int    `json:"minMajor,omitempty"`
+	MinMinor       int    `json:"minMinor,omitempty"`
+	RequestID      string `json:"requestId,omitempty"`
+	DiscoveryScope string `json:"discoveryScope,omitempty"`
+	MessageID      string `json:"messageId,omitempty"`
+	DeviceID       string `json:"deviceId,omitempty"`
+	Nickname       string `json:"nickname,omitempty"`
+	AvatarHash     string `json:"avatarHash,omitempty"`
+	AvatarVersion  int64  `json:"avatarVersion,omitempty"`
+	AvatarData     string `json:"avatarData,omitempty"`
+	AvatarMime     string `json:"avatarMime,omitempty"`
+	// Avatar preview bytes are deliberately separate from AvatarData. Discovery
+	// packets may carry a small, safe-to-cache preview while AvatarData remains
+	// reserved for the authenticated full-avatar response.
+	AvatarPreviewData   string                   `json:"avatarPreviewData,omitempty"`
+	AvatarPreviewHash   string                   `json:"avatarPreviewHash,omitempty"`
+	AvatarPreviewMime   string                   `json:"avatarPreviewMime,omitempty"`
 	Platform            string                   `json:"platform,omitempty"`
 	OSVersion           string                   `json:"osVersion,omitempty"`
 	IP                  string                   `json:"ip,omitempty"`

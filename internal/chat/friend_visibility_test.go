@@ -90,6 +90,54 @@ func TestStaleFriendRemovalMarkerDoesNotRestoreHiddenFriend(t *testing.T) {
 	}
 }
 
+func TestHiddenFriendPersistsAcrossRestartAndPeerRefresh(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "chat.db")
+	t.Setenv("GOFLY_DB_PATH", dbPath)
+	ctx := context.Background()
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-hidden-restart", Nickname: "隐藏好友", Relation: PeerRelation, VisibleInFriends: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPeerVisibleInFriends(ctx, "peer-hidden-restart", false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the stale snapshot produced by discovery or a reconnect.
+	if err := UpsertPeer(ctx, Peer{DeviceID: "peer-hidden-restart", Nickname: "重新发现", Relation: PeerRelation, VisibleInFriends: true, IP: "192.168.1.20", Port: 39190}); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := ListPeers(ctx, PeerRelation)
+	if err != nil || len(peers) != 1 || peers[0].VisibleInFriends {
+		t.Fatalf("刷新 peer 后隐藏状态丢失: %v, %+v", err, peers)
+	}
+	if err := db.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	if err := MigrateHiddenFriendDevices(ctx); err != nil {
+		t.Fatal(err)
+	}
+	peers, err = ListPeers(ctx, PeerRelation)
+	if err != nil || len(peers) != 1 || peers[0].VisibleInFriends {
+		t.Fatalf("重启后隐藏状态丢失: %v, %+v", err, peers)
+	}
+	if hidden, err := IsHiddenFriend(ctx, "peer-hidden-restart"); err != nil || !hidden {
+		t.Fatalf("重启后隐藏标记丢失: %v, %v", err, hidden)
+	}
+	// Only the explicit restore path clears the durable marker.
+	if err := SetPeerVisibleInFriends(ctx, "peer-hidden-restart", true); err != nil {
+		t.Fatal(err)
+	}
+	if hidden, err := IsHiddenFriend(ctx, "peer-hidden-restart"); err != nil || hidden {
+		t.Fatalf("显式恢复后隐藏标记仍存在: %v, %v", err, hidden)
+	}
+}
+
 func TestFriendRequestDoesNotPrecedeWithRestore(t *testing.T) {
 	if shouldSendFriendRestore("friend_request") {
 		t.Fatal("显式好友申请前不应发送 friend_restore")

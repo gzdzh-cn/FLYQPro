@@ -62,6 +62,10 @@ var schemaStatements = []string{
 		updated_at TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_peers_relation ON peers(relation)`,
+	`CREATE TABLE IF NOT EXISTS hidden_friend_devices (
+		device_id TEXT PRIMARY KEY,
+		hidden_at TEXT NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS friend_requests (
 		request_id TEXT PRIMARY KEY,
 		device_id TEXT NOT NULL,

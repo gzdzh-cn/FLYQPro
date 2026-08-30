@@ -254,10 +254,21 @@ func UpsertPeer(ctx context.Context, peer Peer) error {
 	if peer.Relation == PeerRelation {
 		visibleInFriends = true
 	}
-	return exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, created_at, updated_at)
+	if err := exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), COALESCE((SELECT relationship_version FROM peers WHERE device_id=?), ?), ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, relationship_version=CASE WHEN excluded.relationship_version='' THEN peers.relationship_version ELSE excluded.relationship_version END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.DeviceID, peer.RelationshipVersion, peer.LastSeen, nowString(), nowString())
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.DeviceID, peer.RelationshipVersion, peer.LastSeen, nowString(), nowString()); err != nil {
+		return err
+	}
+	// visible_in_friends is kept for compatibility with older databases, but
+	// this marker is authoritative so discovery and connection updates cannot
+	// resurrect a locally hidden friend.
+	if hidden, err := IsHiddenFriend(ctx, peer.DeviceID); err != nil {
+		return err
+	} else if hidden {
+		return exec(ctx, `UPDATE peers SET visible_in_friends=0, updated_at=? WHERE device_id=?`, nowString(), peer.DeviceID)
+	}
+	return nil
 }
 
 func SetPeerDiscoveryVisible(ctx context.Context, deviceID string, visible bool) error {
@@ -265,7 +276,56 @@ func SetPeerDiscoveryVisible(ctx context.Context, deviceID string, visible bool)
 }
 
 func SetPeerVisibleInFriends(ctx context.Context, deviceID string, visible bool) error {
-	return exec(ctx, `UPDATE peers SET visible_in_friends=?, updated_at=? WHERE device_id=?`, boolInt(visible), nowString(), deviceID)
+	database := db.DB()
+	if database == nil {
+		return fmt.Errorf("数据库尚未初始化")
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return fmt.Errorf("设备 ID 不能为空")
+	}
+	return database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`UPDATE peers SET visible_in_friends=?, updated_at=? WHERE device_id=?`, boolInt(visible), nowString(), deviceID); err != nil {
+			return err
+		}
+		if visible {
+			_, err := tx.Exec(`DELETE FROM hidden_friend_devices WHERE device_id=?`, deviceID)
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO hidden_friend_devices(device_id, hidden_at) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET hidden_at=excluded.hidden_at`, deviceID, nowString())
+		return err
+	})
+}
+
+// IsHiddenFriend is the durable source of truth for the local-only hide
+// operation. It intentionally does not inspect relation: a hidden friend is
+// still a friend and can be restored only by an explicit allowed action.
+func IsHiddenFriend(ctx context.Context, deviceID string) (bool, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return false, nil
+	}
+	rows, err := query(ctx, `SELECT device_id FROM hidden_friend_devices WHERE device_id=? LIMIT 1`, deviceID)
+	if err != nil {
+		return false, err
+	}
+	var values []struct {
+		DeviceID string `orm:"device_id"`
+	}
+	if err := rows.Structs(&values); err != nil {
+		return false, err
+	}
+	return len(values) > 0, nil
+}
+
+// MigrateHiddenFriendDevices imports legacy visible_in_friends=false rows at
+// startup. The separate marker then protects them from later peer updates.
+func MigrateHiddenFriendDevices(ctx context.Context) error {
+	return exec(ctx, `INSERT INTO hidden_friend_devices(device_id, hidden_at)
+		SELECT device_id, COALESCE(updated_at, ?)
+		FROM peers
+		WHERE relation='friend' AND visible_in_friends=0
+		ON CONFLICT(device_id) DO NOTHING`, nowString())
 }
 
 func SetPeerRelation(ctx context.Context, deviceID, relation string) error {
@@ -325,6 +385,13 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 				peer.Relation = DiscoveredState
 				peer.FriendshipState = "removed"
 			}
+		}
+		hidden, hiddenErr := IsHiddenFriend(ctx, row.DeviceID)
+		if hiddenErr != nil {
+			return nil, hiddenErr
+		}
+		if hidden {
+			peer.VisibleInFriends = false
 		}
 		peers = append(peers, peer)
 	}
@@ -676,6 +743,10 @@ func DeletePeerAndFriendRecords(ctx context.Context, deviceID string) error {
 		// tombstone makes it unusable as a friend, while the retained row lets
 		// the friends list show the existing chat as “不是好友”.
 		_, err := tx.Exec(`UPDATE peers SET relation='discovered', discovery_visible=0, visible_in_friends=1, updated_at=? WHERE device_id=?`, nowString(), deviceID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM hidden_friend_devices WHERE device_id=?`, deviceID)
 		return err
 	})
 }

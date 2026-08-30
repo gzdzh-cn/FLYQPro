@@ -53,6 +53,32 @@ func buildImageThumbnail(path, mimeType string) (string, string, error) {
 	return "", "", fmt.Errorf("生成缩略图失败")
 }
 
+// buildAvatarPreview creates the small image sent with public discovery
+// announces. It is intentionally much smaller than a normal file thumbnail so
+// a discovery datagram stays cheap and does not contain the user's original
+// avatar bytes.
+func buildAvatarPreview(data []byte, mimeType string) (encoded, previewMime string, previewBytes []byte, err error) {
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") || len(data) == 0 {
+		return "", "", nil, nil
+	}
+	source, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", "", nil, err
+	}
+	thumbnail := resizeThumbnail(source, 192)
+	for quality := 82; quality >= 35; quality -= 7 {
+		var buffer bytes.Buffer
+		if err := jpeg.Encode(&buffer, thumbnail, &jpeg.Options{Quality: quality}); err != nil {
+			return "", "", nil, err
+		}
+		if buffer.Len() <= 48*1024 || quality == 35 {
+			previewBytes = append([]byte(nil), buffer.Bytes()...)
+			return base64.StdEncoding.EncodeToString(previewBytes), "image/jpeg", previewBytes, nil
+		}
+	}
+	return "", "", nil, fmt.Errorf("生成头像预览失败")
+}
+
 func resizeThumbnail(source image.Image, maxEdge int) *image.RGBA {
 	bound := source.Bounds()
 	width, height := bound.Dx(), bound.Dy()
