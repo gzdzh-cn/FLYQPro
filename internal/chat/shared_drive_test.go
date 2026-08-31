@@ -72,6 +72,32 @@ func TestSharedFolderOperationsStayWithinRoot(t *testing.T) {
 	}
 }
 
+func TestListSharedEntriesHonorsHiddenFileSetting(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".secret"), []byte("hidden"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "visible"), []byte("visible"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	visible, err := ListSharedEntries(root, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 1 || visible[0].Name != "visible" {
+		t.Fatalf("expected only visible entry, got %#v", visible)
+	}
+
+	all, err := ListSharedEntries(root, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected hidden entry when enabled, got %#v", all)
+	}
+}
+
 func TestSharedDirectoryDetailsIncludeDescendantFileSizes(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "docs", "nested"), 0o700); err != nil {

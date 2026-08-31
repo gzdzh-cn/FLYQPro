@@ -40,6 +40,31 @@ func TestSharedRootCountsContextStopsWhenCanceled(t *testing.T) {
 	}
 }
 
+func TestSharedRootCountsCanExcludeHiddenEntries(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		filepath.Join(root, ".hidden.txt"),
+		filepath.Join(root, ".private", "nested.txt"),
+		filepath.Join(root, "visible.txt"),
+	} {
+		if err := os.WriteFile(name, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, folders := sharedRootCountsProgressContext(context.Background(), root, nil, false)
+	if files != 1 || folders != 0 {
+		t.Fatalf("expected hidden entries excluded, got %d files and %d folders", files, folders)
+	}
+	files, folders = sharedRootCountsProgressContext(context.Background(), root, nil, true)
+	if files != 3 || folders != 1 {
+		t.Fatalf("expected hidden entries included, got %d files and %d folders", files, folders)
+	}
+}
+
 func TestSharedStatsLatestGenerationWins(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()

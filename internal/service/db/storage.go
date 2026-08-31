@@ -110,6 +110,8 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"profiles", "shared_root_path", "TEXT NOT NULL DEFAULT ''"},
 		{"profiles", "shared_enabled", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "shared_drive_multi_window", "INTEGER NOT NULL DEFAULT 1"},
+		{"profiles", "show_hidden_files", "INTEGER NOT NULL DEFAULT 0"},
+		{"profiles", "directory_open_mode", "TEXT NOT NULL DEFAULT 'double'"},
 		{"profiles", "theme", "TEXT NOT NULL DEFAULT 'system'"},
 		{"profiles", "launch_at_startup", "INTEGER NOT NULL DEFAULT 0"},
 		{"profiles", "created_at", "TEXT NOT NULL DEFAULT ''"},

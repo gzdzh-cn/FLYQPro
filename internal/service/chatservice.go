@@ -296,6 +296,28 @@ func (s *ChatService) GetSharedFolderSettings() (chat.SharedFolderStatus, error)
 	return s.sharedStatus(profile, root), nil
 }
 
+// RefreshSharedStats explicitly recomputes the local shared-drive statistics.
+// Settings that change the counting scope, such as hidden-file visibility,
+// use this instead of waiting for the normal cached result.
+func (s *ChatService) RefreshSharedStats(force bool) (chat.SharedFolderStatus, error) {
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	rootPath := strings.TrimSpace(profile.SharedRootPath)
+	if rootPath == "" {
+		s.clearSharedStats()
+		return s.sharedStatus(profile, ""), nil
+	}
+	root, err := chat.ValidateSharedRoot(rootPath)
+	if err != nil {
+		s.clearSharedStats()
+		return s.sharedStatus(profile, rootPath), nil
+	}
+	s.startSharedStats(root, force)
+	return s.sharedStatus(profile, root), nil
+}
+
 func sharedRootCounts(root string) (files, folders int) {
 	return sharedRootCountsContext(context.Background(), root)
 }
@@ -304,13 +326,20 @@ func sharedRootCountsContext(ctx context.Context, root string) (files, folders i
 	return sharedRootCountsProgressContext(ctx, root, nil)
 }
 
-func sharedRootCountsProgressContext(ctx context.Context, root string, progress func(files, folders int)) (files, folders int) {
+func sharedRootCountsProgressContext(ctx context.Context, root string, progress func(files, folders int), showHiddenFiles ...bool) (files, folders int) {
+	showHidden := len(showHiddenFiles) > 0 && showHiddenFiles[0]
 	visited := 0
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		if err != nil || path == root {
+			return nil
+		}
+		if !showHidden && strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -347,6 +376,7 @@ func (s *ChatService) clearSharedStats() {
 
 func (s *ChatService) startSharedStats(root string, force bool) {
 	root = filepath.Clean(root)
+	profile := s.engine.Profile()
 	s.sharedStatsMu.Lock()
 	if s.sharedStats.root == root {
 		if s.sharedStats.loading || (!force && s.sharedStats.ready) {
@@ -384,7 +414,7 @@ func (s *ChatService) startSharedStats(root string, force bool) {
 					app.Event.Emit("chat:shared-stats-updated", s.sharedStatus(profile, root))
 				}
 			}
-		})
+		}, profile.ShowHiddenFiles)
 		if ctx.Err() != nil {
 			return
 		}
@@ -499,12 +529,12 @@ func (s *ChatService) DisableSharedFolder() error {
 
 func (s *ChatService) ListSharedEntries(relativePath string) ([]chat.SharedEntry, error) {
 	profile := s.engine.Profile()
-	return chat.ListSharedEntries(profile.SharedRootPath, relativePath)
+	return chat.ListSharedEntries(profile.SharedRootPath, relativePath, profile.ShowHiddenFiles)
 }
 
 func (s *ChatService) ListSharedEntriesPage(relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
 	profile := s.engine.Profile()
-	page, err := chat.ListSharedEntriesPage(profile.SharedRootPath, relativePath, offset, limit)
+	page, err := chat.ListSharedEntriesPage(profile.SharedRootPath, relativePath, offset, limit, profile.ShowHiddenFiles)
 	if err == nil {
 		// Reconcile missing files in the background. The directory listing stays
 		// fast, while deleted source files eventually release their thumbnails.
@@ -689,7 +719,8 @@ func (s *ChatService) ListFriendSharedEntries(deviceID, relativePath string) ([]
 }
 
 func (s *ChatService) ListFriendSharedEntriesPage(deviceID, relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
-	return s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), relativePath, offset, limit)
+	profile := s.engine.Profile()
+	return s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), relativePath, offset, limit, profile.ShowHiddenFiles)
 }
 
 func (s *ChatService) GetFriendSharedEntryPreview(deviceID, relativePath string) (string, error) {

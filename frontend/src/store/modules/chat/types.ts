@@ -12,6 +12,8 @@ export interface Profile {
   sharedRootPath?: string
   sharedEnabled?: boolean
   sharedDriveMultiWindow?: boolean
+  showHiddenFiles?: boolean
+  directoryOpenMode?: 'single' | 'double' | string
 }
 
 export interface Peer {

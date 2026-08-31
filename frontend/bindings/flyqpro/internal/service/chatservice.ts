@@ -331,6 +331,17 @@ export function RefreshPeerAvatar(deviceID: string): $CancellablePromise<void> {
     return $Call.ByID(84600919, deviceID);
 }
 
+/**
+ * RefreshSharedStats explicitly recomputes the local shared-drive statistics.
+ * Settings that change the counting scope, such as hidden-file visibility,
+ * use this instead of waiting for the normal cached result.
+ */
+export function RefreshSharedStats(force: boolean): $CancellablePromise<chat$0.SharedFolderStatus> {
+    return $Call.ByID(3196224838, force).then(($result: any) => {
+        return $$createType10($result);
+    });
+}
+
 export function RejectAttachment(attachmentID: string): $CancellablePromise<void> {
     return $Call.ByID(2407074389, attachmentID);
 }

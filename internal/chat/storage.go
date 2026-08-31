@@ -24,6 +24,8 @@ type profileRow struct {
 	SharedRootPath         string `orm:"shared_root_path"`
 	SharedEnabled          int    `orm:"shared_enabled"`
 	SharedDriveMultiWindow int    `orm:"shared_drive_multi_window"`
+	ShowHiddenFiles        int    `orm:"show_hidden_files"`
+	DirectoryOpenMode      string `orm:"directory_open_mode"`
 	Theme                  string `orm:"theme"`
 	LaunchAtStartup        int    `orm:"launch_at_startup"`
 }
@@ -166,7 +168,7 @@ func randomIndex(size int) int {
 
 func GetProfile(ctx context.Context) (Profile, error) {
 	var rows []profileRow
-	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, shared_root_path, shared_enabled, shared_drive_multi_window, theme, launch_at_startup FROM profiles WHERE id = 1`)
+	result, err := query(ctx, `SELECT nickname, avatar_path, avatar_hash, avatar_version, discoverable, auto_save, file_save_path, shared_root_path, shared_enabled, shared_drive_multi_window, show_hidden_files, directory_open_mode, theme, launch_at_startup FROM profiles WHERE id = 1`)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -177,7 +179,7 @@ func GetProfile(ctx context.Context) (Profile, error) {
 		return Profile{}, fmt.Errorf("个人资料不存在")
 	}
 	row := rows[0]
-	profile := Profile{Nickname: NormalizeNickname(row.Nickname), AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, SharedDriveMultiWindow: row.SharedDriveMultiWindow != 0, Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	profile := Profile{Nickname: NormalizeNickname(row.Nickname), AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, SharedDriveMultiWindow: row.SharedDriveMultiWindow != 0, ShowHiddenFiles: row.ShowHiddenFiles != 0, DirectoryOpenMode: normalizeDirectoryOpenMode(row.DirectoryOpenMode), Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
 	if strings.TrimSpace(profile.Nickname) == "" || strings.TrimSpace(profile.Nickname) == "新用户" {
 		profile.Nickname = randomChineseNickname()
 		if err := SaveProfile(ctx, profile); err != nil {
@@ -223,8 +225,16 @@ func migrateLegacyAttachmentPath(path string) string {
 
 func SaveProfile(ctx context.Context, profile Profile) error {
 	profile.Nickname = NormalizeNickname(profile.Nickname)
-	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, shared_root_path=?, shared_enabled=?, shared_drive_multi_window=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
-		profile.Nickname, profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.SharedRootPath, boolInt(profile.SharedEnabled), boolInt(profile.SharedDriveMultiWindow), profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
+	profile.DirectoryOpenMode = normalizeDirectoryOpenMode(profile.DirectoryOpenMode)
+	return exec(ctx, `UPDATE profiles SET nickname=?, avatar_path=?, avatar_hash=?, avatar_version=?, discoverable=?, auto_save=?, file_save_path=?, shared_root_path=?, shared_enabled=?, shared_drive_multi_window=?, show_hidden_files=?, directory_open_mode=?, theme=?, launch_at_startup=?, updated_at=? WHERE id=1`,
+		profile.Nickname, profile.AvatarPath, profile.AvatarHash, profile.AvatarVersion, boolInt(profile.Discoverable), boolInt(profile.AutoSave), profile.FileSavePath, profile.SharedRootPath, boolInt(profile.SharedEnabled), boolInt(profile.SharedDriveMultiWindow), boolInt(profile.ShowHiddenFiles), profile.DirectoryOpenMode, profile.Theme, boolInt(profile.LaunchAtStartup), nowString())
+}
+
+func normalizeDirectoryOpenMode(value string) string {
+	if strings.TrimSpace(value) == "single" {
+		return "single"
+	}
+	return "double"
 }
 
 func GetIdentity(ctx context.Context) (identityRow, error) {

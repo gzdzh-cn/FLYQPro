@@ -66,7 +66,7 @@ func (e *Engine) handleSharedListRequest(conn net.Conn, hello, message wireMessa
 		return
 	}
 	profile := e.Profile()
-	page, err := ListSharedEntriesPage(profile.SharedRootPath, message.RelativePath, message.ListOffset, message.ListLimit)
+	page, err := ListSharedEntriesPage(profile.SharedRootPath, message.RelativePath, message.ListOffset, message.ListLimit, profile.ShowHiddenFiles)
 	if err != nil {
 		status := SharedPathInvalidError
 		if strings.Contains(err.Error(), SharedUnavailableError) {
@@ -300,12 +300,12 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 	return nil, nil, ProtocolDialect{}, lastErr
 }
 
-func (e *Engine) ListFriendSharedEntries(ctx context.Context, deviceID, relativePath string) ([]SharedEntry, error) {
-	page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, relativePath, 0, defaultSharedEntriesPageSize)
+func (e *Engine) ListFriendSharedEntries(ctx context.Context, deviceID, relativePath string, showHiddenFiles ...bool) ([]SharedEntry, error) {
+	page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, relativePath, 0, defaultSharedEntriesPageSize, showHiddenFiles...)
 	return page.Entries, err
 }
 
-func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, relativePath string, offset, limit int) (SharedEntriesPage, error) {
+func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, relativePath string, offset, limit int, showHiddenFiles ...bool) (SharedEntriesPage, error) {
 	if err := ctx.Err(); err != nil {
 		return SharedEntriesPage{}, err
 	}
@@ -318,7 +318,8 @@ func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, rela
 		return SharedEntriesPage{}, err
 	}
 	defer conn.Close()
-	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath, ListOffset: offset, ListLimit: limit}); err != nil {
+	showHidden := len(showHiddenFiles) > 0 && showHiddenFiles[0]
+	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath, ListOffset: offset, ListLimit: limit, ShowHiddenFiles: showHidden}); err != nil {
 		return SharedEntriesPage{}, err
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))

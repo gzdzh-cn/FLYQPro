@@ -2,12 +2,26 @@
   <div class="shared-drive" :class="{ dark: isDark, mac: isMac, embedded }" @contextmenu="handleAppContextMenu">
     <div v-if="isMac && !embedded" class="mac-controls" aria-label="窗口控制"><button class="close" @click="closeWindow" /><button class="minimise" @click="Window.Minimise" /><button class="maximise" @click="Window.ToggleMaximise" /></div>
     <header class="shared-head" :class="{ draggable: isMac && !embedded }">
-      <div class="head-title"><IconCloud /><div><strong>{{ mode === 'owner' ? '共享' : mode === 'friend' ? '好友共享' : '共享' }}</strong><span>{{ mode === 'owner' ? '管理本机共享文件夹' : mode === 'friend' ? '查看好友共享文件夹' : '共享窗口参数无效' }}</span></div></div>
+      <div class="head-title"><IconCloud /><div><strong>{{ settingsPage ? '共享设置' : mode === 'owner' ? '共享' : mode === 'friend' ? '好友共享' : '共享' }}</strong><span>{{ settingsPage ? '管理共享盘显示和打开方式' : mode === 'owner' ? '管理本机共享文件夹' : mode === 'friend' ? '查看好友共享文件夹' : '共享窗口参数无效' }}</span></div></div>
+      <button v-if="mode === 'owner' && !settingsPage" class="head-action" title="共享设置" aria-label="共享设置" @click.stop="openSettingsPage"><IconSettings /></button>
     </header>
-    <main class="shared-body">
+    <main v-if="settingsPage" class="shared-settings-page">
+      <section class="settings-card">
+        <div class="settings-card-row"><div><strong>显示隐藏文件</strong><span>显示名称以“.”开头的文件和文件夹</span></div><a-switch :model-value="sharedOptions.showHiddenFiles" @change="updateShowHiddenFiles" /></div>
+        <div class="settings-divider" />
+        <div class="settings-card-row"><div><strong>文件访问权限</strong><span>桌面端可以直接访问本机文件，无需额外授权</span></div><span class="settings-status">已可用</span></div>
+        <div class="settings-divider" />
+        <div class="settings-card-row"><div><strong>打开文件夹方式</strong><span>控制共享文件列表中的目录打开手势</span></div><a-select :model-value="sharedOptions.directoryOpenMode" style="width: 150px" @change="updateDirectoryOpenMode"><a-option value="single">单击</a-option><a-option value="double">双击</a-option></a-select></div>
+        <div class="settings-divider" />
+        <div class="settings-card-row"><div><strong>共享盘多窗打开</strong><span>开启后使用独立窗口，关闭后嵌入当前应用窗口</span></div><a-switch :model-value="sharedOptions.sharedDriveMultiWindow" @change="updateMultiWindow" /></div>
+      </section>
+      <p class="settings-note">修改隐藏文件显示方式后，当前目录会重新加载并重新统计。</p>
+      <button class="settings-back" @click="closeSettingsPage">返回共享盘</button>
+    </main>
+    <main v-else class="shared-body">
       <section v-if="mode === 'owner'" class="owner-summary card">
-        <div class="summary-main"><div class="summary-label">共享开关</div><strong>{{ settings.enabled ? '已开启' : '已关闭' }}</strong><span>{{ settings.enabled ? '好友可以浏览和下载共享目录' : '开启后好友才可以访问' }}</span></div>
-        <a-switch :model-value="settings.enabled" @change="toggleEnabled" />
+        <div class="summary-main"><div class="summary-label">共享开关</div><strong>{{ settings.enabled ? '已开启' : '已关闭' }}</strong><span>{{ settings.enabled ? '好友可以浏览和下载共享目录' : settings.rootPath ? '开启后好友才可以访问' : '请先选择共享目录' }}</span></div>
+        <a-switch :model-value="settings.enabled" :disabled="!settings.rootPath" @change="toggleEnabled" />
         <div class="summary-item"><span>共享文件</span><strong>{{ formatStatNumber(settings.fileCount) }}</strong></div><div class="summary-item"><span>共享文件夹</span><strong>{{ formatStatNumber(settings.folderCount) }}</strong></div><div class="summary-item"><span>磁盘剩余</span><strong>{{ formatAvailableBytes() }}</strong></div>
       </section>
       <div class="shared-fixed-header">
@@ -39,7 +53,7 @@
         <div v-else-if="sharedDisabled" class="empty-state"><IconCloud /><strong>{{ mode === 'owner' ? (settings.rootPath ? '共享已关闭' : '请先选择共享目录') : '对方已关闭共享' }}</strong><span>{{ mode === 'owner' ? '本机仍可管理共享目录，开启开关后好友才可访问' : '共享开关开启后，刷新即可继续访问' }}</span></div>
         <div v-else-if="!filteredEntries.length" class="empty-state"><IconFolder /><span>此文件夹为空</span></div>
         <div v-else-if="viewMode === 'thumb'" class="file-list thumb-grid" @scroll="closeContext">
-          <div v-for="entry in filteredEntries" :key="entry.entryId" class="thumb-card" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @dblclick="entry.isDirectory ? openPath(entry.relativePath) : preview(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
+          <div v-for="entry in filteredEntries" :key="entry.entryId" class="thumb-card" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" class="thumb-check" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <div class="thumb-preview">
               <img v-if="thumbnailUrls[entry.relativePath]" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" />
@@ -53,7 +67,7 @@
           </div>
         </div>
         <div v-else class="file-list" @scroll="closeContext">
-          <div v-for="entry in filteredEntries" :key="entry.entryId" class="file-row" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @dblclick="entry.isDirectory ? openPath(entry.relativePath) : preview(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
+          <div v-for="entry in filteredEntries" :key="entry.entryId" class="file-row" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isImageEntry(entry) && thumbnailUrls[entry.relativePath]" class="file-icon file-thumb" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
             <div class="file-name"><strong>{{ entry.name }}</strong><span>{{ entry.isDirectory ? '文件夹' : formatBytes(entry.size) }}</span></div><span class="file-date">{{ formatDate(entry.modifiedAt) }}</span><button class="row-more" @click.stop="openContext($event, entry)">···</button>
@@ -102,7 +116,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { IconApps, IconCloud, IconClose, IconDown, IconFile, IconFolder, IconList, IconSearch, IconUp } from '@arco-design/web-vue/es/icon'
+import { IconApps, IconCloud, IconClose, IconDown, IconFile, IconFolder, IconList, IconSearch, IconSettings, IconUp } from '@arco-design/web-vue/es/icon'
 import { Clipboard, Events, System, Window } from '@wailsio/runtime'
 import { ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 
@@ -116,13 +130,14 @@ function readSharedQuery() {
   const requestedMode = query.get('mode')
   const requestedDeviceId = query.get('deviceId')?.trim() || ''
   const parsedMode: SharedMode = requestedMode === 'owner' ? 'owner' : requestedMode === 'friend' && requestedDeviceId ? 'friend' : 'invalid'
-  return { mode: parsedMode, deviceId: requestedDeviceId, embedded: query.get('embedded') === '1' }
+  return { mode: parsedMode, deviceId: requestedDeviceId, embedded: query.get('embedded') === '1', settings: query.get('settings') === '1' }
 }
 const sharedQuery = readSharedQuery()
 const props = withDefaults(defineProps<{ embeddedMode?: boolean; ownerMode?: boolean; friendDeviceId?: string }>(), { embeddedMode: false, ownerMode: true, friendDeviceId: '' })
 const embedded = props.embeddedMode || sharedQuery.embedded
 const mode = ref<SharedMode>(props.embeddedMode ? (props.ownerMode ? 'owner' : props.friendDeviceId ? 'friend' : 'invalid') : sharedQuery.mode)
 const deviceId = props.embeddedMode ? props.friendDeviceId.trim() : sharedQuery.deviceId
+const settingsPage = ref(Boolean(!props.embeddedMode && sharedQuery.settings && mode.value === 'owner'))
 const isMac = ref(false); const isDark = ref(false); const loading = ref(false); const loadingMore = ref(false); const hasMore = ref(false); const nextOffset = ref(0); const sharedDisabled = ref(false); const search = ref(''); const searchVisible = ref(false); const relativePath = ref(''); const entries = ref<Entry[]>([]); const selected = reactive(new Set<string>()); const peerName = ref(''); const viewMode = ref<SharedViewMode>('list')
 const thumbnailUrls = reactive<Record<string, string>>({})
 const thumbnailLoading = reactive(new Set<string>())
@@ -134,6 +149,7 @@ let thumbnailGeneration = 0
 let thumbnailBatchTimer: number | undefined
 let thumbnailObserver: IntersectionObserver | undefined
 const settings = reactive({ enabled: false, rootPath: '', fileCount: 0, folderCount: 0, availableBytes: 0, statsLoading: false, statsReady: false, statsUpdatedAt: '' })
+const sharedOptions = reactive({ showHiddenFiles: false, directoryOpenMode: 'double', sharedDriveMultiWindow: true })
 const context = reactive({ visible: false, x: 0, y: 0, entry: undefined as Entry | undefined })
 const renameDialog = reactive({ visible: false, loading: false, name: '', entry: undefined as Entry | undefined })
 const detailsDialog = reactive({ visible: false, loading: false, error: '', entry: undefined as Entry | undefined })
@@ -334,7 +350,7 @@ function applyTheme(theme: string) {
   document.body.classList.toggle('flyqpro-dark', isDark.value)
 }
 async function loadTheme() { try { const profile = await ChatService.GetProfile(); applyTheme(profile.theme || 'system') } catch { applyTheme('system') } }
-async function loadSettings() { if (mode.value !== 'owner') return; const result = await ChatService.GetSharedFolderSettings(); Object.assign(settings, result); sharedDisabled.value = false }
+async function loadSettings() { if (mode.value !== 'owner') return; const [result, profile] = await Promise.all([ChatService.GetSharedFolderSettings(), ChatService.GetProfile()]); Object.assign(settings, result); Object.assign(sharedOptions, { showHiddenFiles: profile.showHiddenFiles === true, directoryOpenMode: profile.directoryOpenMode === 'single' ? 'single' : 'double', sharedDriveMultiWindow: profile.sharedDriveMultiWindow !== false }); sharedDisabled.value = false }
 function resetThumbnailState() { thumbnailGeneration++; if (thumbnailBatchTimer !== undefined) { window.clearTimeout(thumbnailBatchTimer); thumbnailBatchTimer = undefined }; thumbnailQueue.length = 0; thumbnailQueued.clear(); Object.keys(thumbnailUrls).forEach((key) => delete thumbnailUrls[key]); thumbnailLoading.clear(); thumbnailFailed.clear() }
 function resetViewState() { relativePath.value = ''; search.value = ''; searchVisible.value = false; entries.value = []; selected.clear(); hasMore.value = false; nextOffset.value = 0; loadingMore.value = false; resetThumbnailState(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
 async function loadEntriesPage(append = false) {
@@ -371,6 +387,7 @@ async function refresh() {
   }
   try {
     if (mode.value === 'owner') await loadSettings()
+    if (settingsPage.value) return
     if (mode.value === 'owner' && !settings.rootPath) { sharedDisabled.value = true; entries.value = []; return }
     await loadEntriesPage(false)
   } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
@@ -385,11 +402,44 @@ async function loadEntries() {
 }
 function loadMore() { if (hasMore.value && !loadingMore.value) void loadEntriesPage(true) }
 async function chooseRoot() { try { const path = await ChatService.PickSharedDirectory(); if (!path) return; relativePath.value = ''; Object.assign(settings, await ChatService.SetSharedFolder(path, settings.enabled)); await loadEntries(); Message.success('共享目录已更新') } catch (error: any) { Message.error(error?.message || '设置共享目录失败') } }
-async function toggleEnabled(value: boolean) { try { Object.assign(settings, await ChatService.SetSharedEnabled(value)); Message.success(value ? '共享已开启' : '共享已关闭') } catch (error: any) { Message.error(error?.message || '共享开关更新失败') } }
+async function toggleEnabled(value: boolean) {
+  if (value && !settings.rootPath) {
+    Message.warning('请先选择共享目录')
+    return
+  }
+  try { Object.assign(settings, await ChatService.SetSharedEnabled(value)); Message.success(value ? '共享已开启' : '共享已关闭') } catch (error: any) { Message.error(error?.message || '共享开关更新失败') }
+}
 async function createFolder() { const name = window.prompt('请输入文件夹名称'); if (!name) return; try { await ChatService.CreateSharedFolder(relativePath.value, name); await refresh() } catch (error: any) { Message.error(error?.message || '新建文件夹失败') } }
 async function importFiles() { try { await ChatService.ImportSharedFiles(relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件失败') } }
 async function importFolder() { try { await ChatService.ImportSharedFolder(relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件夹失败') } }
 async function openOwnerFolder() { try { await ChatService.RevealSharedEntry(relativePath.value) } catch (error: any) { Message.error(error?.message || '打开目录失败') } }
+function openSettingsPage() {
+  if (mode.value !== 'owner') return
+  settingsPage.value = true
+  if (!embedded) window.location.hash = '/shared-drive?mode=owner&settings=1'
+  void loadSettings()
+}
+function closeSettingsPage() {
+  settingsPage.value = false
+  if (!embedded) window.location.hash = '/shared-drive?mode=owner'
+  void refresh()
+}
+async function saveSharedOptions(patch: Record<string, unknown>) {
+  const profile = await ChatService.GetProfile()
+  const result = await ChatService.UpdateProfile({ ...profile, ...patch })
+  Object.assign(sharedOptions, { showHiddenFiles: result.showHiddenFiles === true, directoryOpenMode: result.directoryOpenMode === 'single' ? 'single' : 'double', sharedDriveMultiWindow: result.sharedDriveMultiWindow !== false })
+}
+async function updateShowHiddenFiles(value: boolean) {
+  try { await saveSharedOptions({ showHiddenFiles: value }); Object.assign(settings, await ChatService.RefreshSharedStats(true)); Message.success('隐藏文件显示设置已更新'); if (!settingsPage.value) await refresh() } catch (error: any) { Message.error(error?.message || '更新隐藏文件设置失败') }
+}
+async function updateDirectoryOpenMode(value: string) {
+  try { await saveSharedOptions({ directoryOpenMode: value }); Message.success('目录打开方式已更新') } catch (error: any) { Message.error(error?.message || '更新目录打开方式失败') }
+}
+async function updateMultiWindow(value: boolean) {
+  try { await saveSharedOptions({ sharedDriveMultiWindow: value }); Message.success('共享盘窗口设置已更新') } catch (error: any) { Message.error(error?.message || '更新共享盘窗口设置失败') }
+}
+function handleEntryClick(entry: Entry) { if (entry.isDirectory && sharedOptions.directoryOpenMode === 'single') void openPath(entry.relativePath) }
+function handleEntryDoubleClick(entry: Entry) { if (entry.isDirectory) { if (sharedOptions.directoryOpenMode === 'double') void openPath(entry.relativePath); return } void preview(entry) }
 async function openPath(path: string) {
   relativePath.value = path
   resetThumbnailState()
@@ -495,6 +545,11 @@ onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerD
 .details-dialog{display:flex;flex-direction:column;gap:11px;min-width:360px}.detail-row{display:flex;align-items:flex-start;gap:18px}.detail-row>span{flex:0 0 64px;color:var(--muted);font-size:13px}.detail-row>strong{min-width:0;flex:1;font-size:13px;word-break:break-all}.detail-value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px!important}.detail-loading{margin-top:4px;padding:9px 10px;border-radius:6px;background:color-mix(in srgb,var(--accent) 8%,var(--surface));color:var(--accent);font-size:12px}.detail-error{margin-top:4px;color:#f53f3f;font-size:12px}
 .transfer-float{position:fixed;z-index:15;right:20px;bottom:20px;width:min(440px,calc(100vw - 40px));max-height:min(430px,calc(100vh - 40px));overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:0 14px 36px rgba(0,0,0,.22)}.transfer-float.collapsed{width:230px}.transfer-header{display:flex;align-items:center;justify-content:space-between;width:100%;border:0;border-bottom:1px solid var(--line);background:var(--surface);color:inherit;padding:10px 13px;cursor:pointer}.transfer-title{display:flex;align-items:baseline;gap:8px}.transfer-title small{font-size:12px;color:var(--muted)}.transfer-header svg{width:16px;height:16px;color:var(--muted)}.transfer-body{max-height:365px;overflow:auto;padding:4px 12px}.transfer-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.transfer-row:last-child{border-bottom:0}.transfer-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}.transfer-main strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transfer-row span{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transfer-progress{height:4px;overflow:hidden;border-radius:4px;background:color-mix(in srgb,var(--accent) 14%,var(--surface))}.transfer-progress i{display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .2s ease}.transfer-actions{display:flex;align-items:center;gap:10px;flex:0 0 auto}.transfer-actions strong{font-size:12px;color:var(--accent)}.transfer-actions button{border:1px solid var(--line);border-radius:5px;background:var(--surface);color:inherit;padding:4px 8px;cursor:pointer}
 .shared-head { flex-basis:44px; height:44px; padding-left:18px; padding-right:16px; }
+.shared-drive.embedded .shared-head { position:relative; z-index:21; pointer-events:none; }
+.head-action { position:relative; z-index:2; display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; padding:0; border:0; border-radius:6px; background:transparent; color:var(--muted); cursor:pointer; -webkit-app-region:no-drag; --wails-draggable:no-drag; --wails-non-client-region:none; }
+.shared-drive.embedded .shared-head .head-action { z-index:22; pointer-events:auto; }
+.head-action:hover { background:color-mix(in srgb,var(--accent) 12%,var(--surface)); color:var(--accent); }
+.head-action svg { width:17px; height:17px; }
 .shared-head.draggable { padding-left:76px; }
 .head-title { gap:8px; }
 .head-title svg { width:18px; height:18px; }
@@ -547,4 +602,15 @@ onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerD
 .thumb-meta { display:block; overflow:hidden; margin-top:3px; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
 .thumb-placeholder.loading { color:var(--accent); }
 .file-icon.file-thumb { object-fit:cover; border-radius:4px; background:var(--page-bg); }
+.shared-settings-page { flex:1; min-height:0; overflow:auto; padding:24px 28px 36px; background:var(--page-bg); }
+.settings-card { width:min(760px,100%); margin:0 auto; padding:4px 20px; border:1px solid var(--line); border-radius:var(--fp-radius-lg); background:var(--surface); }
+.settings-card-row { min-height:70px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.settings-card-row > div { min-width:0; display:flex; flex-direction:column; gap:5px; }
+.settings-card-row strong { font-size:13px; }
+.settings-card-row span { color:var(--muted); font-size:12px; }
+.settings-card-row .settings-status { flex:0 0 auto; color:var(--fp-success, #00b42a); font-size:13px; }
+.settings-divider { height:1px; background:var(--line); }
+.settings-note { width:min(760px,100%); margin:14px auto; color:var(--muted); font-size:12px; }
+.settings-back { display:block; width:min(760px,100%); margin:0 auto; padding:8px 12px; border:1px solid var(--line); border-radius:var(--fp-radius-sm); background:var(--surface); color:inherit; cursor:pointer; text-align:left; }
+.settings-back:hover { border-color:color-mix(in srgb,var(--accent) 55%,var(--line)); color:var(--accent); }
 </style>

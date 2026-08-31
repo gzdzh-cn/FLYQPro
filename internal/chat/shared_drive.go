@@ -131,7 +131,8 @@ func sharedEntryFromPath(root, relative, path string, info os.FileInfo, includeH
 	return entry, nil
 }
 
-func ListSharedEntries(root, relative string) ([]SharedEntry, error) {
+func ListSharedEntries(root, relative string, showHiddenFiles ...bool) ([]SharedEntry, error) {
+	showHidden := len(showHiddenFiles) > 0 && showHiddenFiles[0]
 	directory, normalized, err := resolveSharedPath(root, relative, true)
 	if err != nil {
 		return nil, err
@@ -148,6 +149,9 @@ func ListSharedEntries(root, relative string) ([]SharedEntry, error) {
 	for _, item := range items {
 		itemInfo, infoErr := item.Info()
 		if infoErr != nil || itemInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if !showHidden && strings.HasPrefix(item.Name(), ".") {
 			continue
 		}
 		itemRelative := item.Name()
@@ -174,7 +178,8 @@ const maxSharedEntriesPageSize = 200
 
 // ListSharedEntriesPage reads only one bounded page from a directory. Unlike
 // os.ReadDir it does not materialise a large directory before returning.
-func ListSharedEntriesPage(root, relative string, offset, limit int) (SharedEntriesPage, error) {
+func ListSharedEntriesPage(root, relative string, offset, limit int, showHiddenFiles ...bool) (SharedEntriesPage, error) {
+	showHidden := len(showHiddenFiles) > 0 && showHiddenFiles[0]
 	directory, normalized, err := resolveSharedPath(root, relative, true)
 	if err != nil {
 		return SharedEntriesPage{}, err
@@ -229,6 +234,9 @@ func ListSharedEntriesPage(root, relative string, offset, limit int) (SharedEntr
 		}
 		item := items[0]
 		cursor++
+		if !showHidden && strings.HasPrefix(item.Name(), ".") {
+			continue
+		}
 		itemInfo, infoErr := item.Info()
 		if infoErr != nil || itemInfo.Mode()&os.ModeSymlink != 0 {
 			if readErr != nil && readErr != io.EOF {

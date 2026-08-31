@@ -625,6 +625,8 @@ export class Profile {
     "sharedRootPath": string;
     "sharedEnabled": boolean;
     "sharedDriveMultiWindow": boolean;
+    "showHiddenFiles": boolean;
+    "directoryOpenMode": string;
     "theme": string;
     "launchAtStartup": boolean;
 
@@ -653,6 +655,12 @@ export class Profile {
         }
         if (!("sharedDriveMultiWindow" in $$source)) {
             this["sharedDriveMultiWindow"] = false;
+        }
+        if (!("showHiddenFiles" in $$source)) {
+            this["showHiddenFiles"] = false;
+        }
+        if (!("directoryOpenMode" in $$source)) {
+            this["directoryOpenMode"] = "";
         }
         if (!("theme" in $$source)) {
             this["theme"] = "";

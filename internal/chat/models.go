@@ -52,6 +52,8 @@ type Profile struct {
 	SharedRootPath         string `json:"sharedRootPath"`
 	SharedEnabled          bool   `json:"sharedEnabled"`
 	SharedDriveMultiWindow bool   `json:"sharedDriveMultiWindow"`
+	ShowHiddenFiles        bool   `json:"showHiddenFiles"`
+	DirectoryOpenMode      string `json:"directoryOpenMode"`
 	Theme                  string `json:"theme"`
 	LaunchAtStartup        bool   `json:"launchAtStartup"`
 }
@@ -360,6 +362,7 @@ type wireMessage struct {
 	Entries             []SharedEntry            `json:"entries,omitempty"`
 	ListOffset          int                      `json:"listOffset,omitempty"`
 	ListLimit           int                      `json:"listLimit,omitempty"`
+	ShowHiddenFiles     bool                     `json:"showHiddenFiles,omitempty"`
 	NextOffset          int                      `json:"nextOffset,omitempty"`
 	HasMore             bool                     `json:"hasMore,omitempty"`
 	ThumbnailRequests   []SharedThumbnailRequest `json:"thumbnailRequests,omitempty"`
