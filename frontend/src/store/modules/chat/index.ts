@@ -52,7 +52,7 @@ function latestRequestsByDevice(requests: FriendRequest[]) {
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
-    profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false, sharedRootPath: '', sharedEnabled: false, sharedDriveMultiWindow: true, showHiddenFiles: false, directoryOpenMode: 'double' } as Profile,
+    profile: { nickname: '新用户', avatarPath: '', discoverable: false, autoSave: false, fileSavePath: '', theme: 'system', launchAtStartup: false, sharedRootPath: '', sharedEnabled: false, sharedDriveMultiWindow: false, showHiddenFiles: false, directoryOpenMode: 'double' } as Profile,
     deviceId: '',
     peers: [] as Peer[],
     // A hide action is local UI state as well as a persisted peer flag.  Keep

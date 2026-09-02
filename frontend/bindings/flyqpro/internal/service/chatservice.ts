@@ -73,6 +73,15 @@ export function DownloadFriendSharedEntry(deviceID: string, relativePath: string
     });
 }
 
+/**
+ * DownloadSharedEntry copies a locally shared file into the default shared
+ * download directory. It is used by the shared image viewer for owner-mode
+ * previews, where there is no remote transfer to start.
+ */
+export function DownloadSharedEntry(relativePath: string): $CancellablePromise<string> {
+    return $Call.ByID(1083526102, relativePath);
+}
+
 export function EnsureConversation(deviceID: string): $CancellablePromise<string> {
     return $Call.ByID(319214306, deviceID);
 }
@@ -426,6 +435,14 @@ export function SaveFriendSharedEntryAs(deviceID: string, relativePath: string):
     return $Call.ByID(1564344737, deviceID, relativePath).then(($result: any) => {
         return $$createType3($result);
     });
+}
+
+/**
+ * SaveSharedEntryAs copies a locally shared file to a path selected by the
+ * user. The empty result means the native save dialog was canceled.
+ */
+export function SaveSharedEntryAs(relativePath: string): $CancellablePromise<string> {
+    return $Call.ByID(458316997, relativePath);
 }
 
 export function ScanPeers(): $CancellablePromise<void> {

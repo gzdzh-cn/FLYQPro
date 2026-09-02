@@ -339,11 +339,11 @@ func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, rela
 
 func sharedPreviewableEntry(entry SharedEntry) bool {
 	mimeType := strings.ToLower(strings.TrimSpace(entry.MimeType))
-	if strings.HasPrefix(mimeType, "image/") || mimeType == "application/pdf" {
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "video/") || mimeType == "application/pdf" {
 		return true
 	}
 	switch strings.ToLower(filepath.Ext(entry.Name)) {
-	case ".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp", ".pdf":
+	case ".3gp", ".avif", ".avi", ".bmp", ".flv", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".png", ".ts", ".webm", ".webp", ".wmv", ".pdf":
 		return true
 	default:
 		return false

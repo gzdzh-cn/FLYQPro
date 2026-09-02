@@ -20,7 +20,7 @@ var schemaStatements = []string{
 		file_save_path TEXT NOT NULL DEFAULT '',
 		shared_root_path TEXT NOT NULL DEFAULT '',
 		shared_enabled INTEGER NOT NULL DEFAULT 0,
-		shared_drive_multi_window INTEGER NOT NULL DEFAULT 1,
+		shared_drive_multi_window INTEGER NOT NULL DEFAULT 0,
 		show_hidden_files INTEGER NOT NULL DEFAULT 0,
 		directory_open_mode TEXT NOT NULL DEFAULT 'double',
 		theme TEXT NOT NULL DEFAULT 'system',

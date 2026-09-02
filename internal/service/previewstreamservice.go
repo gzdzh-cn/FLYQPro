@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -110,8 +111,8 @@ func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, relative
 		if err != nil {
 			return "", err
 		}
-		if entry.IsDirectory || !isImageMime(entry.MimeType, entry.Name) {
-			return "", fmt.Errorf("该文件不是图片")
+		if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name)) {
+			return "", fmt.Errorf("该文件不支持媒体预览")
 		}
 	case "shared-friend":
 		peers, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
@@ -155,8 +156,8 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if item.kind == "shared-owner" {
 		profile := s.chatService.engine.Profile()
 		entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, item.relativePath, false)
-		if err != nil || entry.IsDirectory || !isImageMime(entry.MimeType, entry.Name) {
-			http.Error(w, "shared image unavailable", http.StatusNotFound)
+		if err != nil || entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name)) {
+			http.Error(w, "shared media unavailable", http.StatusNotFound)
 			return
 		}
 		serveLocalPreview(w, r, entry.Name, entry.MimeType, path, mustStat(path))
@@ -170,8 +171,8 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		started := false
 		err := s.chatService.engine.StreamFriendSharedEntry(r.Context(), item.deviceID, item.relativePath,
 			func(entry chat.SharedEntry) error {
-				if !isImageMime(entry.MimeType, entry.Name) {
-					return fmt.Errorf("该文件不是图片")
+				if !isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name) {
+					return fmt.Errorf("该文件不支持媒体预览")
 				}
 				w.Header().Set("Content-Type", previewMime(entry.MimeType, entry.Name))
 				if entry.Size >= 0 {
@@ -200,20 +201,24 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 }
 
 func previewMime(mimeType, name string) string {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "image/") {
-		return strings.ToLower(strings.TrimSpace(mimeType))
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "video/") {
+		return mimeType
 	}
-	return "image/" + strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); guessed != "" {
+		return guessed
+	}
+	return "application/octet-stream"
 }
 
 func serveLocalPreview(w http.ResponseWriter, r *http.Request, name, mimeType, path string, info os.FileInfo) {
 	if info == nil || !info.Mode().IsRegular() {
-		http.Error(w, "image unavailable", http.StatusNotFound)
+		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		http.Error(w, "image unavailable", http.StatusNotFound)
+		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
 	defer file.Close()

@@ -40,6 +40,18 @@ func isImageMime(mimeType, fileName string) bool {
 	}
 }
 
+func isVideoMime(mimeType, fileName string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "video/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".3gp", ".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".ts", ".webm", ".wmv":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID string) error {
 	conversationID = strings.TrimSpace(conversationID)
 	messageID = strings.TrimSpace(messageID)
@@ -84,7 +96,7 @@ func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID
 	if err != nil {
 		return err
 	}
-	if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isPDFMime(entry.MimeType, entry.Name)) {
+	if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isPDFMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name)) {
 		return fmt.Errorf("该文件类型不支持在线预览")
 	}
 	query := url.Values{}
@@ -101,6 +113,8 @@ func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID
 	}
 	if isPDFMime(entry.MimeType, entry.Name) {
 		query.Set("previewType", "pdf")
+	} else if isVideoMime(entry.MimeType, entry.Name) {
+		query.Set("previewType", "video")
 	} else {
 		query.Set("previewType", "image")
 	}
@@ -139,7 +153,7 @@ func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, relat
 	if !knownFriend {
 		return fmt.Errorf("不是好友，无法访问共享盘")
 	}
-	if !isImageMime("", relativePath) && !isPDFMime("", relativePath) {
+	if !isImageMime("", relativePath) && !isPDFMime("", relativePath) && !isVideoMime("", relativePath) {
 		return fmt.Errorf("该文件类型不支持在线预览")
 	}
 	query := url.Values{}
@@ -157,6 +171,8 @@ func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, relat
 	}
 	if isPDFMime("", relativePath) {
 		query.Set("previewType", "pdf")
+	} else if isVideoMime("", relativePath) {
+		query.Set("previewType", "video")
 	} else {
 		query.Set("previewType", "image")
 	}

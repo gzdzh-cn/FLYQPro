@@ -6,12 +6,14 @@
         <button type="button" class="mac-traffic-light mac-traffic-minimise" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"></button>
         <button type="button" class="mac-traffic-light mac-traffic-maximise" aria-label="最大化或还原" title="最大化或还原" @click.stop="toggleWindowMaximise"></button>
       </div>
-      <div v-if="!isPdfPreview" class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
+      <div v-if="!isPdfPreview && !isVideoPreview" class="image-viewer-toolbar" role="toolbar" aria-label="图片工具栏" @dblclick.stop>
         <button type="button" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @click="moveImage(-1)"><icon-left /></button>
         <button type="button" aria-label="下一张" title="下一张" :disabled="!canMoveNext || loading" @click="moveImage(1)"><icon-right /></button>
         <button type="button" aria-label="缩小" title="缩小" :disabled="loading || scale <= .5" @click="zoomImage(-.25)"><icon-zoom-out /></button>
         <button type="button" aria-label="放大" title="放大" :disabled="loading || scale >= 6" @click="zoomImage(.25)"><icon-zoom-in /></button>
         <button type="button" aria-label="向左旋转90度" title="向左旋转90°" :disabled="loading || !source" @click="rotateImageLeft"><icon-rotate-left /></button>
+        <button v-if="isSharedPreview" type="button" aria-label="下载" title="下载" :disabled="loading || !sharedActionPath" @click="downloadSharedImage"><icon-download /></button>
+        <button v-if="isSharedPreview" type="button" aria-label="另存为" title="另存为" :disabled="loading || !sharedActionPath" @click="saveSharedImageAs"><icon-save /></button>
       </div>
       <div v-if="isWindows" class="image-viewer-window-actions" @dblclick.stop>
         <button type="button" aria-label="最小化" title="最小化" @click.stop="Window.Minimise()"><icon-minus /></button>
@@ -25,6 +27,7 @@
         <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
       <iframe v-if="source && isPdfPreview" :key="viewerContentKey" class="pdf-preview" :src="source" :title="imageViewerName" />
+      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline preload="metadata" @dblclick.stop />
       <template v-else>
         <img v-if="thumbnailSource" class="preview-image preview-thumbnail" :class="{ 'preview-image-faded': originalReady }" :src="thumbnailSource" :alt="imageViewerName" :style="imageTransform" draggable="false" />
         <img v-if="originalSource" class="preview-image preview-original" :class="{ 'preview-image-visible': originalReady }" :src="originalSource" :alt="imageViewerName" :style="imageTransform" draggable="false" @load="handleOriginalLoad" @error="handleOriginalError" />
@@ -32,7 +35,7 @@
       <div v-if="galleryLength > 1" class="image-nav-side image-nav-side-next">
         <button type="button" class="image-nav-arrow" aria-label="下一张" title="下一张" :disabled="!canMoveNext || loading" @pointerdown.stop @click.stop="moveImage(1)"><icon-right /></button>
       </div>
-      <div v-if="loading" class="image-viewer-state"><icon-loading /><span>正在读取图片</span></div>
+      <div v-if="loading" class="image-viewer-state"><icon-loading /><span>{{ isVideoPreview ? '正在读取视频' : '正在读取图片' }}</span></div>
       <div v-else-if="thumbnailPending" class="image-viewer-state"><icon-loading /><span>正在生成缩略图</span></div>
       <div v-else-if="error && !thumbnailSource" class="image-viewer-state error"><icon-close-circle /><strong>{{ error }}</strong></div>
       <div v-else-if="originalLoading" class="image-viewer-quality"><icon-loading />正在加载高清原图</div>
@@ -47,7 +50,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Events, Window } from '@wailsio/runtime'
 import { ChatService, PreviewStreamService } from '/#/flyqpro/internal/service'
-import { IconClose, IconCloseCircle, IconFullscreen, IconLeft, IconLoading, IconMinus, IconRight, IconRotateLeft, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
+import { Message } from '@arco-design/web-vue'
+import { IconClose, IconCloseCircle, IconDownload, IconFullscreen, IconLeft, IconLoading, IconMinus, IconRight, IconRotateLeft, IconSave, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
 
 const route = useRoute()
 const conversationId = computed(() => String(route.query.conversationId || ''))
@@ -75,6 +79,7 @@ const originalReady = ref(false)
 const sourceType = ref<'thumbnail' | 'original'>('thumbnail')
 const sharedName = ref('')
 const sharedIsPdf = ref(false)
+const sharedIsVideo = ref(false)
 const loading = ref(false)
 const thumbnailPending = ref(false)
 const error = ref('')
@@ -93,7 +98,9 @@ const canMovePrevious = computed(() => currentIndex.value > 0)
 const canMoveNext = computed(() => currentIndex.value < galleryLength.value - 1)
 const imageViewerName = computed(() => isSharedPreview.value ? (sharedCurrentEntry.value?.name || sharedName.value || '共享文件预览') : (currentMessage.value?.attachmentName || '图片预览'))
 const isPdfPreview = computed(() => sharedIsPdf.value)
-const viewerContentKey = computed(() => `${isSharedPreview.value ? sharedCurrentPath.value : currentMessage.value?.messageId || ''}:${isPdfPreview.value ? source.value : ''}`)
+const isVideoPreview = computed(() => sharedIsVideo.value)
+const sharedActionPath = computed(() => sharedCurrentEntry.value?.relativePath || sharedCurrentPath.value || sharedRelativePath.value)
+const viewerContentKey = computed(() => `${isSharedPreview.value ? sharedCurrentPath.value : currentMessage.value?.messageId || ''}:${isPdfPreview.value || isVideoPreview.value ? source.value : ''}`)
 const imageTransform = computed(() => ({
   transform: `translate(${offset.value.x}px, ${offset.value.y}px) rotate(${rotation.value}deg) scale(${scale.value})`,
   cursor: scale.value > 1 ? 'grab' : 'zoom-in',
@@ -279,6 +286,10 @@ async function sharedOriginalFor(relativePath: string) {
 function isImageSharedEntry(entry: SharedPreviewEntry) {
   return !entry.isDirectory && (String(entry.mimeType || '').toLowerCase().startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name))
 }
+function isVideoSharedEntry(entry: SharedPreviewEntry) {
+  return !entry.isDirectory && (String(entry.mimeType || '').toLowerCase().startsWith('video/') || /\.(3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ogv|ts|webm|wmv)$/i.test(entry.name))
+}
+function isSharedMediaEntry(entry: SharedPreviewEntry) { return isImageSharedEntry(entry) || isVideoSharedEntry(entry) }
 function parentSharedPath(path: string) {
   const parts = String(path || '').split('/').filter(Boolean)
   parts.pop()
@@ -307,12 +318,14 @@ async function loadCurrent() {
     sharedCurrentPath.value = activePath
     sharedName.value = entry?.name || activePath.split('/').filter(Boolean).pop() || '共享文件预览'
     sharedIsPdf.value = sharedPreviewType.value === 'pdf' || /\.pdf$/i.test(sharedName.value) || String(entry?.mimeType || '').toLowerCase() === 'application/pdf'
+    sharedIsVideo.value = !sharedIsPdf.value && (sharedPreviewType.value === 'video' || (entry ? isVideoSharedEntry(entry) : false))
     resetTransform()
-    if (sharedIsPdf.value) {
+    if (sharedIsPdf.value || sharedIsVideo.value) {
       try {
-        const sourceValue = await sharedSourceFor(activePath)
+        const sourceValue = sharedIsVideo.value ? await sharedOriginalFor(activePath) : await sharedSourceFor(activePath)
         if (token !== loadToken) return
-        source.value = sourceValue
+        if (sourceValue) source.value = sourceValue
+        else error.value = sharedIsVideo.value ? '视频暂时无法读取' : '共享文件预览失败'
         loading.value = false
         void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
       } catch (loadError: any) {
@@ -433,7 +446,9 @@ async function loadMessages() {
     // the selected image.  The selected path is enough for the thumbnail and
     // preview services; the directory request only fills the adjacent-image
     // gallery in the background.
-    sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value }]
+    const initialMimeType = sharedPreviewType.value === 'video' ? 'video/*' : 'image/*'
+    const initialEntry = { name: sharedName.value, relativePath: requestedPath, mimeType: initialMimeType, entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value }
+    sharedEntries.value = [initialEntry]
     currentIndex.value = 0
     void loadCurrent()
     try {
@@ -441,14 +456,14 @@ async function loadMessages() {
       const page = previewSource.value === 'shared-owner'
         ? await ChatService.ListSharedEntriesPage(parentPath, 0, 100)
         : await ChatService.ListFriendSharedEntriesPage(sharedDeviceId.value, parentPath, 0, 100)
-      const images = (page.entries || []).filter((entry: SharedPreviewEntry) => isImageSharedEntry(entry))
-      if (!images.some((entry: SharedPreviewEntry) => entry.relativePath === requestedPath)) {
-        images.push({ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value })
+      const media = (page.entries || []).filter((entry: SharedPreviewEntry) => isSharedMediaEntry(entry))
+      if (!media.some((entry: SharedPreviewEntry) => entry.relativePath === requestedPath)) {
+        media.push(initialEntry)
       }
-      sharedEntries.value = images
-      currentIndex.value = Math.max(0, images.findIndex((entry: SharedPreviewEntry) => entry.relativePath === requestedPath))
+      sharedEntries.value = media
+      currentIndex.value = Math.max(0, media.findIndex((entry: SharedPreviewEntry) => entry.relativePath === requestedPath))
     } catch {
-      sharedEntries.value = [{ name: sharedName.value, relativePath: requestedPath, mimeType: 'image/*', entryId: sharedEntryId.value, size: sharedFileSize.value, modifiedAt: sharedModifiedAt.value }]
+      sharedEntries.value = [initialEntry]
       currentIndex.value = 0
     }
     return
@@ -517,6 +532,38 @@ async function moveImage(direction: number) {
 
 function closeViewer() { void Window.Close() }
 function toggleWindowMaximise() { void Window.ToggleMaximise() }
+
+async function downloadSharedImage() {
+  const path = sharedActionPath.value
+  if (!isSharedPreview.value || !path) return
+  try {
+    if (previewSource.value === 'shared-owner') {
+      await ChatService.DownloadSharedEntry(path)
+      Message.success('图片已下载到应用目录')
+    } else if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
+      const transfer = await ChatService.DownloadFriendSharedEntry(sharedDeviceId.value, path)
+      if (transfer?.transferId) Message.success('已开始下载图片')
+    }
+  } catch (operationError: any) {
+    Message.error(operationError?.message || '下载图片失败')
+  }
+}
+
+async function saveSharedImageAs() {
+  const path = sharedActionPath.value
+  if (!isSharedPreview.value || !path) return
+  try {
+    if (previewSource.value === 'shared-owner') {
+      const target = await ChatService.SaveSharedEntryAs(path)
+      if (target) Message.success('图片已保存')
+    } else if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
+      const transfer = await ChatService.SaveFriendSharedEntryAs(sharedDeviceId.value, path)
+      if (transfer?.transferId) Message.success('已开始保存图片')
+    }
+  } catch (operationError: any) {
+    Message.error(operationError?.message || '保存图片失败')
+  }
+}
 
 function handleWheel(event: WheelEvent) {
   // Chromium exposes macOS trackpad pinch as a ctrl+wheel stream. Applying
@@ -658,7 +705,7 @@ function handleKey(event: KeyboardEvent) {
   if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomImage(-.25) }
 }
 
-watch([conversationId, initialMessageId], () => { currentMessageId.value = initialMessageId.value; void loadMessages() }, { immediate: true })
+watch([conversationId, initialMessageId, previewSource, sharedDeviceId, sharedRelativePath, sharedEntryId, sharedPreviewType], () => { currentMessageId.value = initialMessageId.value; void loadMessages() }, { immediate: true })
 
 onMounted(async () => {
   await loadTheme()
@@ -723,6 +770,7 @@ onBeforeUnmount(() => {
 .image-viewer-canvas .preview-original.preview-image-visible { opacity: 1; }
 .image-viewer-canvas .preview-thumbnail.preview-image-faded { opacity: 0; }
 .image-viewer-canvas .pdf-preview { width: calc(100% - 24px); height: calc(100% - 24px); border: 0; border-radius: 6px; background: #fff; }
+.image-viewer-canvas .video-preview { width: calc(100% - 24px); height: calc(100% - 24px); max-width: calc(100% - 24px); max-height: calc(100% - 24px); border-radius: 6px; background: #050608; object-fit: contain; }
 .image-nav-side { position: absolute; z-index: 2; top: 0; bottom: 0; display: flex; width: 88px; align-items: center; opacity: 0; pointer-events: auto; transition: opacity .18s ease; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-nav-side-prev { left: 0; justify-content: flex-start; padding-left: 14px; }
 .image-nav-side-next { right: 0; justify-content: flex-end; padding-right: 14px; }

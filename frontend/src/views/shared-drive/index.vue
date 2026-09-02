@@ -48,7 +48,7 @@
         </nav>
       </div>
       <section class="file-panel card">
-        <div v-if="loading" class="empty-state">正在读取共享目录…</div>
+        <div v-if="loading && !entries.length" class="empty-state">正在读取共享目录…</div>
         <div v-else-if="mode === 'invalid'" class="empty-state"><IconCloud /><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备</span></div>
         <div v-else-if="sharedDisabled" class="empty-state"><IconCloud /><strong>{{ mode === 'owner' ? (settings.rootPath ? '共享已关闭' : '请先选择共享目录') : '对方已关闭共享' }}</strong><span>{{ mode === 'owner' ? '本机仍可管理共享目录，开启开关后好友才可访问' : '共享开关开启后，刷新即可继续访问' }}</span></div>
         <div v-else-if="!filteredEntries.length" class="empty-state"><IconFolder /><span>此文件夹为空</span></div>
@@ -56,10 +56,13 @@
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="thumb-card" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" class="thumb-check" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <div class="thumb-preview">
-              <img v-if="thumbnailUrls[entry.relativePath]" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" />
+              <template v-if="thumbnailUrls[entry.relativePath]">
+                <img :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" />
+                <span v-if="isVideoEntry(entry)" class="thumb-video-badge" aria-label="视频">▶</span>
+              </template>
               <span v-else-if="entry.isDirectory" class="thumb-placeholder folder"><IconFolder /></span>
-              <span v-else-if="isImageEntry(entry) && thumbnailLoading.has(entry.relativePath)" class="thumb-placeholder loading">加载中…</span>
-              <span v-else-if="isImageEntry(entry)" class="thumb-placeholder"><IconFile /></span>
+              <span v-else-if="isMediaEntry(entry) && thumbnailLoading.has(entry.relativePath)" class="thumb-placeholder loading">加载中…</span>
+              <span v-else-if="isMediaEntry(entry)" class="thumb-placeholder"><IconFile /></span>
               <span v-else class="thumb-placeholder"><IconFile /></span>
             </div>
             <strong class="thumb-name" :title="entry.name">{{ entry.name }}</strong>
@@ -69,7 +72,7 @@
         <div v-else class="file-list" @scroll="closeContext">
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="file-row" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
-            <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isImageEntry(entry) && thumbnailUrls[entry.relativePath]" class="file-icon file-thumb" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
+            <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isMediaEntry(entry) && thumbnailUrls[entry.relativePath]" class="file-icon file-thumb" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
             <div class="file-name"><strong>{{ entry.name }}</strong><span>{{ entry.isDirectory ? '文件夹' : formatBytes(entry.size) }}</span></div><span class="file-date">{{ formatDate(entry.modifiedAt) }}</span><button class="row-more" @click.stop="openContext($event, entry)">···</button>
           </div>
         </div>
@@ -118,7 +121,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconApps, IconCloud, IconClose, IconDown, IconFile, IconFolder, IconList, IconSearch, IconSettings, IconUp } from '@arco-design/web-vue/es/icon'
 import { Clipboard, Events, System, Window } from '@wailsio/runtime'
-import { ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
+import { ChatService, ImageViewerService, PreviewStreamService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 
 interface Entry { entryId: string; name: string; relativePath: string; isDirectory: boolean; size: number; mimeType: string; modifiedAt: string; sha256?: string }
 type SharedMode = 'owner' | 'friend' | 'invalid'
@@ -133,7 +136,7 @@ function readSharedQuery() {
   return { mode: parsedMode, deviceId: requestedDeviceId, embedded: query.get('embedded') === '1', settings: query.get('settings') === '1' }
 }
 const sharedQuery = readSharedQuery()
-const props = withDefaults(defineProps<{ embeddedMode?: boolean; ownerMode?: boolean; friendDeviceId?: string }>(), { embeddedMode: false, ownerMode: true, friendDeviceId: '' })
+const props = withDefaults(defineProps<{ embeddedMode?: boolean; ownerMode?: boolean; friendDeviceId?: string; active?: boolean; preload?: boolean }>(), { embeddedMode: false, ownerMode: true, friendDeviceId: '', active: true, preload: false })
 const embedded = props.embeddedMode || sharedQuery.embedded
 const mode = ref<SharedMode>(props.embeddedMode ? (props.ownerMode ? 'owner' : props.friendDeviceId ? 'friend' : 'invalid') : sharedQuery.mode)
 const deviceId = props.embeddedMode ? props.friendDeviceId.trim() : sharedQuery.deviceId
@@ -149,7 +152,7 @@ let thumbnailGeneration = 0
 let thumbnailBatchTimer: number | undefined
 let thumbnailObserver: IntersectionObserver | undefined
 const settings = reactive({ enabled: false, rootPath: '', fileCount: 0, folderCount: 0, availableBytes: 0, statsLoading: false, statsReady: false, statsUpdatedAt: '' })
-const sharedOptions = reactive({ showHiddenFiles: false, directoryOpenMode: 'double', sharedDriveMultiWindow: true })
+const sharedOptions = reactive({ showHiddenFiles: false, directoryOpenMode: 'double', sharedDriveMultiWindow: false })
 const context = reactive({ visible: false, x: 0, y: 0, entry: undefined as Entry | undefined })
 const renameDialog = reactive({ visible: false, loading: false, name: '', entry: undefined as Entry | undefined })
 const detailsDialog = reactive({ visible: false, loading: false, error: '', entry: undefined as Entry | undefined })
@@ -160,6 +163,11 @@ const notifiedTransferCompletions = reactive(new Set<string>())
 const transferExpanded = ref(true)
 let cancelSharedEvents: (() => void) | undefined
 let cancelThemeEvent: (() => void) | undefined
+let refreshPromise: Promise<void> | undefined
+let refreshPromiseKey = ''
+let lastRefreshAt = 0
+let entriesRequestId = 0
+let themeLoadStarted = false
 const pathParts = computed(() => relativePath.value ? relativePath.value.split('/').filter(Boolean) : [])
 const filteredEntries = computed(() => { const key = search.value.trim().toLowerCase(); return entries.value.filter((entry) => !key || entry.name.toLowerCase().includes(key)) })
 const selectedFiles = computed(() => entries.value.filter((entry) => selected.has(entry.relativePath) && !entry.isDirectory))
@@ -177,8 +185,13 @@ function isImageEntry(entry: Entry) {
   const mime = String(entry.mimeType || '').toLowerCase()
   return mime.startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name)
 }
+function isVideoEntry(entry: Entry) {
+  const mime = String(entry.mimeType || '').toLowerCase()
+  return mime.startsWith('video/') || /\.(3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ogv|ts|webm|wmv)$/i.test(entry.name)
+}
+function isMediaEntry(entry: Entry) { return isImageEntry(entry) || isVideoEntry(entry) }
 function registerThumbnailElement(element: unknown, entry: Entry) {
-  if (!(element instanceof HTMLElement) || !thumbnailObserver || !isImageEntry(entry)) return
+  if (!(element instanceof HTMLElement) || !thumbnailObserver || !isMediaEntry(entry)) return
   element.dataset.thumbnailPath = entry.relativePath
   thumbnailObserver.observe(element)
 }
@@ -191,7 +204,7 @@ function scheduleInitialThumbnails() {
 }
 function enqueueThumbnail(entry: Entry) {
   const path = entry.relativePath
-  if (!isImageEntry(entry) || thumbnailUrls[path] || thumbnailLoading.has(path) || thumbnailFailed.has(path) || thumbnailQueued.has(path)) return
+  if (!isMediaEntry(entry) || thumbnailUrls[path] || thumbnailLoading.has(path) || thumbnailFailed.has(path) || thumbnailQueued.has(path)) return
   thumbnailQueued.add(path)
   thumbnailLoading.add(path)
   thumbnailQueue.push({ entry, generation: thumbnailGeneration, attempt: 0 })
@@ -235,20 +248,21 @@ async function drainFriendThumbnailQueue() {
   }
 }
 function retryThumbnail(item: { entry: Entry; generation: number; attempt: number }) {
-  if (item.generation !== thumbnailGeneration || item.attempt >= 4) {
+  const maxAttempts = isVideoEntry(item.entry) ? 8 : 4
+  if (item.generation !== thumbnailGeneration || item.attempt >= maxAttempts) {
     if (item.generation === thumbnailGeneration) {
       thumbnailLoading.delete(item.entry.relativePath)
       thumbnailFailed.add(item.entry.relativePath)
     }
     return
   }
-  const delays = [300, 700, 1500, 3000]
+  const delays = [300, 700, 1200, 2000, 3000, 4000, 5000, 6000]
   window.setTimeout(() => {
     if (item.generation !== thumbnailGeneration || thumbnailUrls[item.entry.relativePath]) return
     thumbnailQueued.add(item.entry.relativePath)
     thumbnailQueue.push({ ...item, attempt: item.attempt + 1 })
     void drainThumbnailQueue()
-  }, delays[item.attempt] || 3000)
+  }, delays[item.attempt] || 6000)
 }
 async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: number; attempt: number }>, generation: number) {
   if (generation !== thumbnailGeneration) return
@@ -269,18 +283,30 @@ async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: numbe
         thumbnailUrls[path] = `data:${mime};base64,${result.payload}`
         thumbnailLoading.delete(path)
       } else if (result?.status === 'pending') {
-        retryThumbnail(item)
+        // Android generates video thumbnails asynchronously. Give the peer's
+        // native decoder time to finish before trying the stream fallback.
+        // Desktop peers can remain pending because they do not have a native
+        // video decoder, so use the authenticated preview stream after a few
+        // polls and continue polling if that fallback also fails.
+        if (isVideoEntry(item.entry) && item.attempt >= 3) void loadVideoThumbnail(item)
+        else retryThumbnail(item)
+      } else if (isVideoEntry(item.entry)) {
+        void loadVideoThumbnail(item)
       } else {
         thumbnailLoading.delete(path)
         thumbnailFailed.add(path)
       }
     })
   } catch {
-    items.forEach((item) => retryThumbnail(item))
+    items.forEach((item) => isVideoEntry(item.entry) && item.attempt >= 3 ? void loadVideoThumbnail(item) : retryThumbnail(item))
   }
 }
 async function loadThumbnail(entry: Entry, generation: number) {
   const path = entry.relativePath
+  if (isVideoEntry(entry)) {
+    await loadVideoThumbnail({ entry, generation, attempt: 0 })
+    return
+  }
   // A cache miss starts generation on the backend and returns immediately.
   // Poll briefly so the visible row upgrades from placeholder to thumbnail
   // without making the initial directory request wait for image decoding.
@@ -310,6 +336,66 @@ async function loadThumbnail(entry: Entry, generation: number) {
     if (generation === thumbnailGeneration) thumbnailFailed.add(path)
   } finally {
     if (generation === thumbnailGeneration) thumbnailLoading.delete(path)
+  }
+}
+function sharedPreviewURLFor(entry: Entry) {
+  return PreviewStreamService.CreateSharedPreviewURL(mode.value === 'owner' ? 'shared-owner' : 'shared-friend', mode.value === 'friend' ? deviceId : '', entry.relativePath)
+}
+function captureVideoFrame(url: string): Promise<string> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video')
+    const canvas = document.createElement('canvas')
+    let settled = false
+    const timer = window.setTimeout(() => finish(''), 12000)
+    const finish = (value: string) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+      resolve(value)
+    }
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+    video.addEventListener('error', () => finish(''), { once: true })
+    video.addEventListener('loadedmetadata', () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0
+      video.currentTime = duration > 0.4 ? Math.min(duration * 0.1, 1) : 0
+    }, { once: true })
+    video.addEventListener('seeked', () => {
+      const width = video.videoWidth
+      const height = video.videoHeight
+      if (!width || !height) { finish(''); return }
+      const ratio = Math.min(1, 640 / Math.max(width, height))
+      canvas.width = Math.max(1, Math.round(width * ratio))
+      canvas.height = Math.max(1, Math.round(height * ratio))
+      try {
+        canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height)
+        finish(canvas.toDataURL('image/jpeg', 0.8))
+      } catch {
+        finish('')
+      }
+    }, { once: true })
+    video.src = url
+    video.load()
+  })
+}
+async function loadVideoThumbnail(item: { entry: Entry; generation: number; attempt: number }) {
+  const path = item.entry.relativePath
+  try {
+    const url = await sharedPreviewURLFor(item.entry)
+    const thumbnail = url ? await captureVideoFrame(url) : ''
+    if (item.generation !== thumbnailGeneration) return
+    if (thumbnail) {
+      thumbnailUrls[path] = thumbnail
+      thumbnailLoading.delete(path)
+      return
+    }
+    retryThumbnail(item)
+  } catch {
+    if (item.generation === thumbnailGeneration) retryThumbnail(item)
   }
 }
 function transferPercent(transfer: any) { return transfer.fileSize > 0 ? Math.min(100, Math.floor((transfer.transferred || 0) * 100 / transfer.fileSize)) : 0 }
@@ -350,47 +436,97 @@ function applyTheme(theme: string) {
   document.body.classList.toggle('flyqpro-dark', isDark.value)
 }
 async function loadTheme() { try { const profile = await ChatService.GetProfile(); applyTheme(profile.theme || 'system') } catch { applyTheme('system') } }
-async function loadSettings() { if (mode.value !== 'owner') return; const [result, profile] = await Promise.all([ChatService.GetSharedFolderSettings(), ChatService.GetProfile()]); Object.assign(settings, result); Object.assign(sharedOptions, { showHiddenFiles: profile.showHiddenFiles === true, directoryOpenMode: profile.directoryOpenMode === 'single' ? 'single' : 'double', sharedDriveMultiWindow: profile.sharedDriveMultiWindow !== false }); sharedDisabled.value = false }
+function applySharedOptions(profile: any) {
+  Object.assign(sharedOptions, {
+    showHiddenFiles: profile?.showHiddenFiles === true,
+    directoryOpenMode: profile?.directoryOpenMode === 'single' ? 'single' : 'double',
+    sharedDriveMultiWindow: profile?.sharedDriveMultiWindow === true,
+  })
+}
+async function loadSettings() {
+  if (mode.value === 'owner') {
+    const [result, profile] = await Promise.all([ChatService.GetSharedFolderSettings(), ChatService.GetProfile()])
+    Object.assign(settings, result)
+    applySharedOptions(profile)
+    sharedDisabled.value = false
+    return
+  }
+  applySharedOptions(await ChatService.GetProfile())
+}
 function resetThumbnailState() { thumbnailGeneration++; if (thumbnailBatchTimer !== undefined) { window.clearTimeout(thumbnailBatchTimer); thumbnailBatchTimer = undefined }; thumbnailQueue.length = 0; thumbnailQueued.clear(); Object.keys(thumbnailUrls).forEach((key) => delete thumbnailUrls[key]); thumbnailLoading.clear(); thumbnailFailed.clear() }
 function resetViewState() { relativePath.value = ''; search.value = ''; searchVisible.value = false; entries.value = []; selected.clear(); hasMore.value = false; nextOffset.value = 0; loadingMore.value = false; resetThumbnailState(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
-async function loadEntriesPage(append = false) {
+async function loadEntriesPage(append = false, preserve = false) {
   if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) return
+  const requestId = ++entriesRequestId
   const offset = append ? nextOffset.value : 0
   if (append) loadingMore.value = true
-  else { loading.value = true; sharedDisabled.value = false; selected.clear(); resetThumbnailState() }
+  else {
+    loading.value = true
+    sharedDisabled.value = false
+    if (!preserve) {
+      selected.clear()
+      resetThumbnailState()
+    }
+  }
   try {
     const page = mode.value === 'owner'
       ? await ChatService.ListSharedEntriesPage(relativePath.value, offset, 100)
       : await ChatService.ListFriendSharedEntriesPage(deviceId, relativePath.value, offset, 100)
+    if (requestId !== entriesRequestId) return
     const incoming = page.entries || []
     entries.value = append
       ? [...entries.value, ...incoming.filter((entry: Entry) => !entries.value.some((current) => current.relativePath === entry.relativePath))]
       : incoming
+    if (!append && preserve) {
+      const validPaths = new Set(incoming.map((entry: Entry) => entry.relativePath))
+      selected.forEach((path) => { if (!validPaths.has(path)) selected.delete(path) })
+    }
     nextOffset.value = page.nextOffset || 0
     hasMore.value = Boolean(page.hasMore)
   } catch (error: any) {
+    if (requestId !== entriesRequestId) return
     const message = String(error?.message || error)
     sharedDisabled.value = mode.value === 'friend' && (message.includes('SHARED_DISABLED') || message.includes('SHARED_UNAVAILABLE'))
     if (!sharedDisabled.value) Message.error(error?.message || '读取共享目录失败')
-    if (!append) entries.value = []
+    if (!append && !preserve) entries.value = []
   } finally {
-    loading.value = false
-    loadingMore.value = false
-    if (!append) scheduleInitialThumbnails()
+    if (requestId === entriesRequestId) {
+      loading.value = false
+      loadingMore.value = false
+      if (!append) scheduleInitialThumbnails()
+    }
   }
 }
-async function refresh() {
+function sharedRefreshKey() { return `${mode.value}:${deviceId}:${relativePath.value}:${settingsPage.value}` }
+async function refresh(force = true) {
   if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) {
     sharedDisabled.value = true
     entries.value = []
     return
   }
+  const key = sharedRefreshKey()
+  if (refreshPromise && refreshPromiseKey === key) return refreshPromise
+  if (!force && lastRefreshAt > 0 && Date.now() - lastRefreshAt < 15000) return
+  const request = (async () => {
+    try {
+      await loadSettings()
+      if (key !== sharedRefreshKey()) return
+      if (settingsPage.value) return
+      if (mode.value === 'owner' && !settings.rootPath) { sharedDisabled.value = true; entries.value = []; return }
+      await loadEntriesPage(false, true)
+      lastRefreshAt = Date.now()
+    } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
+  })()
+  refreshPromise = request
+  refreshPromiseKey = key
   try {
-    if (mode.value === 'owner') await loadSettings()
-    if (settingsPage.value) return
-    if (mode.value === 'owner' && !settings.rootPath) { sharedDisabled.value = true; entries.value = []; return }
-    await loadEntriesPage(false)
-  } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
+    await request
+  } finally {
+    if (refreshPromise === request) {
+      refreshPromise = undefined
+      refreshPromiseKey = ''
+    }
+  }
 }
 async function loadEntries() {
   if (mode.value === 'owner' && !settings.rootPath) {
@@ -427,7 +563,7 @@ function closeSettingsPage() {
 async function saveSharedOptions(patch: Record<string, unknown>) {
   const profile = await ChatService.GetProfile()
   const result = await ChatService.UpdateProfile({ ...profile, ...patch })
-  Object.assign(sharedOptions, { showHiddenFiles: result.showHiddenFiles === true, directoryOpenMode: result.directoryOpenMode === 'single' ? 'single' : 'double', sharedDriveMultiWindow: result.sharedDriveMultiWindow !== false })
+  applySharedOptions(result)
 }
 async function updateShowHiddenFiles(value: boolean) {
   try { await saveSharedOptions({ showHiddenFiles: value }); Object.assign(settings, await ChatService.RefreshSharedStats(true)); Message.success('隐藏文件显示设置已更新'); if (!settingsPage.value) await refresh() } catch (error: any) { Message.error(error?.message || '更新隐藏文件设置失败') }
@@ -501,7 +637,7 @@ async function pauseTransfer(transferId: string) { try { await ChatService.Pause
 async function resumeTransfer(transferId: string) { try { const result = await ChatService.ResumeSharedTransfer(transferId); registerTransfer(result); transferExpanded.value = true; Message.success('已继续下载') } catch (error: any) { Message.error(error?.message || '继续下载失败') } }
 function isPreviewable(entry: Entry) {
   const mime = String(entry.mimeType || '').toLowerCase()
-  return mime.startsWith('image/') || mime === 'application/pdf' || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp|pdf)$/i.test(entry.name)
+  return mime.startsWith('image/') || mime.startsWith('video/') || mime === 'application/pdf' || /\.(3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ogv|ts|webm|wmv|avif|bmp|gif|heic|heif|jpe?g|png|webp|pdf)$/i.test(entry.name)
 }
 async function preview(entry: Entry) {
   if (entry.isDirectory) return
@@ -522,9 +658,18 @@ function handlePointerDown(event: PointerEvent) {
   const target = event.target
   if (searchVisible.value && (!(target instanceof Element) || !target.closest('.breadcrumb-search, .breadcrumb-actions'))) searchVisible.value = false
 }
+function ensureSharedActive() {
+  if (!props.active && !props.preload) return
+  if (!themeLoadStarted) {
+    themeLoadStarted = true
+    void loadTheme()
+  }
+  void refresh(false)
+}
 watch([viewMode, search], () => scheduleInitialThumbnails())
-onMounted(async () => { try { isMac.value = System.IsMac() } catch {} thumbnailObserver = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((items) => { for (const item of items) { if (!item.isIntersecting) continue; const path = (item.target as HTMLElement).dataset.thumbnailPath || ''; const entry = filteredEntries.value.find((candidate) => candidate.relativePath === path); if (entry) enqueueThumbnail(entry); thumbnailObserver?.unobserve(item.target) } }, { root: document.querySelector('.file-list'), rootMargin: '160px' }) : undefined; resetViewState(); window.addEventListener('pointerdown', handlePointerDown); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status?.rootPath === settings.rootPath) Object.assign(settings, status) }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; cancelThemeEvent = Events.On('chat:profile-updated', (event: any) => { const profile = event?.data ?? event; if (profile?.theme) applyTheme(profile.theme); else void loadTheme() }); await loadTheme(); await refresh() })
-onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerDown); window.removeEventListener('keydown', handleKeydown); thumbnailObserver?.disconnect(); thumbnailObserver = undefined; resetThumbnailState(); cancelSharedEvents?.(); cancelThemeEvent?.() })
+watch(() => [props.active, props.preload], () => ensureSharedActive())
+onMounted(() => { try { isMac.value = System.IsMac() } catch {} thumbnailObserver = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((items) => { for (const item of items) { if (!item.isIntersecting) continue; const path = (item.target as HTMLElement).dataset.thumbnailPath || ''; const entry = filteredEntries.value.find((candidate) => candidate.relativePath === path); if (entry) enqueueThumbnail(entry); thumbnailObserver?.unobserve(item.target) } }, { root: document.querySelector('.file-list'), rootMargin: '160px' }) : undefined; resetViewState(); window.addEventListener('pointerdown', handlePointerDown); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status?.rootPath === settings.rootPath) Object.assign(settings, status) }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; cancelThemeEvent = Events.On('chat:profile-updated', (event: any) => { const profile = event?.data ?? event; const hiddenFilesChanged = sharedOptions.showHiddenFiles !== (profile?.showHiddenFiles === true); applySharedOptions(profile); if (profile?.theme) applyTheme(profile.theme); else void loadTheme(); if (hiddenFilesChanged && !settingsPage.value) void refresh(true) }); ensureSharedActive() })
+onBeforeUnmount(() => { entriesRequestId++; refreshPromise = undefined; window.removeEventListener('pointerdown', handlePointerDown); window.removeEventListener('keydown', handleKeydown); thumbnailObserver?.disconnect(); thumbnailObserver = undefined; resetThumbnailState(); cancelSharedEvents?.(); cancelThemeEvent?.() })
 </script>
 
 <style scoped lang="less">
@@ -593,8 +738,9 @@ onBeforeUnmount(() => { window.removeEventListener('pointerdown', handlePointerD
 .thumb-card { position:relative; min-width:0; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--surface); cursor:default; }
 .thumb-card:hover, .thumb-card.selected { border-color:color-mix(in srgb,var(--accent) 48%,var(--line)); background:color-mix(in srgb,var(--accent) 7%,var(--surface)); }
 .thumb-check { position:absolute; z-index:1; top:10px; left:10px; width:16px; height:16px; }
-.thumb-preview { height:130px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:6px; background:color-mix(in srgb,var(--accent) 6%,var(--page-bg)); }
+.thumb-preview { position:relative; height:130px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:6px; background:color-mix(in srgb,var(--accent) 6%,var(--page-bg)); }
 .thumb-preview img { display:block; width:100%; height:100%; object-fit:contain; }
+.thumb-video-badge { position:absolute; right:8px; bottom:8px; display:grid; width:26px; height:26px; place-items:center; border:1px solid rgba(255,255,255,.75); border-radius:50%; background:rgba(20,24,30,.78); color:#fff; font-size:12px; line-height:1; }
 .thumb-placeholder { display:flex; align-items:center; justify-content:center; width:100%; height:100%; color:var(--muted); font-size:12px; }
 .thumb-placeholder svg { width:40px; height:40px; }
 .thumb-placeholder.folder { color:#e6a23c; }

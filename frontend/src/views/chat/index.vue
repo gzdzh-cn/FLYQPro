@@ -13,6 +13,7 @@
       <nav class="rail-nav">
         <button :class="{ active: section === 'friends' }" @click="enterFriends" :disabled="store.attachmentMigration.active" aria-label="好友"><icon-user-group /><small>好友</small><b v-if="totalUnreadCount" class="rail-unread-badge">{{ unreadLabel(totalUnreadCount) }}</b></button>
         <button :class="{ active: section === 'discover' }" @click="openDiscover" :disabled="store.attachmentMigration.active" aria-label="发现"><icon-search /><small>发现</small><b v-if="store.pendingRequests.length">{{ store.pendingRequests.length }}</b></button>
+        <button :class="{ active: section === 'favorites' }" @click="openFavorites" :disabled="store.attachmentMigration.active" aria-label="收藏"><icon-bookmark /><small>收藏</small></button>
         <button :class="{ active: section === 'shared' }" @click="openSharedDrive" :disabled="store.attachmentMigration.active" aria-label="共享"><icon-cloud /><small>共享</small></button>
       </nav>
       <button class="rail-settings" :class="{ active: section === 'settings' }" @click="openSettings('general')" :disabled="store.attachmentMigration.active" aria-label="设置"><icon-settings /><small>设置</small></button>
@@ -48,7 +49,7 @@
       <aside class="list-pane" :style="{ width: `${friendsWidth}px`, flexBasis: `${friendsWidth}px` }">
         <div class="pane-title friend-pane-title"><a-input v-model="friendSearch" class="friend-search" placeholder="搜索好友" allow-clear size="small"><template #prefix><icon-search /></template></a-input><button class="icon-button" @click="openDiscover" title="发现好友"><icon-plus /></button></div>
         <div class="list-scroll" @scroll="closeAllContextMenus">
-          <button v-for="peer in filteredFriends" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId, pinned: conversationForPeer(peer.deviceId)?.pinned }" @click="selectPeer(peer)" @contextmenu.prevent.stop="openPeerMenu($event, peer)">
+          <button v-for="peer in filteredFriends" v-memo="[peer.deviceId, store.activePeerId, peer.remark, peer.nickname, peer.avatarData, peer.platform, peer.osVersion, peer.online, peer.friendshipState, peer.relation, conversationForPeer(peer.deviceId)?.lastMessage, conversationForPeer(peer.deviceId)?.lastMessageAt, conversationForPeer(peer.deviceId)?.unreadCount, conversationForPeer(peer.deviceId)?.pinned]" :key="peer.deviceId" class="peer-row" :class="{ selected: store.activePeerId === peer.deviceId, pinned: conversationForPeer(peer.deviceId)?.pinned }" @click="selectPeer(peer)" @contextmenu.prevent.stop="openPeerMenu($event, peer)">
             <div class="avatar" :style="avatarStyle(peer.nickname, peer.avatarData)">{{ peer.avatarData ? '' : initials(peer.nickname) }}<i :class="{ online: peer.online }" /></div>
             <div class="peer-copy"><strong><span class="nickname-ellipsis">{{ peer.remark || peer.nickname }}</span><i v-if="conversationForPeer(peer.deviceId)?.pinned" class="pin-mark">置顶</i></strong><span class="peer-device">{{ peerDeviceLabel(peer) }}</span><span class="peer-preview">{{ peer.friendshipState === 'removed' || peer.relation === 'removed' ? '不是好友' : (conversationForPeer(peer.deviceId)?.lastMessage || (peer.online ? '在线' : '离线')) }}</span></div><div v-if="conversationForPeer(peer.deviceId)?.lastMessageAt || unreadCount(peer.deviceId)" class="peer-meta"><time v-if="conversationForPeer(peer.deviceId)?.lastMessageAt" class="peer-time">{{ formatTime(conversationForPeer(peer.deviceId)?.lastMessageAt || '') }}</time><b v-if="unreadCount(peer.deviceId)" class="unread-badge">{{ unreadLabel(unreadCount(peer.deviceId)) }}</b></div>
           </button>
@@ -63,7 +64,7 @@
         </header>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
+          <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
             <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'is-favorite': message.isFavorite }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
@@ -106,14 +107,13 @@
             <button @click="copyTextMessage(messageMenu.message)">复制</button><button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button @click="quoteMessage(messageMenu.message)">引用</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
           </template>
           <template v-else-if="messageMenu.message && isImageMessage(messageMenu.message)">
-            <button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="copyImageMessage(messageMenu.message)">复制</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openImage(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
+            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="copyImageMessage(messageMenu.message)">复制</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openImage(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
           </template>
           <template v-else-if="messageMenu.message">
-            <button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openAttachment(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
+            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openAttachment(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button>
           </template>
         </div>
         <div v-if="selectionMode" class="selection-toolbar"><strong>已选 {{ selectedMessageIds.size }} 条</strong><a-button size="small" @click="batchFavorite">收藏</a-button><a-button size="small" @click="batchForward">转发</a-button><a-button size="small" status="danger" @click="batchDelete">删除</a-button><a-button size="small" @click="exitMultiSelect">取消</a-button></div>
-        <a-modal v-model:visible="forwardVisible" title="选择转发好友" @ok="confirmForward" @cancel="forwardVisible = false"><div class="forward-targets"><a-checkbox v-for="peer in forwardCandidates" :key="peer.deviceId" :model-value="forwardTargetIds.includes(peer.deviceId)" @change="toggleForwardTarget(peer.deviceId)"><span class="nickname-ellipsis">{{ peer.remark || peer.nickname }}</span></a-checkbox></div></a-modal>
         <a-modal v-model:visible="attachmentDetailsVisible" title="附件详情" :footer="false"><div v-if="attachmentDetails" class="attachment-details"><p><span>文件名</span><strong>{{ attachmentDetails.fileName }}</strong></p><p><span>类型</span><strong>{{ attachmentDetails.mimeType || '未知' }}</strong></p><p><span>大小</span><strong>{{ formatBytes(attachmentDetails.fileSize) }}</strong></p><p><span>状态</span><strong>{{ attachmentDetails.status }}</strong></p><p><span>时间</span><strong>{{ formatTime(attachmentDetails.createdAt) }}</strong></p><p><span>路径</span><strong>{{ attachmentDetails.localPath }}</strong></p><p><span>SHA256</span><strong class="mono">{{ attachmentDetails.sha256 || '未知' }}</strong></p></div></a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :class="{ 'composer-disabled': !activePeerCanSend }" :style="{ height: `${composerHeight}px` }">
@@ -138,16 +138,24 @@
       </div>
     </section>
 
-    <section v-show="section === 'shared'" class="workspace shared-embedded-workspace">
+    <section v-if="mountedSections.favorites" v-show="section === 'favorites'" class="workspace favorites-workspace">
+      <FavoritesPage :peers="store.peers" :active="section === 'favorites'" :preload="mountedSections.favorites" @forward="openFavoriteForward" />
+    </section>
+
+    <a-modal v-model:visible="forwardVisible" title="选择转发好友" @ok="confirmForward" @cancel="forwardVisible = false"><div class="forward-targets"><a-checkbox v-for="peer in forwardCandidates" :key="peer.deviceId" :model-value="forwardTargetIds.includes(peer.deviceId)" @change="toggleForwardTarget(peer.deviceId)"><span class="nickname-ellipsis">{{ peer.remark || peer.nickname }}</span></a-checkbox></div></a-modal>
+
+    <section v-if="mountedSections.shared" v-show="section === 'shared'" class="workspace shared-embedded-workspace">
       <SharedDrivePage
         :key="`${sharedEmbeddedMode}:${sharedEmbeddedDeviceId}`"
         embedded-mode
         :owner-mode="sharedEmbeddedMode === 'owner'"
         :friend-device-id="sharedEmbeddedDeviceId"
+        :active="section === 'shared'"
+        :preload="mountedSections.shared"
       />
     </section>
 
-    <section v-show="section === 'discover'" class="workspace">
+    <section v-if="mountedSections.discover" v-show="section === 'discover'" class="workspace">
       <aside class="list-pane discovery-pane" :style="{ width: `${discoveryWidth}px`, flexBasis: `${discoveryWidth}px` }" @click.self="clearDiscoverySelection">
         <div class="pane-title"><a-button class="scan-button" size="small" :loading="scanning" :disabled="scanning" aria-label="重新扫描局域网设备" @click="refreshPeers">重新扫描</a-button></div>
         <div class="discovery-scroll" @scroll="closeAllContextMenus">
@@ -175,7 +183,7 @@
       </div>
     </section>
 
-    <section v-show="section === 'settings'" class="settings-shell">
+    <section v-if="mountedSections.settings" v-show="section === 'settings'" class="settings-shell">
       <header class="settings-head"><div><h2>设置</h2><p>管理个人资料、网络和应用行为</p></div><div class="settings-tabs"><button :class="{ active: settingsTab === 'general' }" @click="settingsTab = 'general'">通用</button><button :class="{ active: settingsTab === 'network' }" @click="settingsTab = 'network'">网络</button><button :class="{ active: settingsTab === 'device' }" @click="settingsTab = 'device'">设备信息</button><button :class="{ active: settingsTab === 'about' }" @click="settingsTab = 'about'">关于</button></div></header>
       <div class="settings-panel">
         <main class="settings-content" v-if="settingsTab === 'general'"><section class="setting-card profile-card"><button class="avatar-upload" type="button" title="更换头像" @click="chooseAvatar"><div class="avatar huge" :style="avatarStyle(editProfile.nickname, editProfile.avatarData)">{{ editProfile.avatarData ? '' : initials(editProfile.nickname) }}</div><span class="avatar-camera"><icon-camera /></span></button><div class="profile-edit"><a-input v-model="editProfile.nickname" label="昵称" :maxlength="10" @blur="syncNickname" @keyup.enter.prevent="saveProfile" /><p>昵称最多 10 个字符。</p><p>没有自定义头像时，系统会根据设备 ID 生成稳定头像。</p><div class="profile-buttons"><a-button type="primary" @mousedown.prevent="saveProfile">保存</a-button></div></div></section><section class="setting-card"><h3>外观</h3><div class="setting-line"><div><strong>主题</strong><span>选择应用的颜色主题</span></div><a-select v-model="editProfile.theme" style="width: 170px" @change="saveTheme"><a-option value="light">亮色</a-option><a-option value="dark">暗色</a-option><a-option value="system">跟随系统</a-option></a-select></div></section><section class="setting-card"><h3>隐私与启动</h3><div class="setting-line"><div><strong>允许被发现</strong><span>关闭后，局域网设备无法在发现列表看到你</span></div><a-switch v-model="editProfile.discoverable" @change="saveProfile(false)" /></div><div class="setting-line"><div><strong>开机启动</strong><span>登录系统后自动启动 FlyQPro</span></div><a-switch v-model="editProfile.launchAtStartup" @change="toggleStartup" /></div><div class="setting-line"><div><strong>自动保存附件</strong><span>关闭后，收到图片和文件需要手动选择接收、另存或拒绝</span></div><a-switch v-model="editProfile.autoSave" @change="saveProfile(false)" /></div></section><section class="setting-card"><h3>文件</h3><div class="setting-line"><div><strong>保存路径</strong><span class="path">{{ editProfile.fileSavePath || '未设置' }}</span></div><div class="path-actions"><a-button @click="chooseDirectory" :disabled="store.attachmentMigration.active">选择目录</a-button><a-button @click="resetAttachmentPath" :disabled="store.attachmentMigration.active || isDefaultPath" title="恢复为 FlyQPro 默认附件目录">重置</a-button></div></div></section><section class="setting-card"><h3>共享盘</h3><div class="setting-line"><div><strong>共享盘多窗打开</strong><span>开启后使用独立窗口，关闭后嵌入当前应用窗口</span></div><a-switch v-model="editProfile.sharedDriveMultiWindow" @change="saveProfile(false)" /></div></section></main>
@@ -184,7 +192,7 @@
         <main class="settings-content" v-else><section class="setting-card about-card"><div class="brand-mark">✦</div><h2 class="about-chinese-name">飞秋Pro</h2><p class="about-english-name">FlyQPro</p><p>局域网点对点聊天工具</p><div class="about-rows"><span>应用版本<strong>{{ appVersion || '未知' }}</strong></span><span>协议版本<strong>{{ deviceInfo?.protocolName || 'dzhgo' }}/{{ deviceInfo?.protocolMajor || 2 }}.0</strong></span><span>技术栈<strong>Go · Wails v3 · Vue 3 · TypeScript · Arco Design · SQLite</strong></span><span>技术支持<strong>广州大智汇信息科技有限公司</strong></span><span>数据存储<strong>本地 SQLite</strong></span><div class="about-link-row"><span>开源仓库</span><button type="button" class="repo-link" title="在浏览器中打开开源仓库" @click="openRepository">github.com/gzdzh-cn/FlyQPro <icon-export /></button></div></div><a-button @click="termsVisible = true">使用条款与隐私说明</a-button></section></main>
       </div>
     </section>
-    <a-modal v-model:visible="termsVisible" title="使用条款与隐私说明" hide-cancel><p>FlyQPro 仅在局域网内进行点对点通信。聊天记录、设备信息和附件保存在本机，不上传云端。请确认你有权在当前网络中发现和联系其他设备。</p></a-modal>
+    <a-modal v-model:visible="termsVisible" title="使用条款与隐私说明" hide-cancel><p>飞秋Pro 仅在局域网内进行点对点通信。聊天记录、设备信息和附件保存在本机，不上传云端。请确认你有权在当前网络中发现和联系其他设备。</p></a-modal>
     <div v-if="store.attachmentMigration.active || migrationResultVisible" class="migration-lock" @click.stop>
       <section class="migration-card" role="dialog" aria-modal="true" aria-label="附件迁移进度">
         <icon-loading v-if="store.attachmentMigration.active" class="migration-spinner" />
@@ -205,18 +213,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconCloud, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
+import { IconBookmark, IconCamera, IconCheckCircle, IconClose, IconCloseCircle, IconCloud, IconDown, IconFaceSmileFill, IconFile, IconFolder, IconLeft, IconLoading, IconMore, IconPlus, IconRight, IconSearch, IconSettings, IconUserGroup } from '@arco-design/web-vue/es/icon'
 import { Browser, Clipboard, System, Window } from '@wailsio/runtime'
 import { AppBadgeService, ChatService, ImageViewerService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 import { useChatStore } from '@/store/modules/chat'
+import FavoritesPage from '../favorites/index.vue'
 import SharedDrivePage from '../shared-drive/index.vue'
 import type { AttachmentDetails, FriendRequest, Message as ChatMessage, Peer } from '@/store/modules/chat/types'
 
 const store = useChatStore()
-const section = ref('friends')
+type AppSection = 'friends' | 'discover' | 'favorites' | 'shared' | 'settings'
+const section = ref<AppSection>('friends')
+const mountedSections = reactive<Record<AppSection, boolean>>({ friends: true, discover: false, favorites: false, shared: false, settings: false })
 const sharedEmbeddedMode = ref<'owner' | 'friend'>('owner')
 const sharedEmbeddedDeviceId = ref('')
-const sharedReturnSection = ref('friends')
+const sharedReturnSection = ref<AppSection>('friends')
 const sharedReturnPeerId = ref('')
 const settingsTab = ref('general')
 const friendSearch = ref('')
@@ -287,6 +298,11 @@ let scrollScheduleFrame = 0
 let scrollAnimationFrame = 0
 let scrollAnimationToken = 0
 let bottomSettleToken = 0
+let menuWarmupIdleId: number | undefined
+let menuWarmupTimer: number | undefined
+let menuWarmupFrame = 0
+let menuWarmupQueue: AppSection[] = []
+let menuWarmupPaused = false
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
@@ -394,6 +410,53 @@ function peerDeviceLabel(peer: Peer) { return [peer.platform, peer.osVersion].fi
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
 async function refreshMyQRCode() { try { myQRCode.value = await ChatService.GetMyQRCode() } catch { myQRCode.value = '' } }
 async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); await refreshMyQRCode(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
+type IdleWindow = Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void }
+function clearMenuWarmupTask() {
+  const idleWindow = window as IdleWindow
+  if (menuWarmupIdleId !== undefined) idleWindow.cancelIdleCallback?.(menuWarmupIdleId)
+  if (menuWarmupTimer !== undefined) window.clearTimeout(menuWarmupTimer)
+  if (menuWarmupFrame) cancelAnimationFrame(menuWarmupFrame)
+  menuWarmupIdleId = undefined
+  menuWarmupTimer = undefined
+  menuWarmupFrame = 0
+}
+function pauseMenuWarmup() {
+  if (menuWarmupPaused) return
+  menuWarmupPaused = true
+  menuWarmupQueue = []
+  clearMenuWarmupTask()
+}
+function runNextMenuWarmup() {
+  if (menuWarmupPaused || !menuWarmupQueue.length) return
+  const next = menuWarmupQueue.shift()
+  if (!next) return
+  mountedSections[next] = true
+  menuWarmupTimer = window.setTimeout(() => {
+    menuWarmupTimer = undefined
+    scheduleNextMenuWarmup()
+  }, 0)
+}
+function scheduleNextMenuWarmup() {
+  if (menuWarmupPaused || !menuWarmupQueue.length) return
+  const idleWindow = window as IdleWindow
+  const run = () => {
+    menuWarmupIdleId = undefined
+    if (menuWarmupPaused) return
+    runNextMenuWarmup()
+  }
+  if (idleWindow.requestIdleCallback) menuWarmupIdleId = idleWindow.requestIdleCallback(run, { timeout: 800 })
+  else menuWarmupTimer = window.setTimeout(run, 100)
+}
+function scheduleMenuWarmup() {
+  if (menuWarmupPaused) return
+  clearMenuWarmupTask()
+  const sectionsToWarm: AppSection[] = ['discover', 'settings', 'favorites', 'shared']
+  menuWarmupQueue = sectionsToWarm.filter((item) => !mountedSections[item])
+  menuWarmupFrame = requestAnimationFrame(() => {
+    menuWarmupFrame = 0
+    scheduleNextMenuWarmup()
+  })
+}
 function chatScrollKey(deviceId: string) { return `flyqpro.chatScroll.v2.${deviceId}` }
 function legacyChatScrollKey(deviceId: string) { return `popchat.chatScroll.${deviceId}` }
 function saveActiveScrollPosition() {
@@ -516,19 +579,27 @@ async function refreshPeerAvatar(deviceId: string) {
   try { await ChatService.RefreshPeerAvatar(deviceId) } catch { /* best effort; keep the cached avatar */ }
 }
 function selectPeer(peer: Peer) { closePeerMenu(); closeContactMenu(); closeDeleteConfirm(); void loadConversation(peer, true, false, true) }
-function openDiscover() {
-  if (store.attachmentMigration.active) return
-  saveActiveScrollPosition()
-  section.value = 'discover'
+function switchSection(target: AppSection) {
+  if (store.attachmentMigration.active || section.value === target) return false
+  const previous = section.value
+  // Update the visible section synchronously. Vue renders the mounted page on
+  // the next tick while its data requests continue in the background.
+  mountedSections[target] = true
+  section.value = target
+  if (previous === 'friends') saveActiveScrollPosition()
+  closeAllContextMenus()
+  if (target !== 'friends') closePeerInfo()
+  return true
 }
+function openDiscover() { switchSection('discover') }
+function openFavorites() { switchSection('favorites') }
 function enterFriends() {
-  if (store.attachmentMigration.active) return
-  saveActiveScrollPosition()
+  if (!switchSection('friends')) return
   const previousPeerId = activePeer.value?.deviceId
-  section.value = 'friends'
   const selected = activePeer.value && store.friends.some((peer) => peer.deviceId === activePeer.value?.deviceId) ? activePeer.value : store.friends[0]
   if (selected) {
-    void loadConversation(selected, false, previousPeerId === selected.deviceId)
+    const hasCachedMessages = Boolean(store.messages[`conv-${selected.deviceId}`])
+    if (previousPeerId !== selected.deviceId || !hasCachedMessages) void loadConversation(selected, false, previousPeerId === selected.deviceId)
   } else {
     // The current peer may have just been downgraded to a stranger after a
     // remote friendship rejection. Do not leave its conversation rendered
@@ -539,7 +610,7 @@ function enterFriends() {
     userNearBottom.value = true
   }
 }
-function openSettings(tab: string) { if (store.attachmentMigration.active) return; saveActiveScrollPosition(); section.value = 'settings'; settingsTab.value = tab }
+function openSettings(tab: string) { if (switchSection('settings')) settingsTab.value = tab }
 async function saveProfile(showMessage = true) { editProfile.nickname = normalizeNickname(editProfile.nickname); try { const profile = await ChatService.UpdateProfile({ ...editProfile }); store.$patch({ profile: { ...store.profile, ...profile } }); Object.assign(editProfile, profile); applyTheme(profile.theme); await refreshMyQRCode(); if (showMessage) Message.success('设置已保存') } catch (error: any) { Message.error(error?.message || '保存失败') } }
 async function saveTheme(theme: string) {
   const normalized = ["light", "dark", "system"].includes(theme) ? theme : "system"
@@ -621,7 +692,7 @@ async function openFriendChat(deviceId: string) {
   closeDeleteConfirm()
   selectedRequest.value = undefined
   selectedDiscovery.value = undefined
-  section.value = 'friends'
+  switchSection('friends')
   if (peer.friendshipState === 'removed') {
     Message.warning('该设备已不是好友，请先重新发送好友申请')
     return
@@ -1129,7 +1200,8 @@ function enterMultiSelect(message: any) { closeMessageMenu(); selectionMode.valu
 function exitMultiSelect() { selectionMode.value = false; selectedMessageIds.clear() }
 async function batchFavorite() { const ids = [...selectedMessageIds]; for (const id of ids) { const message = activeMessages.value.find((item) => item.messageId === id); if (message && !message.isFavorite) { await ChatService.SetMessageFavorite(id, true); message.isFavorite = true } } exitMultiSelect(); Message.success('已收藏所选消息') }
 async function batchDelete() { const ids = [...selectedMessageIds]; for (const id of ids) { await ChatService.DeleteMessage(id); delete messagePreviews[id] } if (activePeer.value) await loadConversation(activePeer.value, false, false, false); exitMultiSelect(); Message.success('已删除所选消息') }
-function openForward(messages: ChatMessage[]) { const candidates = store.friends.filter((peer) => peer.deviceId !== activePeer.value?.deviceId); if (!candidates.length) { Message.warning('没有可转发的好友'); return }; forwardSources.value = messages; forwardCandidates.value = candidates; forwardTargetIds.value = []; forwardVisible.value = true }
+function openForward(messages: ChatMessage[], excludedDeviceId = activePeer.value?.deviceId) { const candidates = store.friends.filter((peer) => peer.deviceId !== excludedDeviceId); if (!candidates.length) { Message.warning('没有可转发的好友'); return }; forwardSources.value = messages; forwardCandidates.value = candidates; forwardTargetIds.value = []; forwardVisible.value = true }
+function openFavoriteForward(message: ChatMessage) { openForward([message], '') }
 async function confirmForward() { if (!forwardTargetIds.value.length) { Message.warning('请选择转发好友'); return }; for (const targetId of forwardTargetIds.value) for (const message of forwardSources.value) await ChatService.SendMessageWithMetadata(targetId, message.content, message.messageId, message.content, message.messageId); Message.success(`已转发给 ${forwardTargetIds.value.length} 位好友`); forwardVisible.value = false; exitMultiSelect() }
 function toggleForwardTarget(deviceId: string) { forwardTargetIds.value = forwardTargetIds.value.includes(deviceId) ? forwardTargetIds.value.filter((id) => id !== deviceId) : [...forwardTargetIds.value, deviceId] }
 function forwardMessage(message: any) { closeMessageMenu(); openForward([message]) }
@@ -1192,22 +1264,24 @@ async function savePeerRemark() { if (!activePeer.value || peerRemark.value === 
 async function runDiagnostic() { diagnostic.value = await ChatService.RunNetworkDiagnostic() }
 function openRepository() { void Browser.OpenURL('https://github.com/gzdzh-cn/FlyQPro') }
 function openEmbeddedShared(mode: 'owner' | 'friend', peerId = '') {
-  saveActiveScrollPosition()
+  if (section.value === 'shared' && sharedEmbeddedMode.value === mode && sharedEmbeddedDeviceId.value === peerId) return
+  const enteringShared = section.value !== 'shared'
   sharedEmbeddedMode.value = mode
   sharedEmbeddedDeviceId.value = peerId
-  sharedReturnSection.value = section.value === 'shared' ? sharedReturnSection.value : 'friends'
+  if (enteringShared) sharedReturnSection.value = 'friends'
   sharedReturnPeerId.value = peerId
-  section.value = 'shared'
+  if (enteringShared) switchSection('shared')
+  else closeAllContextMenus()
 }
 function leaveEmbeddedShared() {
   const returnSection = sharedReturnSection.value || 'friends'
   const returnPeer = store.friends.find((peer) => peer.deviceId === sharedReturnPeerId.value)
-  section.value = returnSection
+  switchSection(returnSection)
   if (returnSection === 'friends' && returnPeer) void loadConversation(returnPeer, false, true, true)
 }
 async function openSharedDrive() {
   try {
-    if (store.profile.sharedDriveMultiWindow !== false) await SharedDriveWindowService.OpenSharedDrive()
+    if (store.profile.sharedDriveMultiWindow === true) await SharedDriveWindowService.OpenSharedDrive()
     else openEmbeddedShared('owner')
   } catch (error: any) { Message.error(error?.message || '打开共享窗口失败') }
 }
@@ -1216,7 +1290,7 @@ async function openFriendSharedDrive() {
   if (!activePeerCanSend.value) { Message.warning('当前不是好友，请重新申请好友'); return }
   if (!activePeer.value.online) { Message.warning('好友不在线，暂不支持打开共享盘'); return }
   try {
-    if (store.profile.sharedDriveMultiWindow !== false) await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId)
+    if (store.profile.sharedDriveMultiWindow === true) await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId)
     else openEmbeddedShared('friend', activePeer.value.deviceId)
   } catch (error: any) { Message.error(error?.message || '打开好友共享盘失败') }
 }
@@ -1258,10 +1332,6 @@ watch(() => store.requests, (requests) => {
   knownRequestStates.clear()
   next.forEach((value, key) => knownRequestStates.set(key, value))
 }, { deep: true })
-watch(section, (value, previous) => {
-  if (previous === 'friends' && value !== 'friends') saveActiveScrollPosition()
-  if (value !== 'friends') closePeerInfo()
-})
 watch(() => editProfile.theme, (value) => applyTheme(value))
 watch(appBadgeCount, (count) => { void AppBadgeService.SetCount(count).catch(() => undefined) }, { immediate: true })
 watch(() => store.peers, () => {
@@ -1279,11 +1349,14 @@ onMounted(async () => {
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', handleContextMenuKeydown)
   window.addEventListener('pointerdown', closeContextMenusOnPointerDown)
+  window.addEventListener('pointerdown', pauseMenuWarmup, { passive: true })
+  window.addEventListener('keydown', pauseMenuWarmup)
   try { isMac.value = System.IsMac() } catch { isMac.value = false }
   try { defaultAttachmentPath.value = await ChatService.DefaultAttachmentPath() } catch { defaultAttachmentPath.value = '' }
   await load()
+  scheduleMenuWarmup()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -1661,6 +1734,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); cancelScrollAnimation(); bot
 .about-card .about-english-name { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.4; }
 .about-link-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); color: var(--muted); }
 .about-link-row > span { padding: 0 !important; border-bottom: 0 !important; }
+.about-rows > span { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: start; gap: 16px; }
+.about-rows > span > strong { min-width: 0; text-align: right; overflow-wrap: anywhere; word-break: break-word; }
 .repo-link { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; text-align: right; }
 .repo-link:hover { text-decoration: underline; }
 .repo-link svg { width: 14px; height: 14px; flex: 0 0 14px; }

@@ -648,6 +648,51 @@ func (s *ChatService) RevealSharedEntry(relativePath string) error {
 	return exec.Command("xdg-open", filepath.Dir(path)).Run()
 }
 
+// DownloadSharedEntry copies a locally shared file into the default shared
+// download directory. It is used by the shared image viewer for owner-mode
+// previews, where there is no remote transfer to start.
+func (s *ChatService) DownloadSharedEntry(relativePath string) (string, error) {
+	profile := s.engine.Profile()
+	entry, source, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return "", err
+	}
+	if entry.IsDirectory {
+		return "", fmt.Errorf("不能下载文件夹")
+	}
+	targetRoot := chat.DefaultSharedDownloadDir()
+	if err := os.MkdirAll(targetRoot, 0o700); err != nil {
+		return "", err
+	}
+	target := uniqueSharedServiceTarget(filepath.Join(targetRoot, filepath.Base(source)))
+	if err := copySharedServiceFile(source, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// SaveSharedEntryAs copies a locally shared file to a path selected by the
+// user. The empty result means the native save dialog was canceled.
+func (s *ChatService) SaveSharedEntryAs(relativePath string) (string, error) {
+	profile := s.engine.Profile()
+	entry, source, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	if err != nil {
+		return "", err
+	}
+	if entry.IsDirectory {
+		return "", fmt.Errorf("不能保存文件夹")
+	}
+	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择共享文件保存位置").SetFilename(entry.Name).PromptForSingleSelection()
+	if err != nil || strings.TrimSpace(result) == "" {
+		return "", err
+	}
+	target := filepath.Clean(result)
+	if err := copySharedServiceFile(source, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
 func (s *ChatService) OpenSharedDownload(targetPath string) error {
 	root := filepath.Clean(chat.DefaultSharedDownloadDir())
 	target := filepath.Clean(strings.TrimSpace(targetPath))
@@ -659,6 +704,38 @@ func (s *ChatService) OpenSharedDownload(targetPath string) error {
 		return fmt.Errorf("下载文件不存在")
 	}
 	return runAttachmentCommand("open", target)
+}
+
+func uniqueSharedServiceTarget(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	extension := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), extension)
+	directory := filepath.Dir(path)
+	for index := 1; ; index++ {
+		candidate := filepath.Join(directory, fmt.Sprintf("%s (%d)%s", base, index, extension))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+func copySharedServiceFile(source, target string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	return output.Close()
 }
 
 func (s *ChatService) RevealSharedDownload(targetPath string) error {
