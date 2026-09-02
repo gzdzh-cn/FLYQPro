@@ -17,6 +17,6 @@ export function CreateAttachmentPreviewURL(attachmentID: string): $CancellablePr
     return $Call.ByID(1765016145, attachmentID);
 }
 
-export function CreateSharedPreviewURL(source: string, deviceID: string, relativePath: string): $CancellablePromise<string> {
-    return $Call.ByID(36573581, source, deviceID, relativePath);
+export function CreateSharedPreviewURL(source: string, deviceID: string, sharedFolderID: string, relativePath: string): $CancellablePromise<string> {
+    return $Call.ByID(36573581, source, deviceID, sharedFolderID, relativePath);
 }

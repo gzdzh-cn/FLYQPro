@@ -219,15 +219,30 @@ type SharedFolderSettings struct {
 	RootPath string `json:"rootPath"`
 }
 
+// SharedFolder is the local management and remote discovery representation of
+// one configured shared directory. RootPath is omitted from JSON when empty,
+// which is how friend responses avoid exposing the owner's filesystem path.
+type SharedFolder struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	RootPath     string `json:"rootPath,omitempty"`
+	FileCount    int    `json:"fileCount"`
+	FolderCount  int    `json:"folderCount"`
+	StatsReady   bool   `json:"statsReady"`
+	StatsLoading bool   `json:"statsLoading"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
 type SharedFolderStatus struct {
 	SharedFolderSettings
-	FileCount      int    `json:"fileCount"`
-	FolderCount    int    `json:"folderCount"`
-	AvailableBytes uint64 `json:"availableBytes"`
-	UpdatedAt      string `json:"updatedAt"`
-	StatsLoading   bool   `json:"statsLoading"`
-	StatsReady     bool   `json:"statsReady"`
-	StatsUpdatedAt string `json:"statsUpdatedAt,omitempty"`
+	Folders        []SharedFolder `json:"folders"`
+	FileCount      int            `json:"fileCount"`
+	FolderCount    int            `json:"folderCount"`
+	AvailableBytes uint64         `json:"availableBytes"`
+	UpdatedAt      string         `json:"updatedAt"`
+	StatsLoading   bool           `json:"statsLoading"`
+	StatsReady     bool           `json:"statsReady"`
+	StatsUpdatedAt string         `json:"statsUpdatedAt,omitempty"`
 }
 
 type SharedEntry struct {
@@ -242,19 +257,21 @@ type SharedEntry struct {
 }
 
 type SharedThumbnailRequest struct {
-	RelativePath string `json:"relativePath"`
-	EntryID      string `json:"entryId,omitempty"`
-	FileSize     int64  `json:"fileSize,omitempty"`
-	ModifiedAt   string `json:"modifiedAt,omitempty"`
+	RelativePath   string `json:"relativePath"`
+	SharedFolderID string `json:"sharedFolderId,omitempty"`
+	EntryID        string `json:"entryId,omitempty"`
+	FileSize       int64  `json:"fileSize,omitempty"`
+	ModifiedAt     string `json:"modifiedAt,omitempty"`
 }
 
 type SharedThumbnailResult struct {
-	RelativePath  string `json:"relativePath"`
-	Status        string `json:"status"`
-	MimeType      string `json:"mimeType,omitempty"`
-	ThumbnailMime string `json:"thumbnailMime,omitempty"`
-	Payload       string `json:"payload,omitempty"`
-	Error         string `json:"error,omitempty"`
+	SharedFolderID string `json:"sharedFolderId,omitempty"`
+	RelativePath   string `json:"relativePath"`
+	Status         string `json:"status"`
+	MimeType       string `json:"mimeType,omitempty"`
+	ThumbnailMime  string `json:"thumbnailMime,omitempty"`
+	Payload        string `json:"payload,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // SharedEntriesPage keeps large shared folders responsive. Offsets refer to
@@ -267,16 +284,17 @@ type SharedEntriesPage struct {
 }
 
 type SharedTransfer struct {
-	TransferID   string `json:"transferId"`
-	DeviceID     string `json:"deviceId"`
-	RelativePath string `json:"relativePath"`
-	FileName     string `json:"fileName"`
-	FileSize     int64  `json:"fileSize"`
-	Transferred  int64  `json:"transferred"`
-	Status       string `json:"status"`
-	Direction    string `json:"direction"`
-	TargetPath   string `json:"targetPath"`
-	ErrorMessage string `json:"errorMessage,omitempty"`
+	TransferID     string `json:"transferId"`
+	DeviceID       string `json:"deviceId"`
+	SharedFolderID string `json:"sharedFolderId,omitempty"`
+	RelativePath   string `json:"relativePath"`
+	FileName       string `json:"fileName"`
+	FileSize       int64  `json:"fileSize"`
+	Transferred    int64  `json:"transferred"`
+	Status         string `json:"status"`
+	Direction      string `json:"direction"`
+	TargetPath     string `json:"targetPath"`
+	ErrorMessage   string `json:"errorMessage,omitempty"`
 }
 
 type DiagnosticItem struct {
@@ -357,9 +375,11 @@ type wireMessage struct {
 	AvailableBytes      int64                    `json:"availableBytes,omitempty"`
 	RequiredBytes       int64                    `json:"requiredBytes,omitempty"`
 	RelativePath        string                   `json:"relativePath,omitempty"`
+	SharedFolderID      string                   `json:"sharedFolderId,omitempty"`
 	TransferID          string                   `json:"transferId,omitempty"`
 	Offset              int64                    `json:"offset,omitempty"`
 	Entries             []SharedEntry            `json:"entries,omitempty"`
+	SharedFolders       []SharedFolder           `json:"sharedFolders,omitempty"`
 	ListOffset          int                      `json:"listOffset,omitempty"`
 	ListLimit           int                      `json:"listLimit,omitempty"`
 	ShowHiddenFiles     bool                     `json:"showHiddenFiles,omitempty"`

@@ -30,6 +30,14 @@ type profileRow struct {
 	LaunchAtStartup        int    `orm:"launch_at_startup"`
 }
 
+type sharedFolderRow struct {
+	ID        string `orm:"id"`
+	RootPath  string `orm:"root_path"`
+	Name      string `orm:"name"`
+	CreatedAt string `orm:"created_at"`
+	UpdatedAt string `orm:"updated_at"`
+}
+
 type identityRow struct {
 	DeviceID               string `orm:"device_id"`
 	PublicKeyPEM           string `orm:"public_key_pem"`
@@ -180,6 +188,9 @@ func GetProfile(ctx context.Context) (Profile, error) {
 	}
 	row := rows[0]
 	profile := Profile{Nickname: NormalizeNickname(row.Nickname), AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Discoverable: row.Discoverable != 0, AutoSave: row.AutoSave != 0, FileSavePath: row.FileSavePath, SharedRootPath: row.SharedRootPath, SharedEnabled: row.SharedEnabled != 0, SharedDriveMultiWindow: row.SharedDriveMultiWindow != 0, ShowHiddenFiles: row.ShowHiddenFiles != 0, DirectoryOpenMode: normalizeDirectoryOpenMode(row.DirectoryOpenMode), Theme: row.Theme, LaunchAtStartup: row.LaunchAtStartup != 0}
+	if err := MigrateLegacySharedFolder(ctx, profile.SharedRootPath); err != nil {
+		return Profile{}, err
+	}
 	if strings.TrimSpace(profile.Nickname) == "" || strings.TrimSpace(profile.Nickname) == "新用户" {
 		profile.Nickname = randomChineseNickname()
 		if err := SaveProfile(ctx, profile); err != nil {
@@ -203,6 +214,130 @@ func GetProfile(ctx context.Context) (Profile, error) {
 		}
 	}
 	return profile, nil
+}
+
+func sharedFolderFromRow(row sharedFolderRow) SharedFolder {
+	return SharedFolder{ID: row.ID, Name: row.Name, RootPath: filepath.Clean(row.RootPath), UpdatedAt: row.UpdatedAt}
+}
+
+func ListSharedFolders(ctx context.Context) ([]SharedFolder, error) {
+	result, err := query(ctx, `SELECT id, root_path, name, created_at, updated_at FROM shared_folders ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	var rows []sharedFolderRow
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	folders := make([]SharedFolder, 0, len(rows))
+	for _, row := range rows {
+		folders = append(folders, sharedFolderFromRow(row))
+	}
+	return folders, nil
+}
+
+func GetSharedFolder(ctx context.Context, id string) (SharedFolder, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return SharedFolder{}, fmt.Errorf("共享文件夹 ID 不能为空")
+	}
+	result, err := query(ctx, `SELECT id, root_path, name, created_at, updated_at FROM shared_folders WHERE id=? LIMIT 1`, id)
+	if err != nil {
+		return SharedFolder{}, err
+	}
+	var rows []sharedFolderRow
+	if err := result.Structs(&rows); err != nil {
+		return SharedFolder{}, err
+	}
+	if len(rows) == 0 {
+		return SharedFolder{}, fmt.Errorf("共享文件夹不存在")
+	}
+	return sharedFolderFromRow(rows[0]), nil
+}
+
+// MigrateLegacySharedFolder is idempotent and is called while loading the
+// profile, so an old single-root database gets one record without a second
+// application-specific migration runner.
+func MigrateLegacySharedFolder(ctx context.Context, legacyPath string) error {
+	legacyPath = strings.TrimSpace(legacyPath)
+	if legacyPath == "" {
+		return nil
+	}
+	root, err := ValidateSharedRoot(legacyPath)
+	if err != nil {
+		return nil
+	}
+	now := nowString()
+	return exec(ctx, `INSERT OR IGNORE INTO shared_folders(id, root_path, name, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?)`, newID(), root, filepath.Base(root), now, now)
+}
+
+func AddSharedFolder(ctx context.Context, rootPath string) (SharedFolder, error) {
+	root, err := ValidateSharedRoot(rootPath)
+	if err != nil {
+		return SharedFolder{}, fmt.Errorf("共享目录不可用")
+	}
+	name := filepath.Base(root)
+	if name == "" || name == string(filepath.Separator) {
+		name = root
+	}
+	now := nowString()
+	id := newID()
+	if err := exec(ctx, `INSERT INTO shared_folders(id, root_path, name, created_at, updated_at) VALUES(?, ?, ?, ?, ?)`, id, root, name, now, now); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return SharedFolder{}, fmt.Errorf("该目录已经添加")
+		}
+		return SharedFolder{}, err
+	}
+	return SharedFolder{ID: id, Name: name, RootPath: root, UpdatedAt: now}, nil
+}
+
+func RemoveSharedFolder(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("共享文件夹 ID 不能为空")
+	}
+	folder, err := GetSharedFolder(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := exec(ctx, `DELETE FROM shared_folders WHERE id=?`, id); err != nil {
+		return err
+	}
+	rows, err := query(ctx, `SELECT id FROM shared_folders WHERE id=? LIMIT 1`, id)
+	if err != nil {
+		return err
+	}
+	var remaining []struct {
+		ID string `orm:"id"`
+	}
+	if err := rows.Structs(&remaining); err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("共享文件夹删除失败")
+	}
+	// Keep the legacy profile field as a compatibility mirror, but never let it
+	// resurrect a folder that was explicitly removed from the new table.
+	var profileRows []struct {
+		SharedRootPath string `orm:"shared_root_path"`
+	}
+	profileResult, err := query(ctx, `SELECT shared_root_path FROM profiles WHERE id=1 LIMIT 1`)
+	if err != nil {
+		return err
+	}
+	if err := profileResult.Structs(&profileRows); err != nil {
+		return err
+	}
+	if len(profileRows) > 0 {
+		legacyRoot, rootErr := ValidateSharedRoot(profileRows[0].SharedRootPath)
+		if rootErr == nil && legacyRoot == folder.RootPath {
+			if err := exec(ctx, `UPDATE profiles SET shared_root_path='', updated_at=? WHERE id=1`, nowString()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func migrateLegacyAttachmentPath(path string) string {

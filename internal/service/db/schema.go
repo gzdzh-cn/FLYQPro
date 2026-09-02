@@ -28,6 +28,14 @@ var schemaStatements = []string{
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS shared_folders (
+		id TEXT PRIMARY KEY,
+		root_path TEXT NOT NULL UNIQUE,
+		name TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_shared_folders_created_at ON shared_folders(created_at, id)`,
 	`CREATE TABLE IF NOT EXISTS device_identity (
 		id INTEGER PRIMARY KEY CHECK(id = 1),
 		device_id TEXT NOT NULL UNIQUE,

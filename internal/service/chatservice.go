@@ -38,11 +38,24 @@ type sharedStatsState struct {
 	cancel      context.CancelFunc
 }
 
+type sharedFolderStats struct {
+	root        string
+	fileCount   int
+	folderCount int
+	available   uint64
+	updatedAt   string
+	loading     bool
+	ready       bool
+}
+
 type ChatService struct {
 	engine *chat.Engine
 
-	sharedStatsMu sync.Mutex
-	sharedStats   sharedStatsState
+	sharedStatsMu           sync.Mutex
+	sharedStats             sharedStatsState
+	sharedFolderStats       map[string]sharedFolderStats
+	sharedFoldersCancel     context.CancelFunc
+	sharedFoldersGeneration uint64
 
 	sharedThumbnailStore *sharedThumbnailStore
 	remoteThumbnailCache *remoteThumbnailCache
@@ -56,6 +69,7 @@ func NewChatService() *ChatService {
 		sharedThumbnailStore: newSharedThumbnailStore(),
 		remoteThumbnailCache: newRemoteThumbnailCache(),
 		sharedThumbnailStop:  make(chan struct{}),
+		sharedFolderStats:    make(map[string]sharedFolderStats),
 	}
 	service.engine.SetSharedThumbnailProvider(func(root, relativePath string) (string, string, error) {
 		entry, path, err := chat.GetSharedEntry(root, relativePath, false)
@@ -83,6 +97,16 @@ func NewChatService() *ChatService {
 			return "", "", fmt.Errorf("缩略图缓存不存在")
 		}
 		return base64.StdEncoding.EncodeToString(data), thumbnailMime, nil
+	})
+	service.engine.SetSharedFoldersProvider(func() ([]chat.SharedFolder, error) {
+		folders, err := service.ListSharedFolders()
+		if err != nil {
+			return nil, err
+		}
+		for index := range folders {
+			folders[index].RootPath = ""
+		}
+		return folders, nil
 	})
 	return service
 }
@@ -112,6 +136,11 @@ func (s *ChatService) Stop() {
 	s.sharedStats.generation++
 	s.sharedStats.cancel = nil
 	s.sharedStats.loading = false
+	if s.sharedFoldersCancel != nil {
+		s.sharedFoldersCancel()
+	}
+	s.sharedFoldersCancel = nil
+	s.sharedFoldersGeneration++
 	s.sharedStatsMu.Unlock()
 	s.engine.Stop()
 }
@@ -156,11 +185,14 @@ func (s *ChatService) UpdateProfile(profile chat.Profile) (chat.Profile, error) 
 		profile.FileSavePath = chat.DefaultAttachmentDir()
 	}
 	if profile.SharedEnabled {
-		root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+		folders, err := chat.ListSharedFolders(gctx.New())
 		if err != nil {
-			return chat.Profile{}, fmt.Errorf("共享目录不可用")
+			return chat.Profile{}, err
 		}
-		profile.SharedRootPath = root
+		if len(folders) == 0 {
+			return chat.Profile{}, fmt.Errorf("请先添加有效的共享文件夹")
+		}
+		profile.SharedRootPath = folders[0].RootPath
 	}
 	if s.engine.IsAttachmentMigrationActive() {
 		current := s.engine.Profile()
@@ -270,52 +302,62 @@ func (s *ChatService) SetTheme(theme string) (chat.Profile, error) {
 }
 
 func (s *ChatService) GetSharedFolderSettings() (chat.SharedFolderStatus, error) {
+	return s.GetSharedFoldersStatus()
+}
+
+// ListSharedFolders returns local folder configuration and its current cached
+// statistics. Directory walking is started in the background by the status
+// call, so opening the settings or shared window never waits for a scan.
+func (s *ChatService) ListSharedFolders() ([]chat.SharedFolder, error) {
+	status, err := s.GetSharedFoldersStatus()
+	return status.Folders, err
+}
+
+func (s *ChatService) GetSharedFoldersStatus() (chat.SharedFolderStatus, error) {
 	profile, err := chat.GetProfile(gctx.New())
 	if err != nil {
 		return chat.SharedFolderStatus{}, err
 	}
-	status := chat.SharedFolderStatus{SharedFolderSettings: chat.SharedFolderSettings{Enabled: profile.SharedEnabled, RootPath: profile.SharedRootPath}, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	if strings.TrimSpace(profile.SharedRootPath) == "" {
-		status.Enabled = false
-		s.clearSharedStats()
-		return status, nil
+	folders, err := chat.ListSharedFolders(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
 	}
-	root, rootErr := chat.ValidateSharedRoot(profile.SharedRootPath)
-	if rootErr != nil {
+	if len(folders) == 0 {
 		if profile.SharedEnabled {
 			profile.SharedEnabled = false
 			if saveErr := chat.SaveProfile(gctx.New(), profile); saveErr == nil {
 				s.engine.UpdateProfile(profile)
 			}
 		}
-		status.Enabled = false
-		s.clearSharedStats()
-		return status, nil
+		s.clearSharedFolderStats()
+		return s.sharedFoldersStatus(profile, folders), nil
 	}
-	s.startSharedStats(root, false)
-	return s.sharedStatus(profile, root), nil
+	s.startSharedFoldersStats(folders, false, profile.ShowHiddenFiles)
+	return s.sharedFoldersStatus(profile, folders), nil
 }
 
-// RefreshSharedStats explicitly recomputes the local shared-drive statistics.
-// Settings that change the counting scope, such as hidden-file visibility,
-// use this instead of waiting for the normal cached result.
+// RefreshSharedStats explicitly recomputes all local shared-folder statistics.
 func (s *ChatService) RefreshSharedStats(force bool) (chat.SharedFolderStatus, error) {
 	profile, err := chat.GetProfile(gctx.New())
 	if err != nil {
 		return chat.SharedFolderStatus{}, err
 	}
-	rootPath := strings.TrimSpace(profile.SharedRootPath)
-	if rootPath == "" {
-		s.clearSharedStats()
-		return s.sharedStatus(profile, ""), nil
-	}
-	root, err := chat.ValidateSharedRoot(rootPath)
+	folders, err := chat.ListSharedFolders(gctx.New())
 	if err != nil {
-		s.clearSharedStats()
-		return s.sharedStatus(profile, rootPath), nil
+		return chat.SharedFolderStatus{}, err
 	}
-	s.startSharedStats(root, force)
-	return s.sharedStatus(profile, root), nil
+	if len(folders) == 0 {
+		if profile.SharedEnabled {
+			profile.SharedEnabled = false
+			if saveErr := chat.SaveProfile(gctx.New(), profile); saveErr == nil {
+				s.engine.UpdateProfile(profile)
+			}
+		}
+		s.clearSharedFolderStats()
+		return s.sharedFoldersStatus(profile, folders), nil
+	}
+	s.startSharedFoldersStats(folders, force, profile.ShowHiddenFiles)
+	return s.sharedFoldersStatus(profile, folders), nil
 }
 
 func sharedRootCounts(root string) (files, folders int) {
@@ -449,6 +491,145 @@ func (s *ChatService) startSharedStats(root string, force bool) {
 	}()
 }
 
+func (s *ChatService) clearSharedFolderStats() {
+	s.sharedStatsMu.Lock()
+	if s.sharedFoldersCancel != nil {
+		s.sharedFoldersCancel()
+	}
+	s.sharedFoldersCancel = nil
+	s.sharedFoldersGeneration++
+	s.sharedFolderStats = make(map[string]sharedFolderStats)
+	s.sharedStatsMu.Unlock()
+}
+
+func (s *ChatService) startSharedFoldersStats(folders []chat.SharedFolder, force, showHidden bool) {
+	s.sharedStatsMu.Lock()
+	if s.sharedFolderStats == nil {
+		s.sharedFolderStats = make(map[string]sharedFolderStats)
+	}
+	if s.sharedFoldersCancel != nil {
+		s.sharedFoldersCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.sharedFoldersCancel = cancel
+	s.sharedFoldersGeneration++
+	generation := s.sharedFoldersGeneration
+	active := make(map[string]chat.SharedFolder, len(folders))
+	for _, folder := range folders {
+		root := filepath.Clean(folder.RootPath)
+		active[folder.ID] = folder
+		current, exists := s.sharedFolderStats[folder.ID]
+		if !force && exists && current.root == root && (current.ready || current.loading) {
+			continue
+		}
+		s.sharedFolderStats[folder.ID] = sharedFolderStats{root: root, fileCount: current.fileCount, folderCount: current.folderCount, available: current.available, updatedAt: current.updatedAt, loading: true, ready: current.ready}
+	}
+	for id := range s.sharedFolderStats {
+		if _, ok := active[id]; !ok {
+			delete(s.sharedFolderStats, id)
+		}
+	}
+	s.sharedStatsMu.Unlock()
+
+	for _, folder := range folders {
+		folder := folder
+		root, err := chat.ValidateSharedRoot(folder.RootPath)
+		if err != nil {
+			s.finishSharedFolderStats(folder.ID, filepath.Clean(folder.RootPath), generation, 0, 0, 0, false, true)
+			continue
+		}
+		go func() {
+			files, subfolders := sharedRootCountsProgressContext(ctx, root, nil, showHidden)
+			if ctx.Err() != nil {
+				return
+			}
+			var available uint64
+			if value, diskErr := chat.AvailableDiskBytes(root); diskErr == nil && value >= 0 {
+				available = uint64(value)
+			}
+			s.finishSharedFolderStats(folder.ID, root, generation, files, subfolders, available, true, false)
+		}()
+	}
+}
+
+func (s *ChatService) finishSharedFolderStats(id, root string, generation uint64, files, folders int, available uint64, ready, unavailable bool) {
+	s.sharedStatsMu.Lock()
+	stats, ok := s.sharedFolderStats[id]
+	if !ok || generation != s.sharedFoldersGeneration || stats.root != filepath.Clean(root) {
+		s.sharedStatsMu.Unlock()
+		return
+	}
+	stats.fileCount = files
+	stats.folderCount = folders
+	stats.available = available
+	stats.updatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	stats.loading = !ready && !unavailable
+	stats.ready = ready
+	s.sharedFolderStats[id] = stats
+	s.sharedStatsMu.Unlock()
+	if ready || unavailable {
+		s.emitSharedFoldersStatus()
+	}
+}
+
+func (s *ChatService) emitSharedFoldersStatus() {
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return
+	}
+	folders, err := chat.ListSharedFolders(gctx.New())
+	if err != nil {
+		return
+	}
+	if app := application.Get(); app != nil {
+		app.Event.Emit("chat:shared-stats-updated", s.sharedFoldersStatus(profile, folders))
+	}
+}
+
+func (s *ChatService) sharedFoldersStatus(profile chat.Profile, folders []chat.SharedFolder) chat.SharedFolderStatus {
+	status := chat.SharedFolderStatus{SharedFolderSettings: chat.SharedFolderSettings{Enabled: profile.SharedEnabled}, Folders: make([]chat.SharedFolder, 0, len(folders)), UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	var latest string
+	s.sharedStatsMu.Lock()
+	for _, folder := range folders {
+		item := folder
+		item.RootPath = filepath.Clean(folder.RootPath)
+		stats := s.sharedFolderStats[folder.ID]
+		item.FileCount = stats.fileCount
+		item.FolderCount = stats.folderCount
+		item.StatsReady = stats.ready
+		item.StatsLoading = stats.loading || (!stats.ready && stats.root != "")
+		if stats.updatedAt != "" {
+			item.UpdatedAt = stats.updatedAt
+			if stats.updatedAt > latest {
+				latest = stats.updatedAt
+			}
+		}
+		status.FileCount += item.FileCount
+		status.FolderCount += item.FolderCount
+		status.AvailableBytes += stats.available
+		status.Folders = append(status.Folders, item)
+	}
+	s.sharedStatsMu.Unlock()
+	if len(status.Folders) > 0 {
+		status.RootPath = status.Folders[0].RootPath
+	}
+	status.StatsLoading = false
+	status.StatsReady = len(status.Folders) > 0
+	for _, folder := range status.Folders {
+		if folder.StatsLoading {
+			status.StatsLoading = true
+		}
+		if !folder.StatsReady {
+			status.StatsReady = false
+		}
+	}
+	if latest != "" {
+		status.StatsUpdatedAt = latest
+		status.UpdatedAt = latest
+	}
+	return status
+}
+
 func (s *ChatService) sharedStatus(profile chat.Profile, root string) chat.SharedFolderStatus {
 	status := chat.SharedFolderStatus{
 		SharedFolderSettings: chat.SharedFolderSettings{Enabled: profile.SharedEnabled, RootPath: profile.SharedRootPath},
@@ -473,26 +654,57 @@ func (s *ChatService) sharedStatus(profile chat.Profile, root string) chat.Share
 }
 
 func (s *ChatService) SetSharedFolder(path string, enabled bool) (chat.SharedFolderStatus, error) {
-	path = filepath.Clean(strings.TrimSpace(path))
-	if path == "." || path == "" {
-		return chat.SharedFolderStatus{}, fmt.Errorf("共享目录不能为空")
+	if _, err := s.AddSharedFolder(path); err != nil {
+		return chat.SharedFolderStatus{}, err
 	}
-	root, err := chat.ValidateSharedRoot(path)
+	return s.SetSharedEnabled(enabled)
+}
+
+func (s *ChatService) AddSharedFolder(path string) (chat.SharedFolder, error) {
+	folder, err := chat.AddSharedFolder(gctx.New(), path)
 	if err != nil {
-		return chat.SharedFolderStatus{}, fmt.Errorf("共享目录不可用")
+		return chat.SharedFolder{}, err
 	}
 	profile, err := chat.GetProfile(gctx.New())
 	if err != nil {
-		return chat.SharedFolderStatus{}, err
+		return chat.SharedFolder{}, err
 	}
-	profile.SharedRootPath = root
-	profile.SharedEnabled = enabled
+	if strings.TrimSpace(profile.SharedRootPath) == "" {
+		profile.SharedRootPath = folder.RootPath
+		if err := chat.SaveProfile(gctx.New(), profile); err != nil {
+			return chat.SharedFolder{}, err
+		}
+		s.engine.UpdateProfile(profile)
+	}
+	return folder, nil
+}
+
+func (s *ChatService) RemoveSharedFolder(folderID string) error {
+	if err := chat.RemoveSharedFolder(gctx.New(), folderID); err != nil {
+		return err
+	}
+	folders, err := chat.ListSharedFolders(gctx.New())
+	if err != nil {
+		return err
+	}
+	profile, err := chat.GetProfile(gctx.New())
+	if err != nil {
+		return err
+	}
+	profile.SharedRootPath = ""
+	if len(folders) > 0 {
+		profile.SharedRootPath = folders[0].RootPath
+	} else {
+		profile.SharedEnabled = false
+	}
 	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
-		return chat.SharedFolderStatus{}, err
+		return err
 	}
 	s.engine.UpdateProfile(profile)
-	s.startSharedStats(root, true)
-	return s.sharedStatus(profile, root), nil
+	if len(folders) == 0 {
+		s.clearSharedFolderStats()
+	}
+	return nil
 }
 
 func (s *ChatService) SetSharedEnabled(enabled bool) (chat.SharedFolderStatus, error) {
@@ -500,17 +712,12 @@ func (s *ChatService) SetSharedEnabled(enabled bool) (chat.SharedFolderStatus, e
 	if err != nil {
 		return chat.SharedFolderStatus{}, err
 	}
-	root := ""
-	if strings.TrimSpace(profile.SharedRootPath) != "" {
-		validatedRoot, validateErr := chat.ValidateSharedRoot(profile.SharedRootPath)
-		if validateErr != nil {
-			if enabled {
-				return chat.SharedFolderStatus{}, fmt.Errorf("请先选择有效的共享目录")
-			}
-			s.clearSharedStats()
-		} else {
-			root = validatedRoot
-		}
+	folders, err := chat.ListSharedFolders(gctx.New())
+	if err != nil {
+		return chat.SharedFolderStatus{}, err
+	}
+	if enabled && len(folders) == 0 {
+		return chat.SharedFolderStatus{}, fmt.Errorf("请先添加有效的共享文件夹")
 	}
 	profile.SharedEnabled = enabled
 	if err := chat.SaveProfile(gctx.New(), profile); err != nil {
@@ -519,7 +726,7 @@ func (s *ChatService) SetSharedEnabled(enabled bool) (chat.SharedFolderStatus, e
 	s.engine.UpdateProfile(profile)
 	// Changing access permission does not change the directory contents. Keep
 	// the existing stats scan/result and avoid restarting an expensive walk.
-	return s.sharedStatus(profile, root), nil
+	return s.sharedFoldersStatus(profile, folders), nil
 }
 
 func (s *ChatService) DisableSharedFolder() error {
@@ -527,14 +734,35 @@ func (s *ChatService) DisableSharedFolder() error {
 	return err
 }
 
-func (s *ChatService) ListSharedEntries(relativePath string) ([]chat.SharedEntry, error) {
-	profile := s.engine.Profile()
-	return chat.ListSharedEntries(profile.SharedRootPath, relativePath, profile.ShowHiddenFiles)
+func localSharedFolder(folderID string) (chat.SharedFolder, error) {
+	folder, err := chat.GetSharedFolder(gctx.New(), strings.TrimSpace(folderID))
+	if err != nil {
+		return chat.SharedFolder{}, err
+	}
+	root, err := chat.ValidateSharedRoot(folder.RootPath)
+	if err != nil {
+		return chat.SharedFolder{}, fmt.Errorf("共享目录不可用")
+	}
+	folder.RootPath = root
+	return folder, nil
 }
 
-func (s *ChatService) ListSharedEntriesPage(relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
+func (s *ChatService) ListSharedEntries(folderID, relativePath string) ([]chat.SharedEntry, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return nil, err
+	}
 	profile := s.engine.Profile()
-	page, err := chat.ListSharedEntriesPage(profile.SharedRootPath, relativePath, offset, limit, profile.ShowHiddenFiles)
+	return chat.ListSharedEntries(folder.RootPath, relativePath, profile.ShowHiddenFiles)
+}
+
+func (s *ChatService) ListSharedEntriesPage(folderID, relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return chat.SharedEntriesPage{}, err
+	}
+	profile := s.engine.Profile()
+	page, err := chat.ListSharedEntriesPage(folder.RootPath, relativePath, offset, limit, profile.ShowHiddenFiles)
 	if err == nil {
 		// Reconcile missing files in the background. The directory listing stays
 		// fast, while deleted source files eventually release their thumbnails.
@@ -543,9 +771,12 @@ func (s *ChatService) ListSharedEntriesPage(relativePath string, offset, limit i
 	return page, err
 }
 
-func (s *ChatService) GetSharedEntryDetails(relativePath string) (chat.SharedEntry, error) {
-	profile := s.engine.Profile()
-	entry, _, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, true)
+func (s *ChatService) GetSharedEntryDetails(folderID, relativePath string) (chat.SharedEntry, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return chat.SharedEntry{}, err
+	}
+	entry, _, err := chat.GetSharedEntry(folder.RootPath, relativePath, true)
 	return entry, err
 }
 
@@ -560,9 +791,12 @@ func sharedPreviewMime(entry chat.SharedEntry) string {
 	return ""
 }
 
-func (s *ChatService) GetSharedEntryPreview(relativePath string) (string, error) {
-	profile := s.engine.Profile()
-	entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) GetSharedEntryPreview(folderID, relativePath string) (string, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return "", err
+	}
+	entry, path, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return "", err
 	}
@@ -582,9 +816,12 @@ func (s *ChatService) GetSharedEntryPreview(relativePath string) (string, error)
 
 // GetSharedEntryThumbnail returns a small image-only preview for the shared
 // grid. The original file is intentionally not read into the webview.
-func (s *ChatService) GetSharedEntryThumbnail(relativePath string) (string, error) {
-	profile := s.engine.Profile()
-	entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) GetSharedEntryThumbnail(folderID, relativePath string) (string, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return "", err
+	}
+	entry, path, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return "", err
 	}
@@ -595,13 +832,13 @@ func (s *ChatService) GetSharedEntryThumbnail(relativePath string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	cachePath, thumbnailMime, cached := s.sharedThumbnailStore.cached(profile.SharedRootPath, entry.RelativePath, entry.MimeType, info)
+	cachePath, thumbnailMime, cached := s.sharedThumbnailStore.cached(folder.RootPath, entry.RelativePath, entry.MimeType, info)
 	if !cached {
 		// Queue generation and return immediately. This is important for large
 		// JPEG/PNG files: the UI must be able to show a stable placeholder while
 		// the background worker creates the thumbnail.
 		go func() {
-			_, _, _ = s.sharedThumbnailStore.getOrCreate(profile.SharedRootPath, entry.RelativePath, entry.MimeType, info)
+			_, _, _ = s.sharedThumbnailStore.getOrCreate(folder.RootPath, entry.RelativePath, entry.MimeType, info)
 		}()
 		return "", nil
 	}
@@ -623,18 +860,24 @@ func generateSharedThumbnail(root, relativePath, mimeType string) ([]byte, strin
 	return data, thumbnailMime, nil
 }
 
-func (s *ChatService) OpenSharedEntry(relativePath string) error {
-	profile := s.engine.Profile()
-	_, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) OpenSharedEntry(folderID, relativePath string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	_, path, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return err
 	}
 	return runAttachmentCommand("open", path)
 }
 
-func (s *ChatService) RevealSharedEntry(relativePath string) error {
-	profile := s.engine.Profile()
-	_, path, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) RevealSharedEntry(folderID, relativePath string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	_, path, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return err
 	}
@@ -651,9 +894,12 @@ func (s *ChatService) RevealSharedEntry(relativePath string) error {
 // DownloadSharedEntry copies a locally shared file into the default shared
 // download directory. It is used by the shared image viewer for owner-mode
 // previews, where there is no remote transfer to start.
-func (s *ChatService) DownloadSharedEntry(relativePath string) (string, error) {
-	profile := s.engine.Profile()
-	entry, source, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) DownloadSharedEntry(folderID, relativePath string) (string, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return "", err
+	}
+	entry, source, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return "", err
 	}
@@ -673,9 +919,12 @@ func (s *ChatService) DownloadSharedEntry(relativePath string) (string, error) {
 
 // SaveSharedEntryAs copies a locally shared file to a path selected by the
 // user. The empty result means the native save dialog was canceled.
-func (s *ChatService) SaveSharedEntryAs(relativePath string) (string, error) {
-	profile := s.engine.Profile()
-	entry, source, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+func (s *ChatService) SaveSharedEntryAs(folderID, relativePath string) (string, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return "", err
+	}
+	entry, source, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return "", err
 	}
@@ -766,58 +1015,82 @@ func sharedServicePathWithin(root, target string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func (s *ChatService) CreateSharedFolder(relativePath, name string) (chat.SharedEntry, error) {
+func (s *ChatService) CreateSharedFolder(folderID, relativePath, name string) (chat.SharedEntry, error) {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return chat.SharedEntry{}, err
+	}
+	return chat.CreateSharedFolder(folder.RootPath, relativePath, name)
+}
+
+func (s *ChatService) RenameSharedEntry(folderID, relativePath, newName string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	return chat.RenameSharedEntry(folder.RootPath, relativePath, newName)
+}
+
+func (s *ChatService) MoveSharedEntry(folderID, relativePath, targetDirectory string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	return chat.MoveSharedEntry(folder.RootPath, relativePath, targetDirectory)
+}
+
+func (s *ChatService) CopySharedEntry(folderID, relativePath, targetDirectory string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	return chat.CopySharedEntry(folder.RootPath, relativePath, targetDirectory)
+}
+
+func (s *ChatService) DeleteSharedEntry(folderID, relativePath string) error {
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	return chat.DeleteSharedEntry(folder.RootPath, relativePath)
+}
+
+func (s *ChatService) ListFriendSharedFolders(deviceID string) ([]chat.SharedFolder, error) {
+	return s.engine.ListFriendSharedFolders(gctx.New(), strings.TrimSpace(deviceID))
+}
+
+func (s *ChatService) ListFriendSharedEntries(deviceID, folderID, relativePath string) ([]chat.SharedEntry, error) {
+	if strings.TrimSpace(folderID) == "" {
+		return nil, fmt.Errorf("共享文件夹 ID 不能为空")
+	}
+	page, err := s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath, 0, 100, s.engine.Profile().ShowHiddenFiles)
+	return page.Entries, err
+}
+
+func (s *ChatService) ListFriendSharedEntriesPage(deviceID, folderID, relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
 	profile := s.engine.Profile()
-	return chat.CreateSharedFolder(profile.SharedRootPath, relativePath, name)
+	return s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath, offset, limit, profile.ShowHiddenFiles)
 }
 
-func (s *ChatService) RenameSharedEntry(relativePath, newName string) error {
-	profile := s.engine.Profile()
-	return chat.RenameSharedEntry(profile.SharedRootPath, relativePath, newName)
+func (s *ChatService) GetFriendSharedEntryPreview(deviceID, folderID, relativePath string) (string, error) {
+	return s.engine.GetFriendSharedEntryPreview(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath)
 }
 
-func (s *ChatService) MoveSharedEntry(relativePath, targetDirectory string) error {
-	profile := s.engine.Profile()
-	return chat.MoveSharedEntry(profile.SharedRootPath, relativePath, targetDirectory)
-}
-
-func (s *ChatService) CopySharedEntry(relativePath, targetDirectory string) error {
-	profile := s.engine.Profile()
-	return chat.CopySharedEntry(profile.SharedRootPath, relativePath, targetDirectory)
-}
-
-func (s *ChatService) DeleteSharedEntry(relativePath string) error {
-	profile := s.engine.Profile()
-	return chat.DeleteSharedEntry(profile.SharedRootPath, relativePath)
-}
-
-func (s *ChatService) ListFriendSharedEntries(deviceID, relativePath string) ([]chat.SharedEntry, error) {
-	return s.engine.ListFriendSharedEntries(gctx.New(), strings.TrimSpace(deviceID), relativePath)
-}
-
-func (s *ChatService) ListFriendSharedEntriesPage(deviceID, relativePath string, offset, limit int) (chat.SharedEntriesPage, error) {
-	profile := s.engine.Profile()
-	return s.engine.ListFriendSharedEntriesPage(gctx.New(), strings.TrimSpace(deviceID), relativePath, offset, limit, profile.ShowHiddenFiles)
-}
-
-func (s *ChatService) GetFriendSharedEntryPreview(deviceID, relativePath string) (string, error) {
-	return s.engine.GetFriendSharedEntryPreview(gctx.New(), strings.TrimSpace(deviceID), relativePath)
-}
-
-func (s *ChatService) GetFriendSharedEntryThumbnail(deviceID, relativePath string) (string, error) {
-	return s.engine.GetFriendSharedEntryThumbnail(gctx.New(), strings.TrimSpace(deviceID), relativePath)
+func (s *ChatService) GetFriendSharedEntryThumbnail(deviceID, folderID, relativePath string) (string, error) {
+	return s.engine.GetFriendSharedEntryThumbnail(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath)
 }
 
 // GetFriendSharedEntryThumbnailCached serves the desktop-side cached preview
 // when the shared-drive list has already fetched it.  A cache miss is still a
 // single bounded request; the Android side may return an empty payload while
 // generating the thumbnail, so the viewer never waits for generation.
-func (s *ChatService) GetFriendSharedEntryThumbnailCached(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) (string, error) {
+func (s *ChatService) GetFriendSharedEntryThumbnailCached(deviceID, folderID, relativePath, entryID string, fileSize int64, modifiedAt string) (string, error) {
 	request := chat.SharedThumbnailRequest{
-		RelativePath: relativePath,
-		EntryID:      entryID,
-		FileSize:     fileSize,
-		ModifiedAt:   modifiedAt,
+		RelativePath:   relativePath,
+		SharedFolderID: folderID,
+		EntryID:        entryID,
+		FileSize:       fileSize,
+		ModifiedAt:     modifiedAt,
 	}
 	results, err := s.GetFriendSharedEntryThumbnails(deviceID, []chat.SharedThumbnailRequest{request})
 	if err != nil || len(results) == 0 || results[0].Status != "ready" || results[0].Payload == "" {
@@ -854,8 +1127,8 @@ func (s *ChatService) GetFriendSharedEntryThumbnails(deviceID string, requests [
 	if err != nil && canFallbackSharedThumbnailBatch(err) {
 		remote = make([]chat.SharedThumbnailResult, 0, len(misses))
 		for _, request := range misses {
-			url, singleErr := s.engine.GetFriendSharedEntryThumbnail(gctx.New(), deviceID, request.RelativePath)
-			result := chat.SharedThumbnailResult{RelativePath: request.RelativePath, Status: "pending"}
+			url, singleErr := s.engine.GetFriendSharedEntryThumbnail(gctx.New(), deviceID, request.SharedFolderID, request.RelativePath)
+			result := chat.SharedThumbnailResult{SharedFolderID: request.SharedFolderID, RelativePath: request.RelativePath, Status: "pending"}
 			if singleErr != nil {
 				result.Status = "unavailable"
 				result.Error = singleErr.Error()
@@ -875,9 +1148,12 @@ func (s *ChatService) GetFriendSharedEntryThumbnails(deviceID string, requests [
 	}
 	byPath := make(map[string]chat.SharedThumbnailResult, len(remote))
 	for index, result := range remote {
-		request := chat.SharedThumbnailRequest{RelativePath: result.RelativePath}
+		request := chat.SharedThumbnailRequest{SharedFolderID: result.SharedFolderID, RelativePath: result.RelativePath}
 		if index < len(misses) {
 			request = misses[index]
+		}
+		if result.SharedFolderID == "" {
+			result.SharedFolderID = request.SharedFolderID
 		}
 		if result.RelativePath == "" {
 			result.RelativePath = request.RelativePath
@@ -885,13 +1161,13 @@ func (s *ChatService) GetFriendSharedEntryThumbnails(deviceID string, requests [
 		if result.Status == "ready" && result.Payload != "" {
 			result = s.remoteThumbnailCache.put(deviceID, request, result)
 		}
-		byPath[result.RelativePath] = result
+		byPath[result.SharedFolderID+"\x00"+result.RelativePath] = result
 	}
 	for index, request := range requests {
 		if results[index].Status == "ready" {
 			continue
 		}
-		if result, ok := byPath[request.RelativePath]; ok {
+		if result, ok := byPath[request.SharedFolderID+"\x00"+request.RelativePath]; ok {
 			results[index] = result
 		}
 	}
@@ -916,21 +1192,21 @@ func canFallbackSharedThumbnailBatch(err error) bool {
 	return strings.Contains(message, "UNSUPPORTED") || strings.Contains(message, "超时") || strings.Contains(message, "TIMEOUT") || strings.Contains(message, "EOF") || strings.Contains(message, "响应") || strings.Contains(message, "连接")
 }
 
-func (s *ChatService) DownloadFriendSharedEntry(deviceID, relativePath string) (chat.SharedTransfer, error) {
+func (s *ChatService) DownloadFriendSharedEntry(deviceID, folderID, relativePath string) (chat.SharedTransfer, error) {
 	targetRoot := chat.DefaultSharedDownloadDir()
 	if err := os.MkdirAll(targetRoot, 0o700); err != nil {
 		return chat.SharedTransfer{}, err
 	}
-	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), relativePath, filepath.Join(targetRoot, filepath.Base(filepath.FromSlash(relativePath))))
+	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath, filepath.Join(targetRoot, filepath.Base(filepath.FromSlash(relativePath))))
 }
 
-func (s *ChatService) SaveFriendSharedEntryAs(deviceID, relativePath string) (chat.SharedTransfer, error) {
+func (s *ChatService) SaveFriendSharedEntryAs(deviceID, folderID, relativePath string) (chat.SharedTransfer, error) {
 	name := filepath.Base(filepath.FromSlash(relativePath))
 	result, err := application.Get().Dialog.SaveFile().SetMessage("请选择共享文件保存位置").SetFilename(name).PromptForSingleSelection()
 	if err != nil || strings.TrimSpace(result) == "" {
 		return chat.SharedTransfer{}, err
 	}
-	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), relativePath, filepath.Clean(result))
+	return s.engine.DownloadFriendSharedEntry(gctx.New(), strings.TrimSpace(deviceID), folderID, relativePath, filepath.Clean(result))
 }
 
 func (s *ChatService) CancelSharedTransfer(transferID string) error {
@@ -945,7 +1221,7 @@ func (s *ChatService) ResumeSharedTransfer(transferID string) (chat.SharedTransf
 	return s.engine.ResumeSharedTransfer(transferID)
 }
 
-func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string) (chat.SharedEntry, error) {
+func (s *ChatService) GetFriendSharedEntryDetails(deviceID, folderID, relativePath string) (chat.SharedEntry, error) {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." {
 		clean = ""
@@ -955,14 +1231,14 @@ func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string)
 		parent = ""
 	}
 	for offset := 0; ; {
-		page, err := s.ListFriendSharedEntriesPage(deviceID, parent, offset, 200)
+		page, err := s.ListFriendSharedEntriesPage(deviceID, folderID, parent, offset, 200)
 		if err != nil {
 			return chat.SharedEntry{}, err
 		}
 		for _, entry := range page.Entries {
 			if entry.RelativePath == clean {
 				if entry.IsDirectory {
-					size, err := s.friendSharedDirectorySize(deviceID, clean, 0)
+					size, err := s.friendSharedDirectorySize(deviceID, folderID, clean, 0)
 					if err != nil {
 						return chat.SharedEntry{}, err
 					}
@@ -979,19 +1255,19 @@ func (s *ChatService) GetFriendSharedEntryDetails(deviceID, relativePath string)
 	return chat.SharedEntry{}, fmt.Errorf("共享文件不存在")
 }
 
-func (s *ChatService) friendSharedDirectorySize(deviceID, relativePath string, depth int) (int64, error) {
+func (s *ChatService) friendSharedDirectorySize(deviceID, folderID, relativePath string, depth int) (int64, error) {
 	if depth >= 64 {
 		return 0, fmt.Errorf("共享文件夹层级过深")
 	}
 	var total int64
 	for offset := 0; ; {
-		page, err := s.ListFriendSharedEntriesPage(deviceID, relativePath, offset, 200)
+		page, err := s.ListFriendSharedEntriesPage(deviceID, folderID, relativePath, offset, 200)
 		if err != nil {
 			return 0, err
 		}
 		for _, entry := range page.Entries {
 			if entry.IsDirectory {
-				size, err := s.friendSharedDirectorySize(deviceID, entry.RelativePath, depth+1)
+				size, err := s.friendSharedDirectorySize(deviceID, folderID, entry.RelativePath, depth+1)
 				if err != nil {
 					return 0, err
 				}
@@ -1010,16 +1286,16 @@ func (s *ChatService) friendSharedDirectorySize(deviceID, relativePath string, d
 	return total, nil
 }
 
-func (s *ChatService) ImportSharedFiles(relativePath string) ([]chat.SharedEntry, error) {
+func (s *ChatService) ImportSharedFiles(folderID, relativePath string) ([]chat.SharedEntry, error) {
 	profile := s.engine.Profile()
 	if !profile.SharedEnabled {
 		return nil, fmt.Errorf("%s", chat.SharedDisabledError)
 	}
-	root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+	folder, err := localSharedFolder(folderID)
 	if err != nil {
 		return nil, err
 	}
-	target, normalized, err := resolveSharedDirectory(root, relativePath)
+	target, normalized, err := resolveSharedDirectory(folder.RootPath, relativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -1032,19 +1308,19 @@ func (s *ChatService) ImportSharedFiles(relativePath string) ([]chat.SharedEntry
 			return nil, err
 		}
 	}
-	return chat.ListSharedEntries(root, normalized)
+	return chat.ListSharedEntries(folder.RootPath, normalized)
 }
 
-func (s *ChatService) ImportSharedFolder(relativePath string) ([]chat.SharedEntry, error) {
+func (s *ChatService) ImportSharedFolder(folderID, relativePath string) ([]chat.SharedEntry, error) {
 	profile := s.engine.Profile()
 	if !profile.SharedEnabled {
 		return nil, fmt.Errorf("%s", chat.SharedDisabledError)
 	}
-	root, err := chat.ValidateSharedRoot(profile.SharedRootPath)
+	folder, err := localSharedFolder(folderID)
 	if err != nil {
 		return nil, err
 	}
-	target, normalized, err := resolveSharedDirectory(root, relativePath)
+	target, normalized, err := resolveSharedDirectory(folder.RootPath, relativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -1057,7 +1333,7 @@ func (s *ChatService) ImportSharedFolder(relativePath string) ([]chat.SharedEntr
 			return nil, err
 		}
 	}
-	return chat.ListSharedEntries(root, normalized)
+	return chat.ListSharedEntries(folder.RootPath, normalized)
 }
 
 func resolveSharedDirectory(root, relative string) (string, string, error) {

@@ -12,24 +12,24 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
-export function OpenFriendSharedPreview(deviceID: string, relativePath: string): $CancellablePromise<void> {
-    return $Call.ByID(509701049, deviceID, relativePath);
+export function OpenFriendSharedPreview(deviceID: string, folderID: string, relativePath: string): $CancellablePromise<void> {
+    return $Call.ByID(509701049, deviceID, folderID, relativePath);
 }
 
 /**
  * OpenFriendSharedPreviewFast carries the shared-entry identity to the
  * viewer. The old method remains for older frontend bundles.
  */
-export function OpenFriendSharedPreviewFast(deviceID: string, relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
-    return $Call.ByID(95895251, deviceID, relativePath, entryID, fileSize, modifiedAt);
+export function OpenFriendSharedPreviewFast(deviceID: string, folderID: string, relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
+    return $Call.ByID(95895251, deviceID, folderID, relativePath, entryID, fileSize, modifiedAt);
 }
 
 export function OpenImageViewer(conversationID: string, messageID: string): $CancellablePromise<void> {
     return $Call.ByID(433471697, conversationID, messageID);
 }
 
-export function OpenSharedPreview(relativePath: string): $CancellablePromise<void> {
-    return $Call.ByID(2171153429, relativePath);
+export function OpenSharedPreview(folderID: string, relativePath: string): $CancellablePromise<void> {
+    return $Call.ByID(2171153429, folderID, relativePath);
 }
 
 /**
@@ -37,6 +37,6 @@ export function OpenSharedPreview(relativePath: string): $CancellablePromise<voi
  * list. It lets the viewer address the same remote thumbnail cache entry
  * instead of starting a second path-only lookup.
  */
-export function OpenSharedPreviewFast(relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
-    return $Call.ByID(195604383, relativePath, entryID, fileSize, modifiedAt);
+export function OpenSharedPreviewFast(folderID: string, relativePath: string, entryID: string, fileSize: number, modifiedAt: string): $CancellablePromise<void> {
+    return $Call.ByID(195604383, folderID, relativePath, entryID, fileSize, modifiedAt);
 }

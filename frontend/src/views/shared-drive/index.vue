@@ -6,6 +6,12 @@
       <button v-if="mode === 'owner' && !settingsPage" class="head-action" title="共享设置" aria-label="共享设置" @click.stop="openSettingsPage"><IconSettings /></button>
     </header>
     <main v-if="settingsPage" class="shared-settings-page">
+      <section class="settings-card shared-folders-settings">
+        <div class="settings-section-head"><div><strong>共享文件夹</strong><span>添加后好友可以浏览这些目录的内容</span></div><button class="settings-add" @click="addSharedFolder">添加共享文件夹</button></div>
+        <div v-if="foldersLoading && !sharedFolders.length" class="settings-folder-empty">正在读取共享文件夹…</div>
+        <div v-else-if="!sharedFolders.length" class="settings-folder-empty"><IconFolder /><span>还没有共享文件夹</span></div>
+        <div v-for="folder in sharedFolders" :key="folder.id" class="settings-folder-row"><IconFolder class="settings-folder-icon" /><div class="settings-folder-main"><strong>{{ folder.name }}</strong><span :title="folder.rootPath">{{ folder.rootPath || '目录路径不可用' }}</span><small>{{ folderSummary(folder) }}</small></div><span class="settings-folder-status" :class="{ unavailable: !folderAvailable(folder) }">{{ folderAvailable(folder) ? '可用' : '目录不可用' }}</span><button class="settings-remove" title="移除共享配置" @click="removeSharedFolder(folder)">移除</button></div>
+      </section>
       <section class="settings-card">
         <div class="settings-card-row"><div><strong>显示隐藏文件</strong><span>显示名称以“.”开头的文件和文件夹</span></div><a-switch :model-value="sharedOptions.showHiddenFiles" @change="updateShowHiddenFiles" /></div>
         <div class="settings-divider" />
@@ -20,17 +26,17 @@
     </main>
     <main v-else class="shared-body">
       <section v-if="mode === 'owner'" class="owner-summary card">
-        <div class="summary-main"><div class="summary-label">共享开关</div><strong>{{ settings.enabled ? '已开启' : '已关闭' }}</strong><span>{{ settings.enabled ? '好友可以浏览和下载共享目录' : settings.rootPath ? '开启后好友才可以访问' : '请先选择共享目录' }}</span></div>
-        <a-switch :model-value="settings.enabled" :disabled="!settings.rootPath" @change="toggleEnabled" />
+        <div class="summary-main"><div class="summary-label">共享开关</div><strong>{{ settings.enabled ? '已开启' : '已关闭' }}</strong><span>{{ settings.enabled ? '好友可以浏览和下载共享目录' : sharedFolders.length ? '开启后好友才可以访问' : '请先添加共享文件夹' }}</span></div>
+        <a-switch :model-value="settings.enabled" :disabled="!sharedFolders.length" @change="toggleEnabled" />
         <div class="summary-item"><span>共享文件</span><strong>{{ formatStatNumber(settings.fileCount) }}</strong></div><div class="summary-item"><span>共享文件夹</span><strong>{{ formatStatNumber(settings.folderCount) }}</strong></div><div class="summary-item"><span>磁盘剩余</span><strong>{{ formatAvailableBytes() }}</strong></div>
       </section>
       <div class="shared-fixed-header">
-        <section v-if="mode === 'owner'" class="toolbar management-toolbar card"><div class="path-info"><span>共享目录</span><strong :title="settings.rootPath">{{ settings.rootPath || '未设置' }}</strong></div><button @click="chooseRoot">选择共享目录</button><button :disabled="!settings.rootPath" @click="refresh">刷新</button><button :disabled="!settings.rootPath" @click="createFolder">新建文件夹</button><button :disabled="!settings.rootPath" @click="importFiles">导入文件</button><button :disabled="!settings.rootPath" @click="importFolder">导入文件夹</button><button :disabled="!settings.rootPath" @click="openOwnerFolder">在文件管理器中打开</button></section>
+        <section v-if="mode === 'owner'" class="toolbar management-toolbar card"><div class="path-info"><span>{{ activeFolder ? '当前共享文件夹' : '共享文件夹' }}</span><strong :title="activeFolder?.rootPath">{{ activeFolder?.name || `${sharedFolders.length} 个共享文件夹` }}</strong></div><button @click="addSharedFolder">添加共享文件夹</button><button :disabled="!sharedFolders.length" @click="refresh">刷新</button><button v-if="activeFolderId" @click="createFolder">新建文件夹</button><button v-if="activeFolderId" @click="importFiles">导入文件</button><button v-if="activeFolderId" @click="importFolder">导入文件夹</button><button v-if="activeFolderId" @click="openOwnerFolder">在文件管理器中打开</button></section>
         <section v-else-if="mode === 'invalid'" class="remote-banner card"><IconCloud /><div><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备，请从好友聊天窗口重新打开</span></div></section>
 
         <nav class="breadcrumbs card">
-          <div class="breadcrumb-path"><button :disabled="!relativePath" @click="goParent">上一级</button><button :class="{ active: !relativePath }" @click="openPath('')">共享根目录</button><template v-for="(part, index) in pathParts" :key="part + index"><span>/</span><button @click="openPath(pathParts.slice(0, index + 1).join('/'))">{{ part }}</button></template></div>
-          <div class="breadcrumb-actions" @click.stop>
+          <div class="breadcrumb-path"><button :disabled="!activeFolderId && !relativePath" @click="goParent">上一级</button><button :class="{ active: !activeFolderId }" @click="openAllShared">全部共享</button><template v-if="activeFolder"><span>/</span><button :class="{ active: !relativePath }" @click="openFolderRoot">{{ activeFolder.name }}</button><template v-for="(part, index) in pathParts" :key="part + index"><span>/</span><button @click="openPath(pathParts.slice(0, index + 1).join('/'))">{{ part }}</button></template></template></div>
+          <div v-if="activeFolderId" class="breadcrumb-actions" @click.stop>
             <button class="icon-action" :title="searchVisible ? '关闭搜索' : '搜索'" @click="searchVisible = !searchVisible"><IconSearch /></button>
             <button @click="selectAll">{{ selected.size === entries.length && entries.length ? '取消全选' : '全选' }}</button>
             <button v-if="mode === 'friend'" :disabled="!selectedFiles.length || sharedDisabled" @click="downloadSelected">下载</button>
@@ -40,6 +46,7 @@
             <button class="icon-action" :class="{ active: viewMode === 'thumb' }" title="缩略图视图" @click="viewMode = 'thumb'"><IconApps /></button>
             <span class="view-note">{{ filteredEntries.length }} 项</span>
           </div>
+          <div v-else class="breadcrumb-actions" @click.stop><button :disabled="loading" @click="refresh">刷新</button><button class="icon-action" :class="{ active: viewMode === 'list' }" title="列表视图" @click="viewMode = 'list'"><IconList /></button><button class="icon-action" :class="{ active: viewMode === 'thumb' }" title="缩略图视图" @click="viewMode = 'thumb'"><IconApps /></button><span class="view-note">{{ sharedFolders.length }} 个文件夹</span></div>
           <div v-if="searchVisible" class="breadcrumb-search" @click.stop>
             <IconSearch />
             <input v-model="search" autofocus placeholder="搜索文件和文件夹" @keydown.esc="searchVisible = false" />
@@ -47,7 +54,15 @@
           </div>
         </nav>
       </div>
-      <section class="file-panel card">
+      <section v-if="!activeFolderId" class="file-panel folder-panel card">
+        <div v-if="foldersLoading && !sharedFolders.length" class="empty-state">正在读取共享文件夹…</div>
+        <div v-else-if="mode === 'invalid'" class="empty-state"><IconCloud /><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备</span></div>
+        <div v-else-if="mode === 'friend' && sharedDisabled" class="empty-state"><IconCloud /><strong>对方已关闭共享</strong><span>共享开关开启后，刷新即可继续访问</span></div>
+        <div v-else-if="!sharedFolders.length" class="empty-state"><IconFolder /><span>{{ mode === 'owner' ? '请先添加共享文件夹' : '对方没有可访问的共享文件夹' }}</span></div>
+        <div v-else-if="viewMode === 'thumb'" class="file-list folder-grid"><button v-for="folder in sharedFolders" :key="folder.id" class="folder-card" @click="openFolder(folder)"><span class="folder-card-icon"><IconFolder /></span><strong :title="displayFolderName(folder)">{{ displayFolderName(folder) }}</strong><span>{{ folderSummary(folder) }}</span></button></div>
+        <div v-else class="file-list folder-list"><button v-for="folder in sharedFolders" :key="folder.id" class="folder-row" @click="openFolder(folder)"><IconFolder class="file-icon folder" /><span class="folder-row-main"><strong :title="displayFolderName(folder)">{{ displayFolderName(folder) }}</strong><span>{{ folderSummary(folder) }}</span></span><span class="folder-row-status">进入</span></button></div>
+      </section>
+      <section v-else class="file-panel card">
         <div v-if="loading && !entries.length" class="empty-state">正在读取共享目录…</div>
         <div v-else-if="mode === 'invalid'" class="empty-state"><IconCloud /><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备</span></div>
         <div v-else-if="sharedDisabled" class="empty-state"><IconCloud /><strong>{{ mode === 'owner' ? (settings.rootPath ? '共享已关闭' : '请先选择共享目录') : '对方已关闭共享' }}</strong><span>{{ mode === 'owner' ? '本机仍可管理共享目录，开启开关后好友才可访问' : '共享开关开启后，刷新即可继续访问' }}</span></div>
@@ -56,12 +71,12 @@
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="thumb-card" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" class="thumb-check" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
             <div class="thumb-preview">
-              <template v-if="thumbnailUrls[entry.relativePath]">
-                <img :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" />
+              <template v-if="thumbnailUrls[thumbnailKey(entry)]">
+                <img :src="thumbnailUrls[thumbnailKey(entry)]" :alt="entry.name" loading="lazy" decoding="async" />
                 <span v-if="isVideoEntry(entry)" class="thumb-video-badge" aria-label="视频">▶</span>
               </template>
               <span v-else-if="entry.isDirectory" class="thumb-placeholder folder"><IconFolder /></span>
-              <span v-else-if="isMediaEntry(entry) && thumbnailLoading.has(entry.relativePath)" class="thumb-placeholder loading">加载中…</span>
+              <span v-else-if="isMediaEntry(entry) && thumbnailLoading.has(thumbnailKey(entry))" class="thumb-placeholder loading">加载中…</span>
               <span v-else-if="isMediaEntry(entry)" class="thumb-placeholder"><IconFile /></span>
               <span v-else class="thumb-placeholder"><IconFile /></span>
             </div>
@@ -72,7 +87,7 @@
         <div v-else class="file-list" @scroll="closeContext">
           <div v-for="entry in filteredEntries" :key="entry.entryId" class="file-row" :class="{ selected: selected.has(entry.relativePath) }" :data-thumbnail-path="entry.relativePath" :ref="(element) => registerThumbnailElement(element, entry)" @click="handleEntryClick(entry)" @dblclick="handleEntryDoubleClick(entry)" @contextmenu.prevent.stop="openContext($event, entry)">
             <input v-if="mode === 'friend'" type="checkbox" :checked="selected.has(entry.relativePath)" @click.stop="toggleSelected(entry)" />
-            <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isMediaEntry(entry) && thumbnailUrls[entry.relativePath]" class="file-icon file-thumb" :src="thumbnailUrls[entry.relativePath]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
+            <IconFolder v-if="entry.isDirectory" class="file-icon folder" /><img v-else-if="isMediaEntry(entry) && thumbnailUrls[thumbnailKey(entry)]" class="file-icon file-thumb" :src="thumbnailUrls[thumbnailKey(entry)]" :alt="entry.name" loading="lazy" decoding="async" /><IconFile v-else class="file-icon" />
             <div class="file-name"><strong>{{ entry.name }}</strong><span>{{ entry.isDirectory ? '文件夹' : formatBytes(entry.size) }}</span></div><span class="file-date">{{ formatDate(entry.modifiedAt) }}</span><button class="row-more" @click.stop="openContext($event, entry)">···</button>
           </div>
         </div>
@@ -124,6 +139,7 @@ import { Clipboard, Events, System, Window } from '@wailsio/runtime'
 import { ChatService, ImageViewerService, PreviewStreamService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
 
 interface Entry { entryId: string; name: string; relativePath: string; isDirectory: boolean; size: number; mimeType: string; modifiedAt: string; sha256?: string }
+interface SharedFolder { id: string; name: string; rootPath?: string; fileCount: number; folderCount: number; statsReady: boolean; statsLoading: boolean; updatedAt?: string }
 type SharedMode = 'owner' | 'friend' | 'invalid'
 type SharedViewMode = 'list' | 'thumb'
 function readSharedQuery() {
@@ -141,7 +157,7 @@ const embedded = props.embeddedMode || sharedQuery.embedded
 const mode = ref<SharedMode>(props.embeddedMode ? (props.ownerMode ? 'owner' : props.friendDeviceId ? 'friend' : 'invalid') : sharedQuery.mode)
 const deviceId = props.embeddedMode ? props.friendDeviceId.trim() : sharedQuery.deviceId
 const settingsPage = ref(Boolean(!props.embeddedMode && sharedQuery.settings && mode.value === 'owner'))
-const isMac = ref(false); const isDark = ref(false); const loading = ref(false); const loadingMore = ref(false); const hasMore = ref(false); const nextOffset = ref(0); const sharedDisabled = ref(false); const search = ref(''); const searchVisible = ref(false); const relativePath = ref(''); const entries = ref<Entry[]>([]); const selected = reactive(new Set<string>()); const peerName = ref(''); const viewMode = ref<SharedViewMode>('list')
+const isMac = ref(false); const isDark = ref(false); const loading = ref(false); const loadingMore = ref(false); const hasMore = ref(false); const nextOffset = ref(0); const sharedDisabled = ref(false); const search = ref(''); const searchVisible = ref(false); const relativePath = ref(''); const entries = ref<Entry[]>([]); const selected = reactive(new Set<string>()); const peerName = ref(''); const viewMode = ref<SharedViewMode>((localStorage.getItem('flyqpro.sharedDrive.viewMode') === 'thumb' ? 'thumb' : 'list')); const sharedFolders = ref<SharedFolder[]>([]); const activeFolderId = ref(''); const foldersLoading = ref(false)
 const thumbnailUrls = reactive<Record<string, string>>({})
 const thumbnailLoading = reactive(new Set<string>())
 const thumbnailFailed = reactive(new Set<string>())
@@ -169,6 +185,7 @@ let lastRefreshAt = 0
 let entriesRequestId = 0
 let themeLoadStarted = false
 const pathParts = computed(() => relativePath.value ? relativePath.value.split('/').filter(Boolean) : [])
+const activeFolder = computed(() => sharedFolders.value.find((folder) => folder.id === activeFolderId.value))
 const filteredEntries = computed(() => { const key = search.value.trim().toLowerCase(); return entries.value.filter((entry) => !key || entry.name.toLowerCase().includes(key)) })
 const selectedFiles = computed(() => entries.value.filter((entry) => selected.has(entry.relativePath) && !entry.isDirectory))
 const transferSummary = computed(() => {
@@ -181,6 +198,19 @@ function formatBytes(value: number) { if (!value) return '—'; if (value < 1024
 function formatStatNumber(value: number) { if (settings.statsLoading) return value > 0 ? `${value}（统计中…）` : '统计中…'; return settings.statsReady ? String(value) : '—' }
 function formatAvailableBytes() { return settings.statsLoading ? (settings.availableBytes > 0 ? `${formatBytes(settings.availableBytes)}（统计中…）` : '统计中…') : settings.statsReady ? formatBytes(settings.availableBytes) : '—' }
 function formatDate(value: string) { return value ? new Date(value).toLocaleString() : '—' }
+function folderAvailable(folder: SharedFolder) { return mode.value === 'friend' || (Boolean(folder.rootPath) && (folder.statsReady || folder.statsLoading)) }
+function folderSummary(folder: SharedFolder) {
+  if (folder.statsLoading && !folder.statsReady) return '统计中…'
+  if (!folder.statsReady) return '暂未统计'
+  return `${folder.fileCount} 个文件 · ${folder.folderCount} 个文件夹`
+}
+function displayFolderName(folder: SharedFolder) {
+  const same = sharedFolders.value.filter((candidate) => candidate.name === folder.name)
+  const index = same.findIndex((candidate) => candidate.id === folder.id)
+  return same.length > 1 && index >= 0 ? `${folder.name}（${index + 1}）` : folder.name
+}
+function thumbnailKey(entry: Entry) { return `${activeFolderId.value}:${entry.relativePath}` }
+function thumbnailResultKey(folderId: string, relativePath: string) { return `${folderId}:${relativePath}` }
 function isImageEntry(entry: Entry) {
   const mime = String(entry.mimeType || '').toLowerCase()
   return mime.startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name)
@@ -192,7 +222,7 @@ function isVideoEntry(entry: Entry) {
 function isMediaEntry(entry: Entry) { return isImageEntry(entry) || isVideoEntry(entry) }
 function registerThumbnailElement(element: unknown, entry: Entry) {
   if (!(element instanceof HTMLElement) || !thumbnailObserver || !isMediaEntry(entry)) return
-  element.dataset.thumbnailPath = entry.relativePath
+	element.dataset.thumbnailPath = entry.relativePath
   thumbnailObserver.observe(element)
 }
 function scheduleInitialThumbnails() {
@@ -203,10 +233,11 @@ function scheduleInitialThumbnails() {
   })
 }
 function enqueueThumbnail(entry: Entry) {
-  const path = entry.relativePath
-  if (!isMediaEntry(entry) || thumbnailUrls[path] || thumbnailLoading.has(path) || thumbnailFailed.has(path) || thumbnailQueued.has(path)) return
-  thumbnailQueued.add(path)
-  thumbnailLoading.add(path)
+	const path = entry.relativePath
+	const key = thumbnailKey(entry)
+	if (!isMediaEntry(entry) || thumbnailUrls[key] || thumbnailLoading.has(key) || thumbnailFailed.has(key) || thumbnailQueued.has(key)) return
+	thumbnailQueued.add(key)
+	thumbnailLoading.add(key)
   thumbnailQueue.push({ entry, generation: thumbnailGeneration, attempt: 0 })
   void drainThumbnailQueue()
 }
@@ -222,7 +253,7 @@ async function drainThumbnailQueue() {
   while (thumbnailActive < 3 && thumbnailQueue.length) {
     const item = thumbnailQueue.shift()
     if (!item) return
-    thumbnailQueued.delete(item.entry.relativePath)
+	thumbnailQueued.delete(thumbnailKey(item.entry))
     thumbnailActive++
     void loadThumbnail(item.entry, item.generation).finally(() => {
       thumbnailActive--
@@ -239,7 +270,7 @@ async function drainFriendThumbnailQueue() {
       const next = thumbnailQueue.shift()
       if (next) batch.push(next)
     }
-    batch.forEach((item) => thumbnailQueued.delete(item.entry.relativePath))
+	batch.forEach((item) => thumbnailQueued.delete(thumbnailKey(item.entry)))
     thumbnailActive++
     void loadThumbnailBatch(batch, first.generation).finally(() => {
       thumbnailActive--
@@ -251,15 +282,16 @@ function retryThumbnail(item: { entry: Entry; generation: number; attempt: numbe
   const maxAttempts = isVideoEntry(item.entry) ? 8 : 4
   if (item.generation !== thumbnailGeneration || item.attempt >= maxAttempts) {
     if (item.generation === thumbnailGeneration) {
-      thumbnailLoading.delete(item.entry.relativePath)
-      thumbnailFailed.add(item.entry.relativePath)
+      thumbnailLoading.delete(thumbnailKey(item.entry))
+      thumbnailFailed.add(thumbnailKey(item.entry))
     }
     return
   }
   const delays = [300, 700, 1200, 2000, 3000, 4000, 5000, 6000]
   window.setTimeout(() => {
-    if (item.generation !== thumbnailGeneration || thumbnailUrls[item.entry.relativePath]) return
-    thumbnailQueued.add(item.entry.relativePath)
+    const key = thumbnailKey(item.entry)
+    if (item.generation !== thumbnailGeneration || thumbnailUrls[key]) return
+	thumbnailQueued.add(key)
     thumbnailQueue.push({ ...item, attempt: item.attempt + 1 })
     void drainThumbnailQueue()
   }, delays[item.attempt] || 6000)
@@ -267,21 +299,23 @@ function retryThumbnail(item: { entry: Entry; generation: number; attempt: numbe
 async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: number; attempt: number }>, generation: number) {
   if (generation !== thumbnailGeneration) return
   try {
-    const results = await ChatService.GetFriendSharedEntryThumbnails(deviceId, items.map(({ entry }) => ({
-      relativePath: entry.relativePath,
+	const results = await ChatService.GetFriendSharedEntryThumbnails(deviceId, items.map(({ entry }) => ({
+	      relativePath: entry.relativePath,
+	      sharedFolderId: activeFolderId.value,
       entryId: entry.entryId,
       fileSize: entry.size,
       modifiedAt: entry.modifiedAt,
     })))
     if (generation !== thumbnailGeneration) return
-    const byPath = new Map((results || []).map((result: any) => [result.relativePath, result]))
-    items.forEach((item) => {
-      const path = item.entry.relativePath
-      const result: any = byPath.get(path)
+		const byPath = new Map((results || []).map((result: any) => [thumbnailResultKey(result.sharedFolderId || activeFolderId.value, result.relativePath), result]))
+		items.forEach((item) => {
+			const path = item.entry.relativePath
+			const key = thumbnailKey(item.entry)
+			const result: any = byPath.get(thumbnailResultKey(activeFolderId.value, path))
       if (result?.status === 'ready' && result.payload) {
         const mime = result.thumbnailMime || result.mimeType || 'image/jpeg'
-        thumbnailUrls[path] = `data:${mime};base64,${result.payload}`
-        thumbnailLoading.delete(path)
+        thumbnailUrls[key] = `data:${mime};base64,${result.payload}`
+        thumbnailLoading.delete(key)
       } else if (result?.status === 'pending') {
         // Android generates video thumbnails asynchronously. Give the peer's
         // native decoder time to finish before trying the stream fallback.
@@ -293,8 +327,8 @@ async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: numbe
       } else if (isVideoEntry(item.entry)) {
         void loadVideoThumbnail(item)
       } else {
-        thumbnailLoading.delete(path)
-        thumbnailFailed.add(path)
+        thumbnailLoading.delete(key)
+        thumbnailFailed.add(key)
       }
     })
   } catch {
@@ -303,6 +337,7 @@ async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: numbe
 }
 async function loadThumbnail(entry: Entry, generation: number) {
   const path = entry.relativePath
+	  const key = thumbnailKey(entry)
   if (isVideoEntry(entry)) {
     await loadVideoThumbnail({ entry, generation, attempt: 0 })
     return
@@ -317,29 +352,29 @@ async function loadThumbnail(entry: Entry, generation: number) {
       let url = ''
       try {
         url = mode.value === 'owner'
-          ? await ChatService.GetSharedEntryThumbnail(path)
+          ? await ChatService.GetSharedEntryThumbnail(activeFolderId.value, path)
           : mode.value === 'friend'
-            ? await ChatService.GetFriendSharedEntryThumbnail(deviceId, path)
+            ? await ChatService.GetFriendSharedEntryThumbnail(deviceId, activeFolderId.value, path)
             : ''
       } catch {
         url = ''
       }
       if (generation !== thumbnailGeneration) return
       if (url) {
-        thumbnailUrls[path] = url
+        thumbnailUrls[key] = url
         return
       }
       await new Promise((resolve) => window.setTimeout(resolve, Math.min(750, 220 + attempt * 25)))
     }
-    if (generation === thumbnailGeneration) thumbnailFailed.add(path)
+    if (generation === thumbnailGeneration) thumbnailFailed.add(key)
   } catch {
-    if (generation === thumbnailGeneration) thumbnailFailed.add(path)
+    if (generation === thumbnailGeneration) thumbnailFailed.add(key)
   } finally {
-    if (generation === thumbnailGeneration) thumbnailLoading.delete(path)
+    if (generation === thumbnailGeneration) thumbnailLoading.delete(key)
   }
 }
 function sharedPreviewURLFor(entry: Entry) {
-  return PreviewStreamService.CreateSharedPreviewURL(mode.value === 'owner' ? 'shared-owner' : 'shared-friend', mode.value === 'friend' ? deviceId : '', entry.relativePath)
+  return PreviewStreamService.CreateSharedPreviewURL(mode.value === 'owner' ? 'shared-owner' : 'shared-friend', mode.value === 'friend' ? deviceId : '', activeFolderId.value, entry.relativePath)
 }
 function captureVideoFrame(url: string): Promise<string> {
   return new Promise((resolve) => {
@@ -384,13 +419,14 @@ function captureVideoFrame(url: string): Promise<string> {
 }
 async function loadVideoThumbnail(item: { entry: Entry; generation: number; attempt: number }) {
   const path = item.entry.relativePath
+  const key = thumbnailKey(item.entry)
   try {
     const url = await sharedPreviewURLFor(item.entry)
     const thumbnail = url ? await captureVideoFrame(url) : ''
     if (item.generation !== thumbnailGeneration) return
     if (thumbnail) {
-      thumbnailUrls[path] = thumbnail
-      thumbnailLoading.delete(path)
+      thumbnailUrls[key] = thumbnail
+      thumbnailLoading.delete(key)
       return
     }
     retryThumbnail(item)
@@ -444,19 +480,42 @@ function applySharedOptions(profile: any) {
   })
 }
 async function loadSettings() {
-  if (mode.value === 'owner') {
-    const [result, profile] = await Promise.all([ChatService.GetSharedFolderSettings(), ChatService.GetProfile()])
-    Object.assign(settings, result)
-    applySharedOptions(profile)
-    sharedDisabled.value = false
-    return
+  foldersLoading.value = true
+  try {
+    if (mode.value === 'owner') {
+      const [result, profile] = await Promise.all([ChatService.GetSharedFoldersStatus(), ChatService.GetProfile()])
+      Object.assign(settings, result)
+      sharedFolders.value = (result?.folders || []) as SharedFolder[]
+      applySharedOptions(profile)
+      sharedDisabled.value = false
+    } else {
+      const profile = await ChatService.GetProfile()
+      applySharedOptions(profile)
+      try {
+        const folders = await ChatService.ListFriendSharedFolders(deviceId)
+        sharedFolders.value = (folders || []) as SharedFolder[]
+      } catch (error: any) {
+        const message = String(error?.message || error)
+        if (!message.includes('SHARED_DISABLED')) throw error
+        // A disabled remote share is an empty-state condition. Keep the
+        // error code out of the global toast and let the page explain it.
+        sharedFolders.value = []
+      }
+      sharedDisabled.value = false
+    }
+    if (activeFolderId.value && !sharedFolders.value.some((folder) => folder.id === activeFolderId.value)) {
+      activeFolderId.value = ''
+      relativePath.value = ''
+      entries.value = []
+    }
+  } finally {
+    foldersLoading.value = false
   }
-  applySharedOptions(await ChatService.GetProfile())
 }
 function resetThumbnailState() { thumbnailGeneration++; if (thumbnailBatchTimer !== undefined) { window.clearTimeout(thumbnailBatchTimer); thumbnailBatchTimer = undefined }; thumbnailQueue.length = 0; thumbnailQueued.clear(); Object.keys(thumbnailUrls).forEach((key) => delete thumbnailUrls[key]); thumbnailLoading.clear(); thumbnailFailed.clear() }
-function resetViewState() { relativePath.value = ''; search.value = ''; searchVisible.value = false; entries.value = []; selected.clear(); hasMore.value = false; nextOffset.value = 0; loadingMore.value = false; resetThumbnailState(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
+function resetViewState() { activeFolderId.value = ''; relativePath.value = ''; search.value = ''; searchVisible.value = false; entries.value = []; selected.clear(); hasMore.value = false; nextOffset.value = 0; loadingMore.value = false; resetThumbnailState(); context.visible = false; context.entry = undefined; renameDialog.visible = false; renameDialog.loading = false; renameDialog.name = ''; renameDialog.entry = undefined; detailsDialog.visible = false; detailsDialog.loading = false; detailsDialog.error = ''; detailsDialog.entry = undefined; Object.keys(transfers).forEach((key) => delete transfers[key]); dismissedTransfers.clear(); notifiedTransferFailures.clear(); notifiedTransferCompletions.clear(); transferExpanded.value = true }
 async function loadEntriesPage(append = false, preserve = false) {
-  if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) return
+  if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId) || !activeFolderId.value) return
   const requestId = ++entriesRequestId
   const offset = append ? nextOffset.value : 0
   if (append) loadingMore.value = true
@@ -464,14 +523,17 @@ async function loadEntriesPage(append = false, preserve = false) {
     loading.value = true
     sharedDisabled.value = false
     if (!preserve) {
+      entries.value = []
+      hasMore.value = false
+      nextOffset.value = 0
       selected.clear()
       resetThumbnailState()
     }
   }
   try {
     const page = mode.value === 'owner'
-      ? await ChatService.ListSharedEntriesPage(relativePath.value, offset, 100)
-      : await ChatService.ListFriendSharedEntriesPage(deviceId, relativePath.value, offset, 100)
+      ? await ChatService.ListSharedEntriesPage(activeFolderId.value, relativePath.value, offset, 100)
+      : await ChatService.ListFriendSharedEntriesPage(deviceId, activeFolderId.value, relativePath.value, offset, 100)
     if (requestId !== entriesRequestId) return
     const incoming = page.entries || []
     entries.value = append
@@ -486,7 +548,15 @@ async function loadEntriesPage(append = false, preserve = false) {
   } catch (error: any) {
     if (requestId !== entriesRequestId) return
     const message = String(error?.message || error)
-    sharedDisabled.value = mode.value === 'friend' && (message.includes('SHARED_DISABLED') || message.includes('SHARED_UNAVAILABLE'))
+    if (mode.value === 'friend' && message.includes('SHARED_DISABLED')) {
+      sharedFolders.value = []
+      activeFolderId.value = ''
+      relativePath.value = ''
+      entries.value = []
+      sharedDisabled.value = false
+      return
+    }
+    sharedDisabled.value = mode.value === 'friend' && message.includes('SHARED_UNAVAILABLE')
     if (!sharedDisabled.value) Message.error(error?.message || '读取共享目录失败')
     if (!append && !preserve) entries.value = []
   } finally {
@@ -497,7 +567,7 @@ async function loadEntriesPage(append = false, preserve = false) {
     }
   }
 }
-function sharedRefreshKey() { return `${mode.value}:${deviceId}:${relativePath.value}:${settingsPage.value}` }
+function sharedRefreshKey() { return `${mode.value}:${deviceId}:${activeFolderId.value}:${relativePath.value}:${settingsPage.value}` }
 async function refresh(force = true) {
   if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) {
     sharedDisabled.value = true
@@ -512,7 +582,7 @@ async function refresh(force = true) {
       await loadSettings()
       if (key !== sharedRefreshKey()) return
       if (settingsPage.value) return
-      if (mode.value === 'owner' && !settings.rootPath) { sharedDisabled.value = true; entries.value = []; return }
+      if (!activeFolderId.value) return
       await loadEntriesPage(false, true)
       lastRefreshAt = Date.now()
     } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
@@ -529,26 +599,23 @@ async function refresh(force = true) {
   }
 }
 async function loadEntries() {
-  if (mode.value === 'owner' && !settings.rootPath) {
-    sharedDisabled.value = true
-    entries.value = []
-    return
-  }
+  if (!activeFolderId.value) return
   await loadEntriesPage(false)
 }
 function loadMore() { if (hasMore.value && !loadingMore.value) void loadEntriesPage(true) }
-async function chooseRoot() { try { const path = await ChatService.PickSharedDirectory(); if (!path) return; relativePath.value = ''; Object.assign(settings, await ChatService.SetSharedFolder(path, settings.enabled)); await loadEntries(); Message.success('共享目录已更新') } catch (error: any) { Message.error(error?.message || '设置共享目录失败') } }
+async function addSharedFolder() { try { const path = await ChatService.PickSharedDirectory(); if (!path) return; await ChatService.AddSharedFolder(path); const result = await ChatService.GetSharedFoldersStatus(); Object.assign(settings, result); sharedFolders.value = (result.folders || []) as SharedFolder[]; Message.success('共享文件夹已添加') } catch (error: any) { Message.error(error?.message || '添加共享文件夹失败') } }
+function removeSharedFolder(folder: SharedFolder) { Modal.confirm({ title: '移除共享文件夹', content: `只会移除共享配置，不会删除“${folder.name}”及其本机文件，确定继续吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { try { await ChatService.RemoveSharedFolder(folder.id); if (activeFolderId.value === folder.id) { activeFolderId.value = ''; relativePath.value = ''; entries.value = []; resetThumbnailState() } const result = await ChatService.GetSharedFoldersStatus(); Object.assign(settings, result); sharedFolders.value = (result.folders || []) as SharedFolder[]; Message.success('共享文件夹已移除') } catch (error: any) { Message.error(error?.message || '移除共享文件夹失败') } } }) }
 async function toggleEnabled(value: boolean) {
-  if (value && !settings.rootPath) {
-    Message.warning('请先选择共享目录')
+  if (value && !sharedFolders.value.length) {
+    Message.warning('请先添加共享文件夹')
     return
   }
   try { Object.assign(settings, await ChatService.SetSharedEnabled(value)); Message.success(value ? '共享已开启' : '共享已关闭') } catch (error: any) { Message.error(error?.message || '共享开关更新失败') }
 }
-async function createFolder() { const name = window.prompt('请输入文件夹名称'); if (!name) return; try { await ChatService.CreateSharedFolder(relativePath.value, name); await refresh() } catch (error: any) { Message.error(error?.message || '新建文件夹失败') } }
-async function importFiles() { try { await ChatService.ImportSharedFiles(relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件失败') } }
-async function importFolder() { try { await ChatService.ImportSharedFolder(relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件夹失败') } }
-async function openOwnerFolder() { try { await ChatService.RevealSharedEntry(relativePath.value) } catch (error: any) { Message.error(error?.message || '打开目录失败') } }
+async function createFolder() { const name = window.prompt('请输入文件夹名称'); if (!name || !activeFolderId.value) return; try { await ChatService.CreateSharedFolder(activeFolderId.value, relativePath.value, name); await refresh() } catch (error: any) { Message.error(error?.message || '新建文件夹失败') } }
+async function importFiles() { if (!activeFolderId.value) return; try { await ChatService.ImportSharedFiles(activeFolderId.value, relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件失败') } }
+async function importFolder() { if (!activeFolderId.value) return; try { await ChatService.ImportSharedFolder(activeFolderId.value, relativePath.value); await refresh() } catch (error: any) { Message.error(error?.message || '导入文件夹失败') } }
+async function openOwnerFolder() { if (!activeFolderId.value) return; try { await ChatService.RevealSharedEntry(activeFolderId.value, relativePath.value) } catch (error: any) { Message.error(error?.message || '打开目录失败') } }
 function openSettingsPage() {
   if (mode.value !== 'owner') return
   settingsPage.value = true
@@ -574,14 +641,18 @@ async function updateDirectoryOpenMode(value: string) {
 async function updateMultiWindow(value: boolean) {
   try { await saveSharedOptions({ sharedDriveMultiWindow: value }); Message.success('共享盘窗口设置已更新') } catch (error: any) { Message.error(error?.message || '更新共享盘窗口设置失败') }
 }
+function openAllShared() { activeFolderId.value = ''; relativePath.value = ''; entries.value = []; selected.clear(); resetThumbnailState(); closeContext() }
+function openFolderRoot() { if (!activeFolderId.value) return; relativePath.value = ''; selected.clear(); resetThumbnailState(); void loadEntries() }
+function openFolder(folder: SharedFolder) { activeFolderId.value = folder.id; relativePath.value = ''; selected.clear(); resetThumbnailState(); closeContext(); void loadEntries() }
 function handleEntryClick(entry: Entry) { if (entry.isDirectory && sharedOptions.directoryOpenMode === 'single') void openPath(entry.relativePath) }
 function handleEntryDoubleClick(entry: Entry) { if (entry.isDirectory) { if (sharedOptions.directoryOpenMode === 'double') void openPath(entry.relativePath); return } void preview(entry) }
 async function openPath(path: string) {
-  relativePath.value = path
+	if (!activeFolderId.value) return
+	relativePath.value = path
   resetThumbnailState()
-  await refresh()
+  await loadEntries()
 }
-function goParent() { openPath(pathParts.value.slice(0, -1).join('/')) }
+function goParent() { if (!activeFolderId.value) return; if (!relativePath.value) openAllShared(); else void openPath(pathParts.value.slice(0, -1).join('/')) }
 function toggleSelected(entry: Entry) { selected.has(entry.relativePath) ? selected.delete(entry.relativePath) : selected.add(entry.relativePath) }
 function selectAll() { if (selected.size === entries.value.length && entries.value.length) selected.clear(); else entries.value.forEach((entry) => selected.add(entry.relativePath)) }
 function handleAppContextMenu(event: MouseEvent) {
@@ -601,8 +672,8 @@ function closeContext() { context.visible = false; context.entry = undefined }
 function newContextFolder() { if (context.entry) openPath(context.entry.relativePath); closeContext() }
 function renameEntry() { if (!context.entry || mode.value !== 'owner') return; renameDialog.entry = context.entry; renameDialog.name = context.entry.name; renameDialog.visible = true; closeContext() }
 function cancelRename() { if (renameDialog.loading) return; renameDialog.visible = false; renameDialog.name = ''; renameDialog.entry = undefined }
-async function confirmRename() { const entry = renameDialog.entry; const name = renameDialog.name.trim(); if (!entry || renameDialog.loading) return; if (!name) { Message.warning('请输入新名称'); return } if (name === entry.name) { cancelRename(); return } renameDialog.loading = true; try { await ChatService.RenameSharedEntry(entry.relativePath, name); renameDialog.visible = false; renameDialog.name = ''; renameDialog.entry = undefined; await refresh(); Message.success('重命名成功') } catch (error: any) { Message.error(error?.message || '重命名失败') } finally { renameDialog.loading = false } }
-async function deleteEntry() { if (!context.entry) return; const entry = context.entry; Modal.confirm({ title: '确认删除', content: entry.isDirectory ? '将递归删除该文件夹及其内容，确定继续吗？' : `确定删除“${entry.name}”吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { try { await ChatService.DeleteSharedEntry(entry.relativePath); await refresh(); Message.success('已删除') } catch (error: any) { Message.error(error?.message || '删除失败') } } }); closeContext() }
+async function confirmRename() { const entry = renameDialog.entry; const name = renameDialog.name.trim(); if (!entry || renameDialog.loading || !activeFolderId.value) return; if (!name) { Message.warning('请输入新名称'); return } if (name === entry.name) { cancelRename(); return } renameDialog.loading = true; try { await ChatService.RenameSharedEntry(activeFolderId.value, entry.relativePath, name); renameDialog.visible = false; renameDialog.name = ''; renameDialog.entry = undefined; await refresh(); Message.success('重命名成功') } catch (error: any) { Message.error(error?.message || '重命名失败') } finally { renameDialog.loading = false } }
+async function deleteEntry() { if (!context.entry || !activeFolderId.value) return; const entry = context.entry; Modal.confirm({ title: '确认删除', content: entry.isDirectory ? '将递归删除该文件夹及其内容，确定继续吗？' : `确定删除“${entry.name}”吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { try { await ChatService.DeleteSharedEntry(activeFolderId.value, entry.relativePath); await refresh(); Message.success('已删除') } catch (error: any) { Message.error(error?.message || '删除失败') } } }); closeContext() }
 async function copyRelative() { if (!context.entry) return; try { await Clipboard.SetText(context.entry.relativePath); Message.success('相对路径已复制') } catch { Message.error('复制失败') } closeContext() }
 async function copyName() { if (!context.entry) return; try { await Clipboard.SetText(context.entry.name); Message.success('文件名已复制') } catch { Message.error('复制失败') } closeContext() }
 let detailsRequestId = 0
@@ -616,7 +687,7 @@ async function showDetails() {
   detailsDialog.loading = true
   detailsDialog.visible = true
   try {
-    const detail = mode.value === 'owner' ? await ChatService.GetSharedEntryDetails(entry.relativePath) : await ChatService.GetFriendSharedEntryDetails(deviceId, entry.relativePath)
+    const detail = mode.value === 'owner' ? await ChatService.GetSharedEntryDetails(activeFolderId.value, entry.relativePath) : await ChatService.GetFriendSharedEntryDetails(deviceId, activeFolderId.value, entry.relativePath)
     if (requestId === detailsRequestId) {
       detailsDialog.entry = detail
       detailsDialog.loading = false
@@ -628,10 +699,10 @@ async function showDetails() {
     }
   }
 }
-async function downloadEntry() { if (!context.entry || context.entry.isDirectory) return; try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '下载失败') } finally { closeContext() } }
-async function saveEntry() { if (!context.entry || context.entry.isDirectory) return; try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '保存失败') } finally { closeContext() } }
-async function downloadSelected() { const files = [...selectedFiles.value]; if (!files.length) return; let started = 0; for (const entry of files) { try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 下载失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个下载任务`) } }
-async function saveSelected() { const files = [...selectedFiles.value]; if (!files.length) return; let started = 0; for (const entry of files) { try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 保存失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个下载任务`) } }
+async function downloadEntry() { if (!context.entry || context.entry.isDirectory || !activeFolderId.value) return; try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, activeFolderId.value, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '下载失败') } finally { closeContext() } }
+async function saveEntry() { if (!context.entry || context.entry.isDirectory || !activeFolderId.value) return; try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, activeFolderId.value, context.entry.relativePath); registerTransfer(result); transferExpanded.value = true; Message.success('已开始下载') } catch (error: any) { Message.error(error?.message || '保存失败') } finally { closeContext() } }
+async function downloadSelected() { const files = [...selectedFiles.value]; if (!files.length || !activeFolderId.value) return; let started = 0; for (const entry of files) { try { const result = await ChatService.DownloadFriendSharedEntry(deviceId, activeFolderId.value, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 下载失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个下载任务`) } }
+async function saveSelected() { const files = [...selectedFiles.value]; if (!files.length || !activeFolderId.value) return; let started = 0; for (const entry of files) { try { const result = await ChatService.SaveFriendSharedEntryAs(deviceId, activeFolderId.value, entry.relativePath); registerTransfer(result); started++ } catch (error: any) { Message.error(`${entry.name} 保存失败：${error?.message || error}`) } } selected.clear(); if (started) { transferExpanded.value = true; Message.success(`已加入 ${started} 个保存任务`) } }
 function cancelTransfer(transferId: string) { const transfer = transfers[transferId]; if (!transfer) return; Modal.confirm({ title: '取消下载', content: `确定取消“${transfer.fileName || transfer.relativePath}”的下载吗？`, okButtonProps: { status: 'danger' }, onOk: async () => { dismissedTransfers.add(transferId); try { await ChatService.CancelSharedTransfer(transferId); delete transfers[transferId]; Message.success('下载已取消') } catch (error: any) { dismissedTransfers.delete(transferId); Message.error(error?.message || '取消下载失败') } } }) }
 async function pauseTransfer(transferId: string) { try { await ChatService.PauseSharedTransfer(transferId); if (transfers[transferId]) transfers[transferId].status = 'paused'; Message.success('下载已暂停，可继续下载') } catch (error: any) { Message.error(error?.message || '暂停下载失败') } }
 async function resumeTransfer(transferId: string) { try { const result = await ChatService.ResumeSharedTransfer(transferId); registerTransfer(result); transferExpanded.value = true; Message.success('已继续下载') } catch (error: any) { Message.error(error?.message || '继续下载失败') } }
@@ -644,8 +715,8 @@ async function preview(entry: Entry) {
   closeContext()
   if (!isPreviewable(entry)) { Message.info('该文件类型请先下载后打开'); return }
   try {
-    if (mode.value === 'owner') await ImageViewerService.OpenSharedPreviewFast(entry.relativePath, entry.entryId, entry.size, entry.modifiedAt)
-    else if (mode.value === 'friend') await ImageViewerService.OpenFriendSharedPreviewFast(deviceId, entry.relativePath, entry.entryId, entry.size, entry.modifiedAt)
+    if (mode.value === 'owner') await ImageViewerService.OpenSharedPreviewFast(activeFolderId.value, entry.relativePath, entry.entryId, entry.size, entry.modifiedAt)
+    else if (mode.value === 'friend') await ImageViewerService.OpenFriendSharedPreviewFast(deviceId, activeFolderId.value, entry.relativePath, entry.entryId, entry.size, entry.modifiedAt)
     else Message.warning('共享窗口参数无效')
   } catch (error: any) { Message.error(error?.message || '打开预览失败') }
 }
@@ -658,6 +729,7 @@ function handlePointerDown(event: PointerEvent) {
   const target = event.target
   if (searchVisible.value && (!(target instanceof Element) || !target.closest('.breadcrumb-search, .breadcrumb-actions'))) searchVisible.value = false
 }
+let wasSharedActive = props.active
 function ensureSharedActive() {
   if (!props.active && !props.preload) return
   if (!themeLoadStarted) {
@@ -666,9 +738,17 @@ function ensureSharedActive() {
   }
   void refresh(false)
 }
-watch([viewMode, search], () => scheduleInitialThumbnails())
-watch(() => [props.active, props.preload], () => ensureSharedActive())
-onMounted(() => { try { isMac.value = System.IsMac() } catch {} thumbnailObserver = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((items) => { for (const item of items) { if (!item.isIntersecting) continue; const path = (item.target as HTMLElement).dataset.thumbnailPath || ''; const entry = filteredEntries.value.find((candidate) => candidate.relativePath === path); if (entry) enqueueThumbnail(entry); thumbnailObserver?.unobserve(item.target) } }, { root: document.querySelector('.file-list'), rootMargin: '160px' }) : undefined; resetViewState(); window.addEventListener('pointerdown', handlePointerDown); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status?.rootPath === settings.rootPath) Object.assign(settings, status) }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; cancelThemeEvent = Events.On('chat:profile-updated', (event: any) => { const profile = event?.data ?? event; const hiddenFilesChanged = sharedOptions.showHiddenFiles !== (profile?.showHiddenFiles === true); applySharedOptions(profile); if (profile?.theme) applyTheme(profile.theme); else void loadTheme(); if (hiddenFilesChanged && !settingsPage.value) void refresh(true) }); ensureSharedActive() })
+watch([viewMode, search], ([nextViewMode]) => {
+  if (nextViewMode === 'list' || nextViewMode === 'thumb') localStorage.setItem('flyqpro.sharedDrive.viewMode', nextViewMode)
+  scheduleInitialThumbnails()
+})
+watch(() => props.active, (active) => {
+  if (active && !wasSharedActive) openAllShared()
+  wasSharedActive = active
+  ensureSharedActive()
+})
+watch(() => props.preload, () => ensureSharedActive())
+onMounted(() => { try { isMac.value = System.IsMac() } catch {} thumbnailObserver = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((items) => { for (const item of items) { if (!item.isIntersecting) continue; const path = (item.target as HTMLElement).dataset.thumbnailPath || ''; const entry = filteredEntries.value.find((candidate) => candidate.relativePath === path); if (entry) enqueueThumbnail(entry); thumbnailObserver?.unobserve(item.target) } }, { root: document.querySelector('.file-list'), rootMargin: '160px' }) : undefined; resetViewState(); window.addEventListener('pointerdown', handlePointerDown); window.addEventListener('keydown', handleKeydown); cancelSharedEvents = Events.On('chat:shared-progress', handleTransferEvent); const cancelStatsEvent = Events.On('chat:shared-stats-updated', (event: any) => { const status = event?.data ?? event; if (mode.value === 'owner' && status) { Object.assign(settings, status); if (Array.isArray(status.folders)) sharedFolders.value = status.folders as SharedFolder[] } }); const previousCancel = cancelSharedEvents; cancelSharedEvents = () => { previousCancel?.(); cancelStatsEvent?.() }; cancelThemeEvent = Events.On('chat:profile-updated', (event: any) => { const profile = event?.data ?? event; const hiddenFilesChanged = sharedOptions.showHiddenFiles !== (profile?.showHiddenFiles === true); applySharedOptions(profile); if (profile?.theme) applyTheme(profile.theme); else void loadTheme(); if (hiddenFilesChanged && !settingsPage.value) void refresh(true) }); ensureSharedActive() })
 onBeforeUnmount(() => { entriesRequestId++; refreshPromise = undefined; window.removeEventListener('pointerdown', handlePointerDown); window.removeEventListener('keydown', handleKeydown); thumbnailObserver?.disconnect(); thumbnailObserver = undefined; resetThumbnailState(); cancelSharedEvents?.(); cancelThemeEvent?.() })
 </script>
 
@@ -748,6 +828,36 @@ onBeforeUnmount(() => { entriesRequestId++; refreshPromise = undefined; window.r
 .thumb-meta { display:block; overflow:hidden; margin-top:3px; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
 .thumb-placeholder.loading { color:var(--accent); }
 .file-icon.file-thumb { object-fit:cover; border-radius:4px; background:var(--page-bg); }
+.folder-list { overflow:auto; }
+.folder-row { display:flex; align-items:center; width:100%; min-height:64px; box-sizing:border-box; padding:10px 14px; border:0; border-bottom:1px solid var(--line); background:transparent; color:inherit; text-align:left; cursor:pointer; font:inherit; }
+.folder-row:hover { background:color-mix(in srgb,var(--accent) 8%,var(--surface)); }
+.folder-row-main { min-width:0; flex:1; display:flex; flex-direction:column; gap:4px; }
+.folder-row-main strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.folder-row-main span, .folder-row-status { color:var(--muted); font-size:12px; }
+.folder-row-status { flex:0 0 auto; margin-left:12px; color:var(--accent); }
+.folder-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); align-content:start; gap:12px; overflow:auto; padding:14px; box-sizing:border-box; }
+.folder-card { display:flex; min-height:148px; flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:7px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:inherit; text-align:left; cursor:pointer; font:inherit; }
+.folder-card:hover { border-color:color-mix(in srgb,var(--accent) 50%,var(--line)); background:color-mix(in srgb,var(--accent) 7%,var(--surface)); }
+.folder-card-icon { display:grid; width:42px; height:42px; place-items:center; border-radius:8px; background:color-mix(in srgb,var(--fp-warning) 16%,var(--surface)); color:var(--fp-warning); }
+.folder-card-icon svg { width:25px; height:25px; }
+.folder-card strong { width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.folder-card > span:last-child { color:var(--muted); font-size:12px; }
+.settings-section-head { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 0 12px; }
+.settings-section-head > div { min-width:0; display:flex; flex-direction:column; gap:5px; }
+.settings-section-head strong { font-size:14px; }
+.settings-section-head span { color:var(--muted); font-size:12px; }
+.settings-add, .settings-remove { flex:0 0 auto; border:1px solid var(--line); border-radius:var(--fp-radius-sm); background:var(--surface); color:inherit; padding:6px 10px; cursor:pointer; font:inherit; }
+.settings-add { border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); color:var(--accent); }
+.settings-add:hover, .settings-remove:hover { background:color-mix(in srgb,var(--accent) 9%,var(--surface)); }
+.settings-folder-row { display:flex; align-items:center; gap:10px; min-height:72px; padding:10px 0; border-top:1px solid var(--line); }
+.settings-folder-icon { flex:0 0 20px; color:var(--fp-warning); }
+.settings-folder-main { min-width:0; flex:1; display:flex; flex-direction:column; gap:4px; }
+.settings-folder-main strong, .settings-folder-main span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-folder-main span, .settings-folder-main small { color:var(--muted); font-size:12px; }
+.settings-folder-status { flex:0 0 auto; color:var(--fp-success, #00b42a); font-size:12px; }
+.settings-folder-status.unavailable { color:var(--fp-danger, #f53f3f); }
+.settings-folder-empty { display:flex; align-items:center; justify-content:center; gap:8px; min-height:100px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+.settings-folder-empty svg { width:24px; height:24px; color:var(--fp-warning); }
 .shared-settings-page { flex:1; min-height:0; overflow:auto; padding:24px 28px 36px; background:var(--page-bg); }
 .settings-card { width:min(760px,100%); margin:0 auto; padding:4px 20px; border:1px solid var(--line); border-radius:var(--fp-radius-lg); background:var(--surface); }
 .settings-card-row { min-height:70px; display:flex; align-items:center; justify-content:space-between; gap:20px; }

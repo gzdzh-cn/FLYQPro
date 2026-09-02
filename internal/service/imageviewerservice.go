@@ -76,23 +76,26 @@ func (s *ImageViewerService) OpenImageViewer(conversationID string, messageID st
 	return s.openViewer(query, "图片预览")
 }
 
-func (s *ImageViewerService) OpenSharedPreview(relativePath string) error {
-	return s.openSharedPreviewWithMetadata(relativePath, "", 0, "")
+func (s *ImageViewerService) OpenSharedPreview(folderID, relativePath string) error {
+	return s.openSharedPreviewWithMetadata(folderID, relativePath, "", 0, "")
 }
 
 // OpenSharedPreviewFast accepts the metadata already present in the shared
 // list. It lets the viewer address the same remote thumbnail cache entry
 // instead of starting a second path-only lookup.
-func (s *ImageViewerService) OpenSharedPreviewFast(relativePath, entryID string, fileSize int64, modifiedAt string) error {
-	return s.openSharedPreviewWithMetadata(relativePath, entryID, fileSize, modifiedAt)
+func (s *ImageViewerService) OpenSharedPreviewFast(folderID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
+	return s.openSharedPreviewWithMetadata(folderID, relativePath, entryID, fileSize, modifiedAt)
 }
 
-func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID string, fileSize int64, modifiedAt string) error {
+func (s *ImageViewerService) openSharedPreviewWithMetadata(folderID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
 	if s.chatService == nil {
 		return fmt.Errorf("共享预览服务尚未初始化")
 	}
-	profile := s.chatService.engine.Profile()
-	entry, _, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+	folder, err := localSharedFolder(folderID)
+	if err != nil {
+		return err
+	}
+	entry, _, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 	if err != nil {
 		return err
 	}
@@ -101,6 +104,7 @@ func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID
 	}
 	query := url.Values{}
 	query.Set("source", "shared-owner")
+	query.Set("sharedFolderId", folderID)
 	query.Set("relativePath", filepath.ToSlash(relativePath))
 	if entryID != "" {
 		query.Set("entryId", entryID)
@@ -121,21 +125,25 @@ func (s *ImageViewerService) openSharedPreviewWithMetadata(relativePath, entryID
 	return s.openViewer(query, "共享文件预览")
 }
 
-func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, relativePath string) error {
-	return s.openFriendSharedPreviewWithMetadata(deviceID, relativePath, "", 0, "")
+func (s *ImageViewerService) OpenFriendSharedPreview(deviceID, folderID, relativePath string) error {
+	return s.openFriendSharedPreviewWithMetadata(deviceID, folderID, relativePath, "", 0, "")
 }
 
 // OpenFriendSharedPreviewFast carries the shared-entry identity to the
 // viewer. The old method remains for older frontend bundles.
-func (s *ImageViewerService) OpenFriendSharedPreviewFast(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
-	return s.openFriendSharedPreviewWithMetadata(deviceID, relativePath, entryID, fileSize, modifiedAt)
+func (s *ImageViewerService) OpenFriendSharedPreviewFast(deviceID, folderID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
+	return s.openFriendSharedPreviewWithMetadata(deviceID, folderID, relativePath, entryID, fileSize, modifiedAt)
 }
 
-func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
+func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, folderID, relativePath, entryID string, fileSize int64, modifiedAt string) error {
 	if s.chatService == nil {
 		return fmt.Errorf("共享预览服务尚未初始化")
 	}
 	deviceID = strings.TrimSpace(deviceID)
+	folderID = strings.TrimSpace(folderID)
+	if folderID == "" {
+		return fmt.Errorf("共享文件夹 ID 不能为空")
+	}
 	friends, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
 	if err != nil {
 		return err
@@ -159,6 +167,7 @@ func (s *ImageViewerService) openFriendSharedPreviewWithMetadata(deviceID, relat
 	query := url.Values{}
 	query.Set("source", "shared-friend")
 	query.Set("deviceId", deviceID)
+	query.Set("sharedFolderId", folderID)
 	query.Set("relativePath", filepath.ToSlash(relativePath))
 	if entryID != "" {
 		query.Set("entryId", entryID)

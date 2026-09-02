@@ -17,6 +17,7 @@ export {
     Profile,
     SharedEntriesPage,
     SharedEntry,
+    SharedFolder,
     SharedFolderStatus,
     SharedThumbnailRequest,
     SharedThumbnailResult,

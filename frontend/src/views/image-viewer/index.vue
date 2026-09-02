@@ -59,6 +59,7 @@ const initialMessageId = computed(() => String(route.query.messageId || ''))
 const previewSource = computed(() => String(route.query.source || ''))
 const sharedPreviewType = computed(() => String(route.query.previewType || '').toLowerCase())
 const sharedDeviceId = computed(() => String(route.query.deviceId || '').trim())
+const sharedFolderId = computed(() => String(route.query.sharedFolderId || '').trim())
 const sharedRelativePath = computed(() => String(route.query.relativePath || ''))
 const sharedEntryId = computed(() => String(route.query.entryId || ''))
 const sharedFileSize = computed(() => Number(route.query.fileSize || 0))
@@ -262,25 +263,28 @@ async function originalFor(message: any, token: number) {
 }
 
 async function sharedSourceFor(relativePath: string) {
-  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryPreview(relativePath)
-  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryPreview(sharedDeviceId.value, relativePath)
+  if (!sharedFolderId.value) throw new Error('共享文件夹参数无效')
+  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryPreview(sharedFolderId.value, relativePath)
+  if (previewSource.value === 'shared-friend' && sharedDeviceId.value) return ChatService.GetFriendSharedEntryPreview(sharedDeviceId.value, sharedFolderId.value, relativePath)
   throw new Error('共享预览参数无效')
 }
 
 async function sharedThumbnailFor(relativePath: string, entry?: SharedPreviewEntry) {
-  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryThumbnail(relativePath)
+  if (!sharedFolderId.value) throw new Error('共享文件夹参数无效')
+  if (previewSource.value === 'shared-owner') return ChatService.GetSharedEntryThumbnail(sharedFolderId.value, relativePath)
   if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
     const entryId = entry?.entryId || sharedEntryId.value
     const fileSize = entry?.size || sharedFileSize.value
     const modifiedAt = entry?.modifiedAt || sharedModifiedAt.value
-    if (entryId || fileSize || modifiedAt) return ChatService.GetFriendSharedEntryThumbnailCached(sharedDeviceId.value, relativePath, entryId, fileSize, modifiedAt)
-    return ChatService.GetFriendSharedEntryThumbnail(sharedDeviceId.value, relativePath)
+    if (entryId || fileSize || modifiedAt) return ChatService.GetFriendSharedEntryThumbnailCached(sharedDeviceId.value, sharedFolderId.value, relativePath, entryId, fileSize, modifiedAt)
+    return ChatService.GetFriendSharedEntryThumbnail(sharedDeviceId.value, sharedFolderId.value, relativePath)
   }
   throw new Error('共享预览参数无效')
 }
 
 async function sharedOriginalFor(relativePath: string) {
-  return PreviewStreamService.CreateSharedPreviewURL(previewSource.value, sharedDeviceId.value, relativePath)
+  if (!sharedFolderId.value) throw new Error('共享文件夹参数无效')
+  return PreviewStreamService.CreateSharedPreviewURL(previewSource.value, sharedDeviceId.value, sharedFolderId.value, relativePath)
 }
 
 function isImageSharedEntry(entry: SharedPreviewEntry) {
@@ -454,8 +458,8 @@ async function loadMessages() {
     try {
       const parentPath = parentSharedPath(requestedPath)
       const page = previewSource.value === 'shared-owner'
-        ? await ChatService.ListSharedEntriesPage(parentPath, 0, 100)
-        : await ChatService.ListFriendSharedEntriesPage(sharedDeviceId.value, parentPath, 0, 100)
+        ? await ChatService.ListSharedEntriesPage(sharedFolderId.value, parentPath, 0, 100)
+        : await ChatService.ListFriendSharedEntriesPage(sharedDeviceId.value, sharedFolderId.value, parentPath, 0, 100)
       const media = (page.entries || []).filter((entry: SharedPreviewEntry) => isSharedMediaEntry(entry))
       if (!media.some((entry: SharedPreviewEntry) => entry.relativePath === requestedPath)) {
         media.push(initialEntry)
@@ -538,10 +542,10 @@ async function downloadSharedImage() {
   if (!isSharedPreview.value || !path) return
   try {
     if (previewSource.value === 'shared-owner') {
-      await ChatService.DownloadSharedEntry(path)
+      await ChatService.DownloadSharedEntry(sharedFolderId.value, path)
       Message.success('图片已下载到应用目录')
     } else if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
-      const transfer = await ChatService.DownloadFriendSharedEntry(sharedDeviceId.value, path)
+      const transfer = await ChatService.DownloadFriendSharedEntry(sharedDeviceId.value, sharedFolderId.value, path)
       if (transfer?.transferId) Message.success('已开始下载图片')
     }
   } catch (operationError: any) {
@@ -554,10 +558,10 @@ async function saveSharedImageAs() {
   if (!isSharedPreview.value || !path) return
   try {
     if (previewSource.value === 'shared-owner') {
-      const target = await ChatService.SaveSharedEntryAs(path)
+      const target = await ChatService.SaveSharedEntryAs(sharedFolderId.value, path)
       if (target) Message.success('图片已保存')
     } else if (previewSource.value === 'shared-friend' && sharedDeviceId.value) {
-      const transfer = await ChatService.SaveFriendSharedEntryAs(sharedDeviceId.value, path)
+      const transfer = await ChatService.SaveFriendSharedEntryAs(sharedDeviceId.value, sharedFolderId.value, path)
       if (transfer?.transferId) Message.success('已开始保存图片')
     }
   } catch (operationError: any) {

@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-const sharedDriveCapability = "shared-drive-v1"
+const sharedDriveCapability = "shared-drive-v2"
 const sharedThumbnailBatchCapability = "shared-thumbnail-batch-v1"
 const maxSharedPreviewSize = 32 * 1024 * 1024
 
@@ -46,8 +46,8 @@ func (e *Engine) sharedAccessAllowed(deviceID string) bool {
 	if !profile.SharedEnabled {
 		return false
 	}
-	_, err := sharedRootPath(profile.SharedRootPath)
-	return err == nil
+	folders, err := ListSharedFolders(context.Background())
+	return err == nil && len(folders) > 0
 }
 
 func (e *Engine) sharedError(deviceID string) string {
@@ -60,13 +60,70 @@ func (e *Engine) sharedError(deviceID string) string {
 	return SharedUnavailableError
 }
 
+const sharedDriveUnsupportedError = "对方客户端不支持多共享文件夹"
+
+func writeSharedDriveUnsupportedError(conn net.Conn, session *wireSession, transferID string) {
+	_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: sharedDriveUnsupportedError})
+}
+
+func (e *Engine) sharedFolderForRequest(id string) (SharedFolder, string, error) {
+	folder, err := GetSharedFolder(context.Background(), id)
+	if err != nil {
+		return SharedFolder{}, "", fmt.Errorf("%s", SharedPathInvalidError)
+	}
+	root, err := sharedRootPath(folder.RootPath)
+	if err != nil {
+		return SharedFolder{}, "", err
+	}
+	folder.RootPath = root
+	return folder, root, nil
+}
+
+func (e *Engine) handleSharedFoldersRequest(conn net.Conn, hello wireMessage) {
+	if !e.sharedAccessAllowed(hello.DeviceID) {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
+		return
+	}
+	if !hasCapability(hello.Capabilities, sharedDriveCapability) {
+		writeSharedDriveUnsupportedError(conn, nil, "")
+		return
+	}
+	e.mu.RLock()
+	provider := e.sharedFoldersProvider
+	e.mu.RUnlock()
+	var folders []SharedFolder
+	var err error
+	if provider != nil {
+		folders, err = provider()
+	} else {
+		folders, err = ListSharedFolders(context.Background())
+	}
+	if err != nil {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: SharedUnavailableError})
+		return
+	}
+	for index := range folders {
+		folders[index].RootPath = ""
+	}
+	_ = writeWire(conn, wireMessage{Type: "share_folders_response", Status: "ok", SharedFolders: folders})
+}
+
 func (e *Engine) handleSharedListRequest(conn net.Conn, hello, message wireMessage) {
 	if !e.sharedAccessAllowed(hello.DeviceID) {
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
 		return
 	}
+	if !hasCapability(hello.Capabilities, sharedDriveCapability) {
+		writeSharedDriveUnsupportedError(conn, nil, "")
+		return
+	}
 	profile := e.Profile()
-	page, err := ListSharedEntriesPage(profile.SharedRootPath, message.RelativePath, message.ListOffset, message.ListLimit, profile.ShowHiddenFiles)
+	_, root, folderErr := e.sharedFolderForRequest(message.SharedFolderID)
+	if folderErr != nil {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: SharedPathInvalidError})
+		return
+	}
+	page, err := ListSharedEntriesPage(root, message.RelativePath, message.ListOffset, message.ListLimit, profile.ShowHiddenFiles)
 	if err != nil {
 		status := SharedPathInvalidError
 		if strings.Contains(err.Error(), SharedUnavailableError) {
@@ -75,7 +132,7 @@ func (e *Engine) handleSharedListRequest(conn net.Conn, hello, message wireMessa
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: status})
 		return
 	}
-	_ = writeWire(conn, wireMessage{Type: "share_list_response", Status: "ok", RelativePath: message.RelativePath, Entries: page.Entries, NextOffset: page.NextOffset, HasMore: page.HasMore})
+	_ = writeWire(conn, wireMessage{Type: "share_list_response", Status: "ok", SharedFolderID: message.SharedFolderID, RelativePath: message.RelativePath, Entries: page.Entries, NextOffset: page.NextOffset, HasMore: page.HasMore})
 }
 
 func (e *Engine) handleSharedThumbnailRequest(conn net.Conn, hello, message wireMessage) {
@@ -83,16 +140,24 @@ func (e *Engine) handleSharedThumbnailRequest(conn net.Conn, hello, message wire
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
 		return
 	}
-	profile := e.Profile()
+	if !hasCapability(hello.Capabilities, sharedDriveCapability) {
+		writeSharedDriveUnsupportedError(conn, nil, "")
+		return
+	}
+	_, root, folderErr := e.sharedFolderForRequest(message.SharedFolderID)
+	if folderErr != nil {
+		_ = writeWire(conn, wireMessage{Type: "share_error", Status: SharedPathInvalidError})
+		return
+	}
 	e.mu.RLock()
 	provider := e.sharedThumbnailProvider
 	e.mu.RUnlock()
 	var data, mimeType string
 	var err error
 	if provider != nil {
-		data, mimeType, err = provider(profile.SharedRootPath, message.RelativePath)
+		data, mimeType, err = provider(root, message.RelativePath)
 	} else {
-		data, mimeType, err = GetSharedEntryThumbnail(profile.SharedRootPath, message.RelativePath)
+		data, mimeType, err = GetSharedEntryThumbnail(root, message.RelativePath)
 	}
 	if err != nil {
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: "SHARED_THUMBNAIL_UNAVAILABLE"})
@@ -102,12 +167,16 @@ func (e *Engine) handleSharedThumbnailRequest(conn net.Conn, hello, message wire
 	if data == "" {
 		status = "pending"
 	}
-	_ = writeWire(conn, wireMessage{Type: "share_thumbnail_response", Status: status, RelativePath: message.RelativePath, MimeType: mimeType, Payload: data})
+	_ = writeWire(conn, wireMessage{Type: "share_thumbnail_response", Status: status, SharedFolderID: message.SharedFolderID, RelativePath: message.RelativePath, MimeType: mimeType, Payload: data})
 }
 
 func (e *Engine) handleSharedThumbnailBatchRequest(conn net.Conn, hello, message wireMessage) {
 	if !e.sharedAccessAllowed(hello.DeviceID) {
 		_ = writeWire(conn, wireMessage{Type: "share_error", Status: e.sharedError(hello.DeviceID)})
+		return
+	}
+	if !hasCapability(hello.Capabilities, sharedDriveCapability) {
+		writeSharedDriveUnsupportedError(conn, nil, "")
 		return
 	}
 	requests := message.ThumbnailRequests
@@ -118,15 +187,20 @@ func (e *Engine) handleSharedThumbnailBatchRequest(conn net.Conn, hello, message
 	if len(requests) > 24 {
 		requests = requests[:24]
 	}
-	profile := e.Profile()
 	e.mu.RLock()
 	provider := e.sharedThumbnailProvider
 	e.mu.RUnlock()
 	results := make([]SharedThumbnailResult, 0, len(requests))
 	for _, request := range requests {
 		clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(request.RelativePath)))
-		result := SharedThumbnailResult{RelativePath: clean, Status: "unavailable"}
+		result := SharedThumbnailResult{SharedFolderID: request.SharedFolderID, RelativePath: clean, Status: "unavailable"}
 		if clean == "." || strings.Contains(clean, "..") {
+			result.Error = SharedPathInvalidError
+			results = append(results, result)
+			continue
+		}
+		_, requestRoot, requestErr := e.sharedFolderForRequest(request.SharedFolderID)
+		if requestErr != nil {
 			result.Error = SharedPathInvalidError
 			results = append(results, result)
 			continue
@@ -134,9 +208,9 @@ func (e *Engine) handleSharedThumbnailBatchRequest(conn net.Conn, hello, message
 		var data, mimeType string
 		var err error
 		if provider != nil {
-			data, mimeType, err = provider(profile.SharedRootPath, clean)
+			data, mimeType, err = provider(requestRoot, clean)
 		} else {
-			data, mimeType, err = GetSharedEntryThumbnail(profile.SharedRootPath, clean)
+			data, mimeType, err = GetSharedEntryThumbnail(requestRoot, clean)
 		}
 		if err != nil {
 			result.Error = "SHARED_THUMBNAIL_UNAVAILABLE"
@@ -158,8 +232,16 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: message.TransferID, Status: e.sharedError(hello.DeviceID)})
 		return
 	}
-	profile := e.Profile()
-	entry, path, err := GetSharedEntry(profile.SharedRootPath, message.RelativePath, true)
+	if !hasCapability(hello.Capabilities, sharedDriveCapability) {
+		writeSharedDriveUnsupportedError(conn, session, message.TransferID)
+		return
+	}
+	_, root, folderErr := e.sharedFolderForRequest(message.SharedFolderID)
+	if folderErr != nil {
+		_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: message.TransferID, Status: SharedPathInvalidError})
+		return
+	}
+	entry, path, err := GetSharedEntry(root, message.RelativePath, true)
 	if err != nil || entry.IsDirectory {
 		status := SharedPathInvalidError
 		if err != nil && strings.Contains(err.Error(), SharedUnavailableError) {
@@ -188,7 +270,7 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 	if transferID == "" {
 		transferID = newID()
 	}
-	if err := sessionWrite(session, conn, wireMessage{Type: "share_download_response", TransferID: transferID, Status: "accepted", RelativePath: entry.RelativePath, FileName: entry.Name, FileSize: entry.Size, MimeType: entry.MimeType, SHA256: entry.SHA256, Offset: message.Offset}); err != nil {
+	if err := sessionWrite(session, conn, wireMessage{Type: "share_download_response", TransferID: transferID, Status: "accepted", SharedFolderID: message.SharedFolderID, RelativePath: entry.RelativePath, FileName: entry.Name, FileSize: entry.Size, MimeType: entry.MimeType, SHA256: entry.SHA256, Offset: message.Offset}); err != nil {
 		return
 	}
 	buffer := make([]byte, 256*1024)
@@ -224,7 +306,7 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 		return nil, nil, ProtocolDialect{}, fmt.Errorf("好友地址不可用")
 	}
 	if len(peer.Capabilities) > 0 && !hasCapability(peer.Capabilities, sharedDriveCapability) {
-		return nil, nil, ProtocolDialect{}, fmt.Errorf("对方客户端不支持共享盘")
+		return nil, nil, ProtocolDialect{}, fmt.Errorf("对方客户端不支持多共享文件夹")
 	}
 	clientTLS, err := e.clientTLSConfig()
 	if err != nil {
@@ -289,7 +371,7 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 		responseDialect, compatible := protocolDialectForMessage(response)
 		if !compatible || !hasCapability(response.Capabilities, sharedDriveCapability) {
 			_ = conn.Close()
-			lastErr = fmt.Errorf("对方客户端不支持共享盘")
+			lastErr = fmt.Errorf("对方客户端不支持多共享文件夹")
 			continue
 		}
 		return conn, decoder, responseDialect, nil
@@ -300,12 +382,46 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 	return nil, nil, ProtocolDialect{}, lastErr
 }
 
-func (e *Engine) ListFriendSharedEntries(ctx context.Context, deviceID, relativePath string, showHiddenFiles ...bool) ([]SharedEntry, error) {
-	page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, relativePath, 0, defaultSharedEntriesPageSize, showHiddenFiles...)
+func (e *Engine) ListFriendSharedEntries(ctx context.Context, deviceID, folderID, relativePath string, showHiddenFiles ...bool) ([]SharedEntry, error) {
+	page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, folderID, relativePath, 0, defaultSharedEntriesPageSize, showHiddenFiles...)
 	return page.Entries, err
 }
 
-func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, relativePath string, offset, limit int, showHiddenFiles ...bool) (SharedEntriesPage, error) {
+func (e *Engine) ListFriendSharedFolders(ctx context.Context, deviceID string) ([]SharedFolder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil || peer.Relation != PeerRelation {
+		return nil, fmt.Errorf("FRIENDSHIP_REQUIRED")
+	}
+	conn, decoder, _, err := e.dialSharedPeer(peer)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if err := writeWire(conn, wireMessage{Type: "share_folders_request"}); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	var response wireMessage
+	if err := decoder.Decode(&response); err != nil {
+		return nil, err
+	}
+	if response.Type == "share_error" {
+		return nil, fmt.Errorf("%s", response.Status)
+	}
+	if response.Type != "share_folders_response" || response.Status != "ok" {
+		return nil, fmt.Errorf("共享文件夹响应无效")
+	}
+	for index := range response.SharedFolders {
+		response.SharedFolders[index].RootPath = ""
+	}
+	return response.SharedFolders, nil
+}
+
+func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, folderID, relativePath string, offset, limit int, showHiddenFiles ...bool) (SharedEntriesPage, error) {
 	if err := ctx.Err(); err != nil {
 		return SharedEntriesPage{}, err
 	}
@@ -319,7 +435,10 @@ func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, rela
 	}
 	defer conn.Close()
 	showHidden := len(showHiddenFiles) > 0 && showHiddenFiles[0]
-	if err := writeWire(conn, wireMessage{Type: "share_list_request", RelativePath: relativePath, ListOffset: offset, ListLimit: limit, ShowHiddenFiles: showHidden}); err != nil {
+	if strings.TrimSpace(folderID) == "" {
+		return SharedEntriesPage{}, fmt.Errorf("共享文件夹 ID 不能为空")
+	}
+	if err := writeWire(conn, wireMessage{Type: "share_list_request", SharedFolderID: folderID, RelativePath: relativePath, ListOffset: offset, ListLimit: limit, ShowHiddenFiles: showHidden}); err != nil {
 		return SharedEntriesPage{}, err
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(8 * time.Second))
@@ -333,6 +452,9 @@ func (e *Engine) ListFriendSharedEntriesPage(ctx context.Context, deviceID, rela
 	}
 	if response.Type != "share_list_response" || response.Status != "ok" {
 		return SharedEntriesPage{}, fmt.Errorf("共享目录响应无效")
+	}
+	if response.SharedFolderID != folderID {
+		return SharedEntriesPage{}, fmt.Errorf("共享文件夹响应无效")
 	}
 	return SharedEntriesPage{Entries: response.Entries, NextOffset: response.NextOffset, HasMore: response.HasMore}, nil
 }
@@ -350,7 +472,7 @@ func sharedPreviewableEntry(entry SharedEntry) bool {
 	}
 }
 
-func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, relativePath string) (SharedEntry, error) {
+func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath string) (SharedEntry, error) {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." || strings.Contains(clean, "..") {
 		return SharedEntry{}, fmt.Errorf("SHARED_PATH_INVALID")
@@ -360,7 +482,7 @@ func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, relativePa
 		parent = ""
 	}
 	for offset := 0; ; {
-		page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, parent, offset, maxSharedEntriesPageSize)
+		page, err := e.ListFriendSharedEntriesPage(ctx, deviceID, folderID, parent, offset, maxSharedEntriesPageSize)
 		if err != nil {
 			return SharedEntry{}, err
 		}
@@ -381,7 +503,7 @@ func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, relativePa
 // caller. It deliberately exposes bytes through a callback instead of
 // assembling the complete file in memory, which lets the desktop preview
 // window start rendering while a large image is still arriving.
-func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relativePath string, before func(SharedEntry) error, write func([]byte) error) error {
+func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath string, before func(SharedEntry) error, write func([]byte) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -389,7 +511,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relative
 	if clean == "." || strings.Contains(clean, "..") {
 		return fmt.Errorf("SHARED_PATH_INVALID")
 	}
-	entry, err := e.findFriendSharedEntry(ctx, deviceID, clean)
+	entry, err := e.findFriendSharedEntry(ctx, deviceID, folderID, clean)
 	if err != nil {
 		return err
 	}
@@ -409,7 +531,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relative
 	}
 	defer conn.Close()
 	transferID := newID()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, RelativePath: clean, Offset: 0}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: 0}); err != nil {
 		return err
 	}
 	var response wireMessage
@@ -419,7 +541,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relative
 	if response.Type == "share_error" {
 		return fmt.Errorf("%s", response.Status)
 	}
-	if response.Type != "share_download_response" || response.Status != "accepted" || response.Offset != 0 {
+	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != 0 {
 		return fmt.Errorf("共享文件预览响应无效")
 	}
 	if response.FileSize < 0 || response.FileSize > maxSharedPreviewSize {
@@ -474,7 +596,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, relative
 	}
 }
 
-func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, relativePath string) (string, error) {
+func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, folderID, relativePath string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -482,7 +604,7 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 	if clean == "." || strings.Contains(clean, "..") {
 		return "", fmt.Errorf("SHARED_PATH_INVALID")
 	}
-	entry, err := e.findFriendSharedEntry(ctx, deviceID, clean)
+	entry, err := e.findFriendSharedEntry(ctx, deviceID, folderID, clean)
 	if err != nil {
 		return "", err
 	}
@@ -505,7 +627,7 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 	}
 	defer conn.Close()
 	transferID := newID()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, RelativePath: clean, Offset: 0}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: 0}); err != nil {
 		return "", err
 	}
 	var response wireMessage
@@ -515,7 +637,7 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 	if response.Type == "share_error" {
 		return "", fmt.Errorf("%s", response.Status)
 	}
-	if response.Type != "share_download_response" || response.Status != "accepted" || response.Offset != 0 {
+	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != 0 {
 		return "", fmt.Errorf("共享文件预览响应无效")
 	}
 	if response.FileSize < 0 || response.FileSize > maxSharedPreviewSize {
@@ -559,9 +681,12 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, rela
 // GetFriendSharedEntryThumbnail fetches only the bounded preview generated by
 // the remote peer. It is used by the shared-drive thumbnail grid and avoids
 // transferring or decoding the original file in the webview.
-func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, relativePath string) (string, error) {
+func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, folderID, relativePath string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(folderID) == "" {
+		return "", fmt.Errorf("共享文件夹 ID 不能为空")
 	}
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." || strings.Contains(clean, "..") {
@@ -576,7 +701,7 @@ func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, re
 		return "", err
 	}
 	defer conn.Close()
-	if err := writeWire(conn, wireMessage{Type: "share_thumbnail_request", RelativePath: clean}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_thumbnail_request", SharedFolderID: folderID, RelativePath: clean}); err != nil {
 		return "", err
 	}
 	// A peer that predates the thumbnail frame may keep the authenticated
@@ -593,6 +718,9 @@ func (e *Engine) GetFriendSharedEntryThumbnail(ctx context.Context, deviceID, re
 	}
 	if response.Type != "share_thumbnail_response" || (response.Status != "ok" && response.Status != "pending") {
 		return "", fmt.Errorf("共享图片缩略图响应无效")
+	}
+	if response.SharedFolderID != folderID {
+		return "", fmt.Errorf("共享文件夹响应无效")
 	}
 	if response.Status == "pending" || response.Payload == "" {
 		return "", nil
@@ -617,6 +745,11 @@ func (e *Engine) GetFriendSharedEntryThumbnails(ctx context.Context, deviceID st
 	if len(requests) > 24 {
 		requests = requests[:24]
 	}
+	for _, request := range requests {
+		if strings.TrimSpace(request.SharedFolderID) == "" {
+			return nil, fmt.Errorf("共享文件夹 ID 不能为空")
+		}
+	}
 	peer, err := e.peer(deviceID)
 	if err != nil || peer.Relation != PeerRelation {
 		return nil, fmt.Errorf("FRIENDSHIP_REQUIRED")
@@ -629,6 +762,11 @@ func (e *Engine) GetFriendSharedEntryThumbnails(ctx context.Context, deviceID st
 		return nil, err
 	}
 	defer conn.Close()
+	for _, request := range requests {
+		if strings.TrimSpace(request.SharedFolderID) == "" {
+			return nil, fmt.Errorf("共享文件夹 ID 不能为空")
+		}
+	}
 	if err := writeWire(conn, wireMessage{Type: "share_thumbnail_batch_request", ThumbnailRequests: requests}); err != nil {
 		return nil, err
 	}
@@ -644,13 +782,24 @@ func (e *Engine) GetFriendSharedEntryThumbnails(ctx context.Context, deviceID st
 	if response.Type != "share_thumbnail_batch_response" {
 		return nil, fmt.Errorf("共享图片缩略图批量响应无效")
 	}
+	if len(response.ThumbnailResults) != len(requests) {
+		return nil, fmt.Errorf("共享图片缩略图批量响应数量无效")
+	}
+	for index, result := range response.ThumbnailResults {
+		if result.SharedFolderID != requests[index].SharedFolderID {
+			return nil, fmt.Errorf("共享文件夹响应无效")
+		}
+	}
 	return response.ThumbnailResults, nil
 }
 
-func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, relativePath, targetPath string) (SharedTransfer, error) {
-	transfer := SharedTransfer{TransferID: newID(), DeviceID: deviceID, RelativePath: relativePath, Direction: "receive", Status: "starting", TargetPath: targetPath, FileName: filepath.Base(filepath.FromSlash(relativePath))}
+func (e *Engine) DownloadFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath, targetPath string) (SharedTransfer, error) {
+	transfer := SharedTransfer{TransferID: newID(), DeviceID: deviceID, SharedFolderID: folderID, RelativePath: relativePath, Direction: "receive", Status: "starting", TargetPath: targetPath, FileName: filepath.Base(filepath.FromSlash(relativePath))}
 	if err := ctx.Err(); err != nil {
 		return transfer, err
+	}
+	if strings.TrimSpace(folderID) == "" {
+		return transfer, fmt.Errorf("共享文件夹 ID 不能为空")
 	}
 	if strings.TrimSpace(targetPath) == "" {
 		return transfer, fmt.Errorf("下载目标不能为空")
@@ -763,7 +912,7 @@ func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, trans
 		return transfer, nil
 	default:
 	}
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, RelativePath: transfer.RelativePath, Offset: offset}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, SharedFolderID: transfer.SharedFolderID, RelativePath: transfer.RelativePath, Offset: offset}); err != nil {
 		return transfer, err
 	}
 	var response wireMessage
@@ -783,6 +932,9 @@ func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, trans
 		return transfer, fmt.Errorf("共享文件响应无效")
 	}
 	transfer.FileName, transfer.FileSize, transfer.RelativePath = response.FileName, response.FileSize, response.RelativePath
+	if response.SharedFolderID != transfer.SharedFolderID {
+		return transfer, fmt.Errorf("共享文件夹响应无效")
+	}
 	if transfer.FileSize < 0 {
 		return transfer, fmt.Errorf("共享文件大小无效")
 	}

@@ -759,9 +759,61 @@ export class SharedEntry {
     }
 }
 
+/**
+ * SharedFolder is the local management and remote discovery representation of
+ * one configured shared directory. RootPath is omitted from JSON when empty,
+ * which is how friend responses avoid exposing the owner's filesystem path.
+ */
+export class SharedFolder {
+    "id": string;
+    "name": string;
+    "rootPath"?: string;
+    "fileCount": number;
+    "folderCount": number;
+    "statsReady": boolean;
+    "statsLoading": boolean;
+    "updatedAt": string;
+
+    /** Creates a new SharedFolder instance. */
+    constructor($$source: Partial<SharedFolder> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("fileCount" in $$source)) {
+            this["fileCount"] = 0;
+        }
+        if (!("folderCount" in $$source)) {
+            this["folderCount"] = 0;
+        }
+        if (!("statsReady" in $$source)) {
+            this["statsReady"] = false;
+        }
+        if (!("statsLoading" in $$source)) {
+            this["statsLoading"] = false;
+        }
+        if (!("updatedAt" in $$source)) {
+            this["updatedAt"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SharedFolder instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SharedFolder {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SharedFolder($$parsedSource as Partial<SharedFolder>);
+    }
+}
+
 export class SharedFolderStatus {
     "enabled": boolean;
     "rootPath": string;
+    "folders": SharedFolder[];
     "fileCount": number;
     "folderCount": number;
     "availableBytes": number;
@@ -777,6 +829,9 @@ export class SharedFolderStatus {
         }
         if (!("rootPath" in $$source)) {
             this["rootPath"] = "";
+        }
+        if (!("folders" in $$source)) {
+            this["folders"] = [];
         }
         if (!("fileCount" in $$source)) {
             this["fileCount"] = 0;
@@ -804,13 +859,18 @@ export class SharedFolderStatus {
      * Creates a new SharedFolderStatus instance from a string or object.
      */
     static createFrom($$source: any = {}): SharedFolderStatus {
+        const $$createField2_0 = $$createType6;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("folders" in $$parsedSource) {
+            $$parsedSource["folders"] = $$createField2_0($$parsedSource["folders"]);
+        }
         return new SharedFolderStatus($$parsedSource as Partial<SharedFolderStatus>);
     }
 }
 
 export class SharedThumbnailRequest {
     "relativePath": string;
+    "sharedFolderId"?: string;
     "entryId"?: string;
     "fileSize"?: number;
     "modifiedAt"?: string;
@@ -834,6 +894,7 @@ export class SharedThumbnailRequest {
 }
 
 export class SharedThumbnailResult {
+    "sharedFolderId"?: string;
     "relativePath": string;
     "status": string;
     "mimeType"?: string;
@@ -865,6 +926,7 @@ export class SharedThumbnailResult {
 export class SharedTransfer {
     "transferId": string;
     "deviceId": string;
+    "sharedFolderId"?: string;
     "relativePath": string;
     "fileName": string;
     "fileSize": number;
@@ -922,3 +984,5 @@ const $$createType1 = $Create.Array($$createType0);
 const $$createType2 = $Create.Array($Create.Any);
 const $$createType3 = SharedEntry.createFrom;
 const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = SharedFolder.createFrom;
+const $$createType6 = $Create.Array($$createType5);

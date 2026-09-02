@@ -18,6 +18,7 @@ import (
 type remoteThumbnailRecord struct {
 	CacheKey       string `json:"cacheKey"`
 	DeviceID       string `json:"deviceId"`
+	SharedFolderID string `json:"sharedFolderId,omitempty"`
 	EntryID        string `json:"entryId,omitempty"`
 	RelativePath   string `json:"relativePath"`
 	FileSize       int64  `json:"fileSize"`
@@ -72,7 +73,7 @@ func (c *remoteThumbnailCache) saveLocked() {
 }
 
 func remoteThumbnailKey(deviceID string, request chat.SharedThumbnailRequest) string {
-	return fmt.Sprintf("1\x00%s\x00%s\x00%s\x00%d\x00%s", deviceID, request.EntryID, filepath.ToSlash(filepath.Clean(request.RelativePath)), request.FileSize, request.ModifiedAt)
+	return fmt.Sprintf("2\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s", deviceID, request.SharedFolderID, request.EntryID, filepath.ToSlash(filepath.Clean(request.RelativePath)), request.FileSize, request.ModifiedAt)
 }
 
 func (c *remoteThumbnailCache) cachePath(key string) string {
@@ -87,7 +88,7 @@ func (c *remoteThumbnailCache) cached(deviceID string, request chat.SharedThumbn
 	record, ok := c.records[key]
 	if !ok && request.EntryID != "" {
 		for oldKey, candidate := range c.records {
-			if candidate.DeviceID == deviceID && candidate.EntryID == request.EntryID && candidate.FileSize == request.FileSize && candidate.ModifiedAt == request.ModifiedAt {
+			if candidate.DeviceID == deviceID && candidate.SharedFolderID == request.SharedFolderID && candidate.EntryID == request.EntryID && candidate.FileSize == request.FileSize && candidate.ModifiedAt == request.ModifiedAt {
 				if info, err := os.Stat(candidate.ThumbnailPath); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 					delete(c.records, oldKey)
 					candidate.CacheKey = key
@@ -115,7 +116,7 @@ func (c *remoteThumbnailCache) cached(deviceID string, request chat.SharedThumbn
 	record.LastAccessedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	c.records[key] = record
 	c.saveLocked()
-	return chat.SharedThumbnailResult{RelativePath: request.RelativePath, Status: "ready", MimeType: record.MimeType, ThumbnailMime: record.MimeType, Payload: base64.StdEncoding.EncodeToString(data)}, true
+	return chat.SharedThumbnailResult{SharedFolderID: request.SharedFolderID, RelativePath: request.RelativePath, Status: "ready", MimeType: record.MimeType, ThumbnailMime: record.MimeType, Payload: base64.StdEncoding.EncodeToString(data)}, true
 }
 
 func (c *remoteThumbnailCache) put(deviceID string, request chat.SharedThumbnailRequest, result chat.SharedThumbnailResult) chat.SharedThumbnailResult {
@@ -124,7 +125,7 @@ func (c *remoteThumbnailCache) put(deviceID string, request chat.SharedThumbnail
 	}
 	data, err := base64.StdEncoding.DecodeString(result.Payload)
 	if err != nil || len(data) == 0 {
-		return chat.SharedThumbnailResult{RelativePath: request.RelativePath, Status: "unavailable", Error: "缩略图数据无效"}
+		return chat.SharedThumbnailResult{SharedFolderID: request.SharedFolderID, RelativePath: request.RelativePath, Status: "unavailable", Error: "缩略图数据无效"}
 	}
 	key := remoteThumbnailKey(deviceID, request)
 	path := c.cachePath(key)
@@ -147,7 +148,7 @@ func (c *remoteThumbnailCache) put(deviceID string, request chat.SharedThumbnail
 		mimeType = "image/jpeg"
 	}
 	c.mu.Lock()
-	c.records[key] = remoteThumbnailRecord{CacheKey: key, DeviceID: deviceID, EntryID: request.EntryID, RelativePath: request.RelativePath, FileSize: request.FileSize, ModifiedAt: request.ModifiedAt, MimeType: mimeType, ThumbnailPath: path, LastAccessedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	c.records[key] = remoteThumbnailRecord{CacheKey: key, DeviceID: deviceID, SharedFolderID: request.SharedFolderID, EntryID: request.EntryID, RelativePath: request.RelativePath, FileSize: request.FileSize, ModifiedAt: request.ModifiedAt, MimeType: mimeType, ThumbnailPath: path, LastAccessedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	c.saveLocked()
 	c.mu.Unlock()
 	result.Status = "ready"

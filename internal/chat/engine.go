@@ -58,6 +58,7 @@ type Engine struct {
 	activeDiscoveryIDs      map[string]struct{}
 	activeDiscoverySeen     map[string]struct{}
 	sharedThumbnailProvider func(root, relativePath string) (encoded, mimeType string, err error)
+	sharedFoldersProvider   func() ([]SharedFolder, error)
 }
 
 // SetSharedThumbnailProvider lets the desktop service supply a persistent
@@ -67,6 +68,15 @@ type Engine struct {
 func (e *Engine) SetSharedThumbnailProvider(provider func(root, relativePath string) (encoded, mimeType string, err error)) {
 	e.mu.Lock()
 	e.sharedThumbnailProvider = provider
+	e.mu.Unlock()
+}
+
+// SetSharedFoldersProvider lets the desktop service attach cached statistics
+// to the authenticated folder-list response without making the chat package
+// depend on the service package.
+func (e *Engine) SetSharedFoldersProvider(provider func() ([]SharedFolder, error)) {
+	e.mu.Lock()
+	e.sharedFoldersProvider = provider
 	e.mu.Unlock()
 }
 
@@ -682,6 +692,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		e.emit("chat:peer-updated", e.Peers())
 	case "share_list_request":
 		e.handleSharedListRequest(conn, hello, message)
+	case "share_folders_request":
+		e.handleSharedFoldersRequest(conn, hello)
 	case "share_thumbnail_request":
 		e.handleSharedThumbnailRequest(conn, hello, message)
 	case "share_thumbnail_batch_request":

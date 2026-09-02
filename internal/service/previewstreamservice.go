@@ -20,12 +20,13 @@ import (
 const previewTokenLifetime = 5 * time.Minute
 
 type previewToken struct {
-	kind         string
-	attachmentID string
-	source       string
-	deviceID     string
-	relativePath string
-	expiresAt    time.Time
+	kind           string
+	attachmentID   string
+	source         string
+	deviceID       string
+	sharedFolderID string
+	relativePath   string
+	expiresAt      time.Time
 }
 
 // PreviewStreamService exposes short-lived, identifier-bound media URLs. The
@@ -94,20 +95,24 @@ func (s *PreviewStreamService) CreateAttachmentPreviewURL(attachmentID string) (
 	return s.issueToken(previewToken{kind: "attachment", attachmentID: attachment.AttachmentID})
 }
 
-func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, relativePath string) (string, error) {
+func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, sharedFolderID, relativePath string) (string, error) {
 	if s.chatService == nil {
 		return "", fmt.Errorf("预览服务尚未初始化")
 	}
 	source = strings.TrimSpace(source)
 	deviceID = strings.TrimSpace(deviceID)
+	sharedFolderID = strings.TrimSpace(sharedFolderID)
 	relativePath = filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if relativePath == "." || strings.Contains(relativePath, "..") {
 		return "", fmt.Errorf("共享路径无效")
 	}
 	switch source {
 	case "shared-owner":
-		profile := s.chatService.engine.Profile()
-		entry, _, err := chat.GetSharedEntry(profile.SharedRootPath, relativePath, false)
+		folder, err := localSharedFolder(sharedFolderID)
+		if err != nil {
+			return "", err
+		}
+		entry, _, err := chat.GetSharedEntry(folder.RootPath, relativePath, false)
 		if err != nil {
 			return "", err
 		}
@@ -115,6 +120,9 @@ func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, relative
 			return "", fmt.Errorf("该文件不支持媒体预览")
 		}
 	case "shared-friend":
+		if sharedFolderID == "" {
+			return "", fmt.Errorf("共享文件夹 ID 不能为空")
+		}
 		peers, err := chat.ListPeers(gctx.New(), chat.PeerRelation)
 		if err != nil {
 			return "", err
@@ -135,7 +143,7 @@ func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, relative
 	default:
 		return "", fmt.Errorf("共享预览来源无效")
 	}
-	return s.issueToken(previewToken{kind: source, source: source, deviceID: deviceID, relativePath: relativePath})
+	return s.issueToken(previewToken{kind: source, source: source, deviceID: deviceID, sharedFolderID: sharedFolderID, relativePath: relativePath})
 }
 
 func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -154,8 +162,12 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if item.kind == "shared-owner" {
-		profile := s.chatService.engine.Profile()
-		entry, path, err := chat.GetSharedEntry(profile.SharedRootPath, item.relativePath, false)
+		folder, err := localSharedFolder(item.sharedFolderID)
+		if err != nil {
+			http.Error(w, "shared media unavailable", http.StatusNotFound)
+			return
+		}
+		entry, path, err := chat.GetSharedEntry(folder.RootPath, item.relativePath, false)
 		if err != nil || entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name)) {
 			http.Error(w, "shared media unavailable", http.StatusNotFound)
 			return
@@ -169,7 +181,7 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		started := false
-		err := s.chatService.engine.StreamFriendSharedEntry(r.Context(), item.deviceID, item.relativePath,
+		err := s.chatService.engine.StreamFriendSharedEntry(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath,
 			func(entry chat.SharedEntry) error {
 				if !isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name) {
 					return fmt.Errorf("该文件不支持媒体预览")
