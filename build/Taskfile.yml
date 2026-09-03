@@ -48,7 +48,7 @@ tasks:
       - go.mod
       - go.sum
     generates:
-      - "frontend/bindings/**/*"
+      - "frontend/bindings/flyqpro/internal/service/index.ts"
     cmds:
       - wails3 generate bindings -ts -f '{{.BUILD_FLAGS}}' -clean=true 
 
