@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="飞秋Pro"
+    Manufacturer="DZH"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{D4E4F7A4-45E2-4B68-AC91-6B2D9B9A1B55}"
+    Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的飞秋Pro。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="FlyQProIcon" SourceFile="$(var.AppIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="FlyQProIcon" />
+
+    <Feature Id="MainFeature" Title="飞秋Pro" Level="1">
+      <ComponentRef Id="ApplicationComponent" />
+      <ComponentRef Id="StartMenuComponent" />
+      <ComponentRef Id="DesktopComponent" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="FlyQPro">
+        <Component Id="ApplicationComponent" Guid="*">
+          <File Id="FlyQProExecutable" Source="$(var.AppExe)" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="FlyQPro">
+        <Component Id="StartMenuComponent" Guid="*">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="飞秋Pro"
+            Description="局域网点对点聊天工具"
+            Target="[INSTALLFOLDER]FlyQPro.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\DZH\FlyQPro"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopComponent" Guid="*">
+        <Shortcut
+          Id="DesktopShortcut"
+          Name="飞秋Pro"
+          Description="局域网点对点聊天工具"
+          Target="[INSTALLFOLDER]FlyQPro.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\DZH\FlyQPro"
+          Name="DesktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

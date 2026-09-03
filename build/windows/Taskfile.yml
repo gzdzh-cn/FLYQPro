@@ -38,6 +38,20 @@ tasks:
     cmds:
       - task: create:nsis:installer
 
+  # 一键命令：生产构建并使用 WiX v4 生成 MSI 安装包
+  package:msi:
+    summary: One-command build + WiX MSI installer for Windows
+    deps:
+      - task: build
+        vars:
+          PRODUCTION: "true"
+    cmds:
+      - wix build build/windows/msi/FlyQPro.wxs -arch {{.WIX_ARCH}} -d AppExe="{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe" -d AppIcon="{{.ROOT_DIR}}/build/windows/icons.ico" -d ProductVersion="{{.VERSION}}" -o "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}.msi"
+    vars:
+      ARCH: '{{.ARCH | default ARCH}}'
+      WIX_ARCH: '{{if eq .ARCH "arm64"}}arm64{{else}}x64{{end}}'
+      VERSION: '{{.VERSION | default "0.1.1"}}'
+
   generate:syso:
     summary: Generates Windows `.syso` file
     dir: build
