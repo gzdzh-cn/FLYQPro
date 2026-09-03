@@ -35,7 +35,7 @@
 !define INFO_PROJECTNAME "飞秋Pro"
 !define INFO_COMPANYNAME "FlyQPro"
 !define INFO_PRODUCTNAME "飞秋Pro"
-!define PRODUCT_EXECUTABLE "飞秋Pro.exe"
+!define PRODUCT_EXECUTABLE "FlyQPro.exe"
 !include "wails_tools.nsh"
 
 # The version information for this two must consist of 4 parts
@@ -93,7 +93,7 @@ FunctionEnd
 
 Name "${INFO_PRODUCTNAME}"
 OutFile "..\..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the installer's file.
-InstallDir "$PROGRAMFILES64\飞秋Pro"
+InstallDir "$PROGRAMFILES64\FlyQPro"
 ShowInstDetails show # This will always show the installation details.
 
 Function .onInit

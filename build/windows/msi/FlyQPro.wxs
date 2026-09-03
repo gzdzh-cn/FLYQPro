@@ -19,7 +19,7 @@
     </Feature>
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="飞秋Pro">
+      <Directory Id="INSTALLFOLDER" Name="FlyQPro">
         <Component Id="ApplicationComponent" Guid="*">
           <File Id="FlyQProExecutable" Source="$(var.AppExe)" KeyPath="yes" />
         </Component>
@@ -27,13 +27,13 @@
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="ApplicationProgramsFolder" Name="飞秋Pro">
+      <Directory Id="ApplicationProgramsFolder" Name="FlyQPro">
         <Component Id="StartMenuComponent" Guid="*">
           <Shortcut
             Id="StartMenuShortcut"
             Name="飞秋Pro"
             Description="局域网点对点聊天工具"
-            Target="[INSTALLFOLDER]飞秋Pro.exe"
+            Target="[INSTALLFOLDER]FlyQPro.exe"
             WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
           <RegistryValue
@@ -53,7 +53,7 @@
           Id="DesktopShortcut"
           Name="飞秋Pro"
           Description="局域网点对点聊天工具"
-          Target="[INSTALLFOLDER]飞秋Pro.exe"
+          Target="[INSTALLFOLDER]FlyQPro.exe"
           WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue
           Root="HKLM"
