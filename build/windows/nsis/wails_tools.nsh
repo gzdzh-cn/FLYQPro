@@ -5,7 +5,7 @@
 !include "FileFunc.nsh"
 
 !ifndef INFO_PROJECTNAME
-    !define INFO_PROJECTNAME "FlyQPro"
+    !define INFO_PROJECTNAME "飞秋Pro"
 !endif
 !ifndef INFO_COMPANYNAME
     !define INFO_COMPANYNAME "FlyQPro"

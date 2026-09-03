@@ -8,8 +8,8 @@ FlyQPro 是一款面向桌面端的局域网点对点聊天与文件共享工具
 
 请前往 [GitHub Releases](https://github.com/gzdzh-cn/FLYQPro/releases/latest) 下载最新版本。
 
-- [Apple Silicon ARM64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/FlyQPro-macos-arm64.dmg)
-- [Intel x86_64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/FlyQPro-macos-x86_64.dmg)
+- [Apple Silicon ARM64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/%E9%A3%9E%E7%A7%8BPro-macos-arm64.dmg)
+- [Intel x86_64 版本](https://github.com/gzdzh-cn/FLYQPro/releases/latest/download/%E9%A3%9E%E7%A7%8BPro-macos-x86_64.dmg)
 
 ## 技术栈概览
 

@@ -19,7 +19,7 @@
 ####
 ## The following information is taken from the wails_tools.nsh file, but they can be overwritten here.
 ####
-## !define INFO_PROJECTNAME    "my-project" # Default "FlyQPro"
+## !define INFO_PROJECTNAME    "my-project" # Default "飞秋Pro"
 ## !define INFO_COMPANYNAME    "My Company" # Default "My Company"
 ## !define INFO_PRODUCTNAME    "My Product Name" # Default "My Product"
 ## !define INFO_PRODUCTVERSION "1.0.0"     # Default "0.1.0"
@@ -32,7 +32,7 @@
 ####
 ## Include the wails tools
 ####
-!define INFO_PROJECTNAME "FlyQPro"
+!define INFO_PROJECTNAME "飞秋Pro"
 !define INFO_COMPANYNAME "FlyQPro"
 !define INFO_PRODUCTNAME "飞秋Pro"
 !define PRODUCT_EXECUTABLE "FlyQPro.exe"
@@ -93,7 +93,7 @@ FunctionEnd
 
 Name "${INFO_PRODUCTNAME}"
 OutFile "..\..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the installer's file.
-InstallDir "$PROGRAMFILES64\FlyQPro"
+InstallDir "$PROGRAMFILES64\飞秋Pro"
 ShowInstDetails show # This will always show the installation details.
 
 Function .onInit

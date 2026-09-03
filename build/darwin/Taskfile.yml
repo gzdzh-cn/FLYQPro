@@ -16,7 +16,7 @@ tasks:
       - go build {{.BUILD_FLAGS}} -o {{.OUTPUT}}
     vars:
       BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
-      DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
+      DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.BINARY_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
     env:
       GOOS: darwin
@@ -33,14 +33,14 @@ tasks:
       - task: build
         vars:
           ARCH: amd64
-          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-amd64"
+          OUTPUT: "{{.BIN_DIR}}/{{.BINARY_NAME}}-amd64"
       - task: build
         vars:
           ARCH: arm64
-          OUTPUT: "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
+          OUTPUT: "{{.BIN_DIR}}/{{.BINARY_NAME}}-arm64"
     cmds:
-      - lipo -create -output "{{.BIN_DIR}}/{{.APP_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}-amd64" "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
-      - rm "{{.BIN_DIR}}/{{.APP_NAME}}-amd64" "{{.BIN_DIR}}/{{.APP_NAME}}-arm64"
+      - lipo -create -output "{{.BIN_DIR}}/{{.BINARY_NAME}}" "{{.BIN_DIR}}/{{.BINARY_NAME}}-amd64" "{{.BIN_DIR}}/{{.BINARY_NAME}}-arm64"
+      - rm "{{.BIN_DIR}}/{{.BINARY_NAME}}-amd64" "{{.BIN_DIR}}/{{.BINARY_NAME}}-arm64"
 
   package:
     summary: Packages a production build of the application into a `.app` bundle
@@ -69,18 +69,24 @@ tasks:
       - mkdir -p "{{.BIN_DIR}}/dmg-staging"
       - cp -R "{{.BIN_DIR}}/{{.APP_NAME}}.app" "{{.BIN_DIR}}/dmg-staging/"
       - ln -s /Applications "{{.BIN_DIR}}/dmg-staging/Applications"
-      - hdiutil create -volname "{{.APP_NAME}}" -srcfolder "{{.BIN_DIR}}/dmg-staging" -ov -format UDZO "{{.BIN_DIR}}/{{.APP_NAME}}.dmg"
+      - hdiutil create -volname "{{.APP_NAME}}" -srcfolder "{{.BIN_DIR}}/dmg-staging" -ov -format UDZO "{{.BIN_DIR}}/{{.DMG_NAME}}"
       - rm -rf "{{.BIN_DIR}}/dmg-staging"
+    vars:
+      DMG_ARCH: '{{if eq .ARCH "amd64"}}x86_64{{else}}{{.ARCH}}{{end}}'
+      DMG_NAME: '{{.APP_NAME}}-macos-{{.DMG_ARCH}}.dmg'
 
 
   create:app:bundle:
     summary: Creates an `.app` bundle
     cmds:
-      - mkdir -p {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/{MacOS,Resources}
-      - cp build/darwin/icons.icns {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources
-      - cp {{.BIN_DIR}}/{{.APP_NAME}} {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS
-      - cp build/darwin/Info.plist {{.BIN_DIR}}/{{.APP_NAME}}.app/Contents
+      - mkdir -p "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS" "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources/zh-Hans.lproj" "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources/zh_CN.lproj"
+      - cp build/darwin/icons.icns "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources"
+      - cp build/darwin/zh-Hans.lproj/InfoPlist.strings "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources/zh-Hans.lproj"
+      - cp build/darwin/zh_CN.lproj/InfoPlist.strings "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Resources/zh_CN.lproj"
+      - cp "{{.BIN_DIR}}/{{.BINARY_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS"
+      - cp build/darwin/Info.plist "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents"
+      - plutil -insert LSHasLocalizedDisplayName -bool true "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Info.plist" 2>/dev/null || plutil -replace LSHasLocalizedDisplayName -bool true "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/Info.plist"
 
   run:
     cmds:
-      - '{{.BIN_DIR}}/{{.APP_NAME}}'
+      - '{{.BIN_DIR}}/{{.BINARY_NAME}}'

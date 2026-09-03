@@ -3,7 +3,7 @@
 #
 # The lines below are called `modelines`. See `:help modeline`
 
-name: "goflyerp.exe"
+name: "FlyQPro"
 arch: ${GOARCH}
 platform: "linux"
 version: "0.1.0"
@@ -17,12 +17,12 @@ license: "MIT"
 release: "1"
 
 contents:
-  - src: "./bin/goflyerp.exe"
-    dst: "/usr/local/bin/goflyerp.exe"
+  - src: "./bin/FlyQPro"
+    dst: "/usr/local/bin/FlyQPro"
   - src: "./build/appicon.png"
-    dst: "/usr/share/icons/hicolor/128x128/apps/goflyerp.exe.png"
-  - src: "./build/linux/goflyerp.exe.desktop"
-    dst: "/usr/share/applications/goflyerp.exe.desktop"
+    dst: "/usr/share/icons/hicolor/128x128/apps/FlyQPro.png"
+  - src: "./build/linux/FlyQPro.desktop"
+    dst: "/usr/share/applications/FlyQPro.desktop"
 
 depends:
   - gtk3

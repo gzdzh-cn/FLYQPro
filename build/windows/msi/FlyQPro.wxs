@@ -19,7 +19,7 @@
     </Feature>
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="FlyQPro">
+      <Directory Id="INSTALLFOLDER" Name="飞秋Pro">
         <Component Id="ApplicationComponent" Guid="*">
           <File Id="FlyQProExecutable" Source="$(var.AppExe)" KeyPath="yes" />
         </Component>
@@ -27,7 +27,7 @@
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="ApplicationProgramsFolder" Name="FlyQPro">
+      <Directory Id="ApplicationProgramsFolder" Name="飞秋Pro">
         <Component Id="StartMenuComponent" Guid="*">
           <Shortcut
             Id="StartMenuShortcut"

@@ -7,7 +7,8 @@ includes:
   linux: ./build/linux/Taskfile.yml
 
 vars:
-  APP_NAME: "FlyQPro"
+  APP_NAME: "飞秋Pro"
+  BINARY_NAME: "FlyQPro"
   BIN_DIR: "bin"
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
 

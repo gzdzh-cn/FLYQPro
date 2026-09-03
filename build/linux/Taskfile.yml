@@ -11,7 +11,7 @@ tasks:
       - task: common:build:frontend
       - task: common:generate:icons
     cmds:
-      - go build {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}
+      - go build {{.BUILD_FLAGS}} -o "{{.BIN_DIR}}/{{.BINARY_NAME}}"
     vars:
       BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
     env:
@@ -41,15 +41,18 @@ tasks:
           PRODUCTION: "true"
       - task: generate:dotdesktop
     cmds:
-      - cp {{.APP_BINARY}} {{.APP_NAME}}
+      - cp "{{.APP_BINARY}}" "{{.BINARY_NAME}}"
       - cp ../../appicon.png appicon.png
-      - wails3 generate appimage -binary {{.APP_NAME}} -icon {{.ICON}} -desktopfile {{.DESKTOP_FILE}} -outputdir {{.OUTPUT_DIR}} -builddir {{.ROOT_DIR}}/build/linux/appimage/build
+      - wails3 generate appimage -binary "{{.BINARY_NAME}}" -icon "{{.ICON}}" -desktopfile "{{.DESKTOP_FILE}}" -outputdir "{{.OUTPUT_DIR}}" -builddir "{{.ROOT_DIR}}/build/linux/appimage/build"
+      - mv "{{.OUTPUT_DIR}}/{{.BINARY_NAME}}-{{.APPIMAGE_ARCH}}.AppImage" "{{.OUTPUT_DIR}}/{{.APP_NAME}}-{{.APPIMAGE_ARCH}}.AppImage"
     vars:
       APP_NAME: '{{.APP_NAME}}'
-      APP_BINARY: '../../../bin/{{.APP_NAME}}'
+      BINARY_NAME: '{{.BINARY_NAME}}'
+      APP_BINARY: '../../../bin/{{.BINARY_NAME}}'
       ICON: '../../appicon.png'
-      DESKTOP_FILE: '../{{.APP_NAME}}.desktop'
+      DESKTOP_FILE: '../{{.BINARY_NAME}}.desktop'
       OUTPUT_DIR: '../../../bin'
+      APPIMAGE_ARCH: '{{if eq .ARCH "arm64"}}aarch64{{else}}x86_64{{end}}'
 
   create:deb:
     summary: Creates a deb package
@@ -84,31 +87,32 @@ tasks:
   generate:deb:
     summary: Creates a deb package
     cmds: 
-      - wails3 tool package -name {{.APP_NAME}} -format deb -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
+      - wails3 tool package -name "{{.APP_NAME}}-{{.ARCH}}" -format deb -config ./build/linux/nfpm/nfpm.yaml -out "{{.ROOT_DIR}}/bin"
 
   generate:rpm:
     summary: Creates a rpm package
     cmds: 
-      - wails3 tool package -name {{.APP_NAME}} -format rpm -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
+      - wails3 tool package -name "{{.APP_NAME}}-{{.ARCH}}" -format rpm -config ./build/linux/nfpm/nfpm.yaml -out "{{.ROOT_DIR}}/bin"
 
   generate:aur:
     summary: Creates a arch linux packager package
     cmds: 
-      - wails3 tool package -name {{.APP_NAME}} -format archlinux -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
+      - wails3 tool package -name "{{.APP_NAME}}-{{.ARCH}}" -format archlinux -config ./build/linux/nfpm/nfpm.yaml -out "{{.ROOT_DIR}}/bin"
 
   generate:dotdesktop:
     summary: Generates a `.desktop` file
     dir: build
     cmds:
       - mkdir -p {{.ROOT_DIR}}/build/linux/appimage
-      - wails3 generate .desktop -name "{{.APP_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -outputfile {{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop -categories "{{.CATEGORIES}}"
+      - wails3 generate .desktop -name "{{.APP_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.BINARY_NAME}}.desktop" -categories "{{.CATEGORIES}}"
     vars:
       APP_NAME: '{{.APP_NAME}}'
-      EXEC: '{{.APP_NAME}}'
+      BINARY_NAME: '{{.BINARY_NAME}}'
+      EXEC: '{{.BINARY_NAME}}'
       ICON: 'appicon'
       CATEGORIES: 'Development;'
-      OUTPUTFILE: '{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop'
+      OUTPUTFILE: '{{.ROOT_DIR}}/build/linux/{{.BINARY_NAME}}.desktop'
 
   run:
     cmds:
-      - '{{.BIN_DIR}}/{{.APP_NAME}}'
+      - '{{.BIN_DIR}}/{{.BINARY_NAME}}'

@@ -1,4 +1,4 @@
-# 飞秋 Pro v0.1.1
+# 飞秋Pro v0.1.1
 
 ## 版本说明
 
@@ -17,13 +17,13 @@
 
 | 平台 | 适用设备 | 安装包区别 |
 | --- | --- | --- |
-| macOS ARM64 | Apple Silicon Mac | 原生 ARM64 DMG |
-| macOS x86_64 | Intel Mac | 原生 Intel DMG |
-| Windows x64 NSIS | Intel/AMD 64 位 Windows | `.exe` 安装包，包含 WebView2 引导器，普通用户优先使用 |
-| Windows ARM64 NSIS | ARM64 Windows | `.exe` 安装包，包含 WebView2 引导器 |
-| Windows x64 MSI | Intel/AMD 64 位 Windows | `.msi` 安装包，适合系统部署；需要设备已有 WebView2 Runtime |
-| Windows ARM64 MSI | ARM64 Windows | `.msi` 安装包，适合系统部署；需要设备已有 WebView2 Runtime |
-| Linux | Linux x64 | 根据实际上传内容提供 AppImage、deb、rpm 或 Arch Linux 包 |
+| macOS ARM64 | Apple Silicon Mac | `飞秋Pro-macos-arm64.dmg`，内含 `飞秋Pro.app` |
+| macOS x86_64 | Intel Mac | `飞秋Pro-macos-x86_64.dmg`，内含 `飞秋Pro.app` |
+| Windows x64 NSIS | Intel/AMD 64 位 Windows | `飞秋Pro-amd64-installer.exe`，包含 WebView2 引导器 |
+| Windows ARM64 NSIS | ARM64 Windows | `飞秋Pro-arm64-installer.exe`，包含 WebView2 引导器 |
+| Windows x64 MSI | Intel/AMD 64 位 Windows | `飞秋Pro-amd64.msi`，适合系统部署；需要设备已有 WebView2 Runtime |
+| Windows ARM64 MSI | ARM64 Windows | `飞秋Pro-arm64.msi`，适合系统部署；需要设备已有 WebView2 Runtime |
+| Linux | Linux x64 | `飞秋Pro-x86_64.AppImage`、`飞秋Pro-amd64.deb`、`飞秋Pro-amd64.rpm` 或 `飞秋Pro-amd64.pkg.tar.zst` |
 
 Windows 的 NSIS 和 MSI 是两套独立安装包，不需要同时安装。普通用户建议下载 NSIS 版本；需要通过系统软件管理或企业部署时可以选择 MSI 版本。
 
@@ -33,22 +33,27 @@ Windows 的 NSIS 和 MSI 是两套独立安装包，不需要同时安装。普�
 
 ### macOS
 
-- [Apple Silicon ARM64 DMG](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-macos-arm64.dmg)
-- [Intel x86_64 DMG](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-macos-x86_64.dmg)
+- [Apple Silicon ARM64 DMG](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-macos-arm64.dmg)
+- [Intel x86_64 DMG](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-macos-x86_64.dmg)
 
 ### Windows NSIS
 
-- [Windows x64 EXE](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-amd64-installer.exe)
-- [Windows ARM64 EXE](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-arm64-installer.exe)
+- [Windows x64 EXE](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-amd64-installer.exe)
+- [Windows ARM64 EXE](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-arm64-installer.exe)
 
 ### Windows MSI
 
-- [Windows x64 MSI](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-amd64.msi)
-- [Windows ARM64 MSI](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/FlyQPro-arm64.msi)
+- [Windows x64 MSI](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-amd64.msi)
+- [Windows ARM64 MSI](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-arm64.msi)
 
 ### Linux
 
-Linux 包的文件名以实际 Release 附件为准：[查看全部 Linux 下载文件](https://github.com/gzdzh-cn/FLYQPro/releases/tag/v0.1.1)。
+- [Linux x64 AppImage](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-x86_64.AppImage)
+- [Linux x64 deb](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-amd64.deb)
+- [Linux x64 rpm](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-amd64.rpm)
+- [Linux x64 Arch Linux](https://github.com/gzdzh-cn/FLYQPro/releases/download/v0.1.1/%E9%A3%9E%E7%A7%8BPro-amd64.pkg.tar.zst)
+
+Linux 包内部保留 `FlyQPro` 技术文件名以兼容发行版打包工具，实际应用名、桌面入口和下载文件名均为“飞秋Pro”。
 
 ## 安装提示
 
