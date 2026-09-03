@@ -504,8 +504,22 @@ func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, folderID, 
 // assembling the complete file in memory, which lets the desktop preview
 // window start rendering while a large image is still arriving.
 func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath string, before func(SharedEntry) error, write func([]byte) error) error {
+	return e.streamFriendSharedEntry(ctx, deviceID, folderID, relativePath, 0, before, write)
+}
+
+// StreamFriendSharedEntryRange streams a remote shared file beginning at the
+// requested byte offset. HTTP video clients use this to seek MP4 metadata and
+// later media segments without downloading the file from byte zero each time.
+func (e *Engine) StreamFriendSharedEntryRange(ctx context.Context, deviceID, folderID, relativePath string, offset int64, before func(SharedEntry) error, write func([]byte) error) error {
+	return e.streamFriendSharedEntry(ctx, deviceID, folderID, relativePath, offset, before, write)
+}
+
+func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath string, offset int64, before func(SharedEntry) error, write func([]byte) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if offset < 0 {
+		return fmt.Errorf("SHARED_OFFSET_INVALID")
 	}
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." || strings.Contains(clean, "..") {
@@ -531,7 +545,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	}
 	defer conn.Close()
 	transferID := newID()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: 0}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: offset}); err != nil {
 		return err
 	}
 	var response wireMessage
@@ -541,10 +555,10 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if response.Type == "share_error" {
 		return fmt.Errorf("%s", response.Status)
 	}
-	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != 0 {
+	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != offset {
 		return fmt.Errorf("共享文件预览响应无效")
 	}
-	if response.FileSize < 0 || response.FileSize > maxSharedPreviewSize {
+	if response.FileSize < offset || response.FileSize > maxSharedPreviewSize {
 		return fmt.Errorf("在线预览文件过大，请先下载")
 	}
 	entry.Name = response.FileName
@@ -559,6 +573,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	}
 	hash := sha256.New()
 	var received int64
+	expectedBytes := response.FileSize - offset
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -573,7 +588,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID
 				return fmt.Errorf("共享传输标识无效")
 			}
 			payload, decodeErr := base64.StdEncoding.DecodeString(message.Payload)
-			if decodeErr != nil || received+int64(len(payload)) > response.FileSize {
+			if decodeErr != nil || received+int64(len(payload)) > expectedBytes {
 				return fmt.Errorf("共享文件数据无效")
 			}
 			if _, err := hash.Write(payload); err != nil {
@@ -588,7 +603,7 @@ func (e *Engine) StreamFriendSharedEntry(ctx context.Context, deviceID, folderID
 		case "share_error":
 			return fmt.Errorf("%s", message.Status)
 		case "share_complete":
-			if received != response.FileSize || (message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
+			if received != expectedBytes || (offset == 0 && message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
 				return fmt.Errorf("共享文件校验失败")
 			}
 			return nil

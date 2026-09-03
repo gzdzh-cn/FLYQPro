@@ -27,7 +27,7 @@
         <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
       <iframe v-if="source && isPdfPreview" :key="viewerContentKey" class="pdf-preview" :src="source" :title="imageViewerName" />
-      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline preload="metadata" @dblclick.stop />
+      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline preload="metadata" @error="handleVideoError" @dblclick.stop />
       <template v-else>
         <img v-if="thumbnailSource" class="preview-image preview-thumbnail" :class="{ 'preview-image-faded': originalReady }" :src="thumbnailSource" :alt="imageViewerName" :style="imageTransform" draggable="false" />
         <img v-if="originalSource" class="preview-image preview-original" :class="{ 'preview-image-visible': originalReady }" :src="originalSource" :alt="imageViewerName" :style="imageTransform" draggable="false" @load="handleOriginalLoad" @error="handleOriginalError" />
@@ -294,6 +294,12 @@ function isVideoSharedEntry(entry: SharedPreviewEntry) {
   return !entry.isDirectory && (String(entry.mimeType || '').toLowerCase().startsWith('video/') || /\.(3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ogv|ts|webm|wmv)$/i.test(entry.name))
 }
 function isSharedMediaEntry(entry: SharedPreviewEntry) { return isImageSharedEntry(entry) || isVideoSharedEntry(entry) }
+function handleVideoError() {
+  if (isVideoPreview.value) {
+    loading.value = false
+    error.value = '视频暂时无法读取'
+  }
+}
 function parentSharedPath(path: string) {
   const parts = String(path || '').split('/').filter(Boolean)
   parts.pop()

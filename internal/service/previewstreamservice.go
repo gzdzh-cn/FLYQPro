@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,87 @@ import (
 )
 
 const previewTokenLifetime = 5 * time.Minute
+
+type previewRangeSpec struct {
+	start    int64
+	end      int64
+	suffix   int64
+	hasStart bool
+	hasEnd   bool
+}
+
+type previewRangeError struct {
+	contentRange string
+}
+
+func (e *previewRangeError) Error() string { return "请求的视频范围无效" }
+
+func parsePreviewRange(value string) (*previewRangeSpec, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(strings.ToLower(value), "bytes=") {
+		return nil, fmt.Errorf("不支持的预览范围")
+	}
+	value = strings.TrimSpace(value[len("bytes="):])
+	if value == "" || strings.Contains(value, ",") {
+		return nil, fmt.Errorf("不支持多个预览范围")
+	}
+	hyphen := strings.IndexByte(value, '-')
+	if hyphen < 0 {
+		return nil, fmt.Errorf("预览范围格式无效")
+	}
+	left, right := strings.TrimSpace(value[:hyphen]), strings.TrimSpace(value[hyphen+1:])
+	if left == "" && right == "" {
+		return nil, fmt.Errorf("预览范围格式无效")
+	}
+	spec := &previewRangeSpec{start: -1, end: -1, suffix: -1}
+	if left == "" {
+		suffix, err := strconv.ParseInt(right, 10, 64)
+		if err != nil || suffix <= 0 {
+			return nil, fmt.Errorf("预览范围格式无效")
+		}
+		spec.suffix = suffix
+		return spec, nil
+	}
+	start, err := strconv.ParseInt(left, 10, 64)
+	if err != nil || start < 0 {
+		return nil, fmt.Errorf("预览范围格式无效")
+	}
+	spec.start = start
+	spec.hasStart = true
+	if right != "" {
+		end, err := strconv.ParseInt(right, 10, 64)
+		if err != nil || end < start {
+			return nil, fmt.Errorf("预览范围格式无效")
+		}
+		spec.end = end
+		spec.hasEnd = true
+	}
+	return spec, nil
+}
+
+func resolvePreviewRange(spec *previewRangeSpec, size int64) (start, end int64, ok bool) {
+	if spec == nil || size <= 0 {
+		return 0, 0, spec == nil && size >= 0
+	}
+	if spec.suffix > 0 {
+		length := spec.suffix
+		if length > size {
+			length = size
+		}
+		return size - length, size - 1, true
+	}
+	if !spec.hasStart || spec.start >= size {
+		return 0, 0, false
+	}
+	end = size - 1
+	if spec.hasEnd && spec.end < end {
+		end = spec.end
+	}
+	return spec.start, end, end >= spec.start
+}
 
 type previewToken struct {
 	kind           string
@@ -180,17 +263,46 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "preview unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		rangeSpec, rangeErr := parsePreviewRange(r.Header.Get("Range"))
+		if rangeErr != nil {
+			w.Header().Set("Content-Range", "bytes */*")
+			http.Error(w, rangeErr.Error(), http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		streamOffset := int64(0)
+		if rangeSpec != nil && rangeSpec.hasStart {
+			streamOffset = rangeSpec.start
+		}
 		started := false
-		err := s.chatService.engine.StreamFriendSharedEntry(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath,
+		var invalidRange *previewRangeError
+		skipBytes := int64(0)
+		remaining := int64(-1)
+		err := s.chatService.engine.StreamFriendSharedEntryRange(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath, streamOffset,
 			func(entry chat.SharedEntry) error {
 				if !isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name) {
 					return fmt.Errorf("该文件不支持媒体预览")
 				}
-				w.Header().Set("Content-Type", previewMime(entry.MimeType, entry.Name))
-				if entry.Size >= 0 {
-					w.Header().Set("Content-Length", fmt.Sprint(entry.Size))
+				start, end, ok := resolvePreviewRange(rangeSpec, entry.Size)
+				if !ok {
+					invalidRange = &previewRangeError{contentRange: fmt.Sprintf("bytes */%d", entry.Size)}
+					return invalidRange
 				}
+				w.Header().Set("Content-Type", previewMime(entry.MimeType, entry.Name))
+				w.Header().Set("Accept-Ranges", "bytes")
 				w.Header().Set("Cache-Control", "no-store")
+				if rangeSpec == nil {
+					w.Header().Set("Content-Length", fmt.Sprint(entry.Size))
+				} else {
+					remaining = end - start + 1
+					w.Header().Set("Content-Length", fmt.Sprint(remaining))
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, entry.Size))
+					w.WriteHeader(http.StatusPartialContent)
+					// A suffix range is resolved after the peer tells us the file
+					// size, so discard the leading bytes from the offset-zero stream.
+					if !rangeSpec.hasStart {
+						skipBytes = start
+					}
+				}
 				started = true
 				return nil
 			},
@@ -198,12 +310,39 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				if !started {
 					return fmt.Errorf("预览尚未建立")
 				}
-				_, err := w.Write(data)
+				if skipBytes > 0 {
+					if int64(len(data)) <= skipBytes {
+						skipBytes -= int64(len(data))
+						return nil
+					}
+					data = data[skipBytes:]
+					skipBytes = 0
+				}
+				if rangeSpec != nil {
+					if remaining <= 0 {
+						return io.EOF
+					}
+					if int64(len(data)) > remaining {
+						data = data[:remaining]
+					}
+				}
+				n, err := w.Write(data)
+				if rangeSpec != nil {
+					remaining -= int64(n)
+				}
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
+				if err == nil && rangeSpec != nil && remaining == 0 {
+					return io.EOF
+				}
 				return err
 			})
+		if invalidRange != nil {
+			w.Header().Set("Content-Range", invalidRange.contentRange)
+			http.Error(w, invalidRange.Error(), http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
 		if err != nil && !started {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		}
