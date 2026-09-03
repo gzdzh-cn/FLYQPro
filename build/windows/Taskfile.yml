@@ -3,6 +3,10 @@ version: '3'
 includes:
   common: ../Taskfile.yml
 
+vars:
+  # Windows 的中间可执行文件也使用中文产品名，避免打包目录留下英文 exe。
+  BINARY_NAME: '{{.APP_NAME}}'
+
 tasks:
   build:
     summary: Builds the application for Windows

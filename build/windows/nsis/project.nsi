@@ -35,7 +35,7 @@
 !define INFO_PROJECTNAME "飞秋Pro"
 !define INFO_COMPANYNAME "FlyQPro"
 !define INFO_PRODUCTNAME "飞秋Pro"
-!define PRODUCT_EXECUTABLE "FlyQPro.exe"
+!define PRODUCT_EXECUTABLE "飞秋Pro.exe"
 !include "wails_tools.nsh"
 
 # The version information for this two must consist of 4 parts
