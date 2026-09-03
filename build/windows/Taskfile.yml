@@ -14,7 +14,7 @@ tasks:
       - task: common:generate:icons
     cmds:
       - task: generate:syso
-      - cmd: powershell Remove-Item -Force "{{.BIN_DIR}}\FlyQPro.exe" -ErrorAction SilentlyContinue
+      - cmd: powershell -NoProfile -NonInteractive -Command "if (Test-Path -LiteralPath '{{.BIN_DIR}}\FlyQPro.exe') { Remove-Item -LiteralPath '{{.BIN_DIR}}\FlyQPro.exe' -Force -ErrorAction Stop }"
         platforms: [windows]
       - cmd: rm -f "{{.BIN_DIR}}/FlyQPro.exe"
         platforms: [linux, darwin]
