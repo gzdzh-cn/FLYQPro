@@ -24,3 +24,4 @@ frontend/bindings/*
 docs/vitepress
 *.exe
 docs/元数据
+frontend/bindings

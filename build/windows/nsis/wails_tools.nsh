@@ -8,10 +8,10 @@
     !define INFO_PROJECTNAME "FlyQPro"
 !endif
 !ifndef INFO_COMPANYNAME
-    !define INFO_COMPANYNAME "gofly"
+    !define INFO_COMPANYNAME "FlyQPro"
 !endif
 !ifndef INFO_PRODUCTNAME
-    !define INFO_PRODUCTNAME "FlyQPro"
+    !define INFO_PRODUCTNAME "飞秋Pro"
 !endif
 !ifndef INFO_PRODUCTVERSION
     !define INFO_PRODUCTVERSION "0.1.0"

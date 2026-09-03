@@ -2,7 +2,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
     Name="飞秋Pro"
-    Manufacturer="DZH"
+    Manufacturer="FlyQPro"
     Version="$(var.ProductVersion)"
     UpgradeCode="{D4E4F7A4-45E2-4B68-AC91-6B2D9B9A1B55}"
     Scope="perMachine">
@@ -38,7 +38,7 @@
           <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
           <RegistryValue
             Root="HKLM"
-            Key="Software\DZH\FlyQPro"
+            Key="Software\FlyQPro"
             Name="StartMenuShortcut"
             Type="integer"
             Value="1"
@@ -57,7 +57,7 @@
           WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue
           Root="HKLM"
-          Key="Software\DZH\FlyQPro"
+          Key="Software\FlyQPro"
           Name="DesktopShortcut"
           Type="integer"
           Value="1"

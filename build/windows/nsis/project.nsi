@@ -1,4 +1,4 @@
-Unicode true
+﻿Unicode true
 
 ####
 ## Please note: Template replacements don't work in this file. They are provided with default defines like
@@ -32,6 +32,10 @@ Unicode true
 ####
 ## Include the wails tools
 ####
+!define INFO_PROJECTNAME "FlyQPro"
+!define INFO_COMPANYNAME "FlyQPro"
+!define INFO_PRODUCTNAME "飞秋Pro"
+!define PRODUCT_EXECUTABLE "FlyQPro.exe"
 !include "wails_tools.nsh"
 
 # The version information for this two must consist of 4 parts
@@ -50,8 +54,14 @@ ManifestDPIAware true
 
 !include "MUI.nsh"
 
-!define MUI_ICON "..\icon.ico"
-!define MUI_UNICON "..\icon.ico"
+Caption "飞秋Pro 安装向导"
+!define MUI_WELCOMEPAGE_TITLE "欢迎使用飞秋Pro安装向导"
+!define MUI_WELCOMEPAGE_TEXT "本向导将引导您完成飞秋Pro的安装。"
+!define MUI_FINISHPAGE_TITLE "飞秋Pro安装完成"
+!define MUI_FINISHPAGE_TEXT "飞秋Pro已成功安装。"
+
+!define MUI_ICON "..\icons.ico"
+!define MUI_UNICON "..\icons.ico"
 
 # !define MUI_WELCOMEFINISHPAGE_BITMAP "resources\leftimage.bmp" #Include this to add a bitmap on the left side of the Welcome Page. Must be a size of 164x314
 !define MUI_FINISHPAGE_NOAUTOCLOSE # Wait on the INSTFILES page so the user can take a look into the details of the installation steps
@@ -83,7 +93,7 @@ FunctionEnd
 
 Name "${INFO_PRODUCTNAME}"
 OutFile "..\..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the installer's file.
-InstallDir "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}" # Default installing folder ($PROGRAMFILES is Program Files folder).
+InstallDir "$PROGRAMFILES64\FlyQPro"
 ShowInstDetails show # This will always show the installation details.
 
 Function .onInit

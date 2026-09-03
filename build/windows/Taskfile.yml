@@ -46,7 +46,7 @@ tasks:
         vars:
           PRODUCTION: "true"
     cmds:
-      - wix build build/windows/msi/FlyQPro.wxs -arch {{.WIX_ARCH}} -d AppExe="{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe" -d AppIcon="{{.ROOT_DIR}}/build/windows/icons.ico" -d ProductVersion="{{.VERSION}}" -o "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}.msi"
+      - wix build build/windows/msi/FlyQPro.wxs -arch {{.WIX_ARCH}} -d AppExe="{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe" -d AppIcon="{{.ROOT_DIR}}/build/windows/icons.ico" -d ProductVersion="{{.VERSION}}" -o "{{.ROOT_DIR}}/{{.BIN_DIR}}/FlyQPro-{{.ARCH}}.msi"
     vars:
       ARCH: '{{.ARCH | default ARCH}}'
       WIX_ARCH: '{{if eq .ARCH "arm64"}}arm64{{else}}x64{{end}}'
@@ -70,10 +70,13 @@ tasks:
     cmds:
       # Create the Microsoft WebView2 bootstrapper if it doesn't exist
       - wails3 generate webview2bootstrapper -dir "{{.ROOT_DIR}}\build\windows\nsis"
-      - makensis -DARG_WAILS_{{.ARG_FLAG}}_BINARY="{{.ROOT_DIR}}\{{.BIN_DIR}}\{{.APP_NAME}}.exe" project.nsi
+      # Use the standard NSIS installation path so packaging also works when
+      # the current terminal has not refreshed its PATH after installation.
+      - powershell -NoProfile -ExecutionPolicy Bypass -Command "& '{{.NSIS_PATH}}' '-DARG_WAILS_{{.ARG_FLAG}}_BINARY={{.ROOT_DIR}}\{{.BIN_DIR}}\{{.APP_NAME}}.exe' 'project.nsi'"
     vars:
       ARCH: '{{.ARCH | default ARCH}}'
       ARG_FLAG: '{{if eq .ARCH "amd64"}}AMD64{{else}}ARM64{{end}}'
+      NSIS_PATH: '{{.NSIS_PATH | default "C:\\Program Files (x86)\\NSIS\\makensis.exe"}}'
 
   run:
     cmds:

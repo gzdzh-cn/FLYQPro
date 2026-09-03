@@ -80,7 +80,7 @@ export const useChatStore = defineStore('chat', {
       .filter((peer) => peer.discoveryVisible && peer.online)
       .sort((left, right) => discoveryNameCollator.compare(peerDisplayName(left), peerDisplayName(right)) || left.deviceId.localeCompare(right.deviceId)),
     visibleRequests: (state) => latestRequestsByDevice(state.requests),
-    pendingRequests: (state) => latestRequestsByDevice(state.requests).filter((request) => request.status === 'pending' && request.direction !== 'sent'),
+    pendingRequests: (state) => latestRequestsByDevice(state.requests).filter((request) => request.status === 'pending' && request.direction !== 'sent' && !state.peers.some((peer) => peer.deviceId === request.deviceId && peer.relation === 'friend' && peer.friendshipState !== 'removed')),
     activePeer: (state) => state.peers.find((peer) => peer.deviceId === state.activePeerId),
   },
   actions: {
