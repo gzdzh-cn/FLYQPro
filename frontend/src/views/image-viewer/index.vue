@@ -284,6 +284,8 @@ async function sharedThumbnailFor(relativePath: string, entry?: SharedPreviewEnt
 
 async function sharedOriginalFor(relativePath: string) {
   if (!sharedFolderId.value) throw new Error('共享文件夹参数无效')
+  // Videos must remain a streaming URL so playback can start before a large
+  // file has finished transferring. The endpoint implements HTTP Range.
   return PreviewStreamService.CreateSharedPreviewURL(previewSource.value, sharedDeviceId.value, sharedFolderId.value, relativePath)
 }
 

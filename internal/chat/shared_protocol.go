@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"os"
 	"path/filepath"
@@ -241,7 +242,7 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: message.TransferID, Status: SharedPathInvalidError})
 		return
 	}
-	entry, path, err := GetSharedEntry(root, message.RelativePath, true)
+	entry, path, err := GetSharedEntry(root, message.RelativePath, false)
 	if err != nil || entry.IsDirectory {
 		status := SharedPathInvalidError
 		if err != nil && strings.Contains(err.Error(), SharedUnavailableError) {
@@ -274,6 +275,7 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		return
 	}
 	buffer := make([]byte, 256*1024)
+	hash := sha256.New()
 	transferred := message.Offset
 	for {
 		if !e.sharedAccessAllowed(hello.DeviceID) {
@@ -282,6 +284,7 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		}
 		read, readErr := file.Read(buffer)
 		if read > 0 {
+			_, _ = hash.Write(buffer[:read])
 			payload := base64.StdEncoding.EncodeToString(buffer[:read])
 			transferred += int64(read)
 			if err := sessionWrite(session, conn, wireMessage{Type: "share_chunk", TransferID: transferID, Payload: payload, Transferred: transferred, FileSize: entry.Size}); err != nil {
@@ -290,7 +293,11 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				_ = sessionWrite(session, conn, wireMessage{Type: "share_complete", TransferID: transferID, Status: "completed", Transferred: transferred, FileSize: entry.Size, SHA256: entry.SHA256})
+				checksum := ""
+				if message.Offset == 0 {
+					checksum = hex.EncodeToString(hash.Sum(nil))
+				}
+				_ = sessionWrite(session, conn, wireMessage{Type: "share_complete", TransferID: transferID, Status: "completed", Transferred: transferred, FileSize: entry.Size, SHA256: checksum})
 			}
 			return
 		}
@@ -472,6 +479,18 @@ func sharedPreviewableEntry(entry SharedEntry) bool {
 	}
 }
 
+func sharedPreviewMime(mimeType, name string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "video/") || mimeType == "application/pdf" {
+		return mimeType
+	}
+	guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+	if strings.HasPrefix(guessed, "image/") || strings.HasPrefix(guessed, "video/") || guessed == "application/pdf" {
+		return guessed
+	}
+	return ""
+}
+
 func (e *Engine) findFriendSharedEntry(ctx context.Context, deviceID, folderID, relativePath string) (SharedEntry, error) {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." || strings.Contains(clean, "..") {
@@ -532,8 +551,8 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if entry.IsDirectory || !sharedPreviewableEntry(entry) {
 		return fmt.Errorf("该文件类型不支持在线预览")
 	}
-	if entry.Size < 0 || entry.Size > maxSharedPreviewSize {
-		return fmt.Errorf("在线预览文件不能超过 %d MB，请先下载", maxSharedPreviewSize/(1024*1024))
+	if entry.Size < 0 {
+		return fmt.Errorf("共享文件大小无效")
 	}
 	peer, err := e.peer(deviceID)
 	if err != nil || peer.Relation != PeerRelation {
@@ -558,8 +577,8 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != offset {
 		return fmt.Errorf("共享文件预览响应无效")
 	}
-	if response.FileSize < offset || response.FileSize > maxSharedPreviewSize {
-		return fmt.Errorf("在线预览文件过大，请先下载")
+	if response.FileSize < offset {
+		return fmt.Errorf("共享文件大小无效")
 	}
 	entry.Name = response.FileName
 	entry.Size = response.FileSize
@@ -684,9 +703,12 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, fold
 			if int64(data.Len()) != response.FileSize || (message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
 				return "", fmt.Errorf("共享文件校验失败")
 			}
-			mimeType := response.MimeType
+			mimeType := sharedPreviewMime(response.MimeType, response.FileName)
 			if mimeType == "" {
-				mimeType = entry.MimeType
+				mimeType = sharedPreviewMime(entry.MimeType, entry.Name)
+			}
+			if mimeType == "" {
+				return "", fmt.Errorf("共享文件类型无法识别")
 			}
 			return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data.Bytes()), nil
 		}

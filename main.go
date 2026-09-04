@@ -53,7 +53,10 @@ func main() {
 	})
 	app.RegisterService(application.NewService(service.NewImageViewerService(app, chatService)))
 	app.RegisterService(application.NewService(service.NewSharedDriveWindowService(app, chatService)))
-	app.RegisterService(application.NewServiceWithOptions(service.NewPreviewStreamService(chatService), application.ServiceOptions{Route: "/preview/"}))
+	// PreviewStreamService serves media through its loopback HTTP listener.
+	// Wails' asset route buffers responses on Windows, which is unsuitable for
+	// large video playback.
+	app.RegisterService(application.NewService(service.NewPreviewStreamService(chatService)))
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)
 

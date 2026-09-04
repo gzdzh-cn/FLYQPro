@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -120,6 +121,8 @@ type PreviewStreamService struct {
 	chatService *ChatService
 	mu          sync.Mutex
 	tokens      map[string]previewToken
+	server      *http.Server
+	serverURL   string
 }
 
 func NewPreviewStreamService(chatService *ChatService) *PreviewStreamService {
@@ -148,7 +151,11 @@ func (s *PreviewStreamService) issueToken(token previewToken) (string, error) {
 	}
 	s.tokens[value] = token
 	s.mu.Unlock()
-	return (&url.URL{Path: "/preview/image", RawQuery: url.Values{"token": []string{value}}.Encode()}).String(), nil
+	baseURL, err := s.ensureLoopbackServer()
+	if err != nil {
+		return "", err
+	}
+	return baseURL + (&url.URL{Path: "/preview/image", RawQuery: url.Values{"token": []string{value}}.Encode()}).String(), nil
 }
 
 func (s *PreviewStreamService) token(value string) (previewToken, bool) {
@@ -162,6 +169,43 @@ func (s *PreviewStreamService) token(value string) (previewToken, bool) {
 		return previewToken{}, false
 	}
 	return item, true
+}
+
+// ensureLoopbackServer is deliberately separate from Wails' asset server.
+// WebView2 buffers responses produced by a custom Wails scheme until the
+// handler returns, which makes a Wails service route unsuitable for a 2GB
+// video. A loopback HTTP server is consumed by the browser as a normal
+// streaming response on every desktop platform.
+func (s *PreviewStreamService) ensureLoopbackServer() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.serverURL != "" {
+		return s.serverURL, nil
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("无法启动预览流服务: %w", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(s.ServeHTTP)}
+	s.server = server
+	s.serverURL = "http://" + listener.Addr().String()
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return s.serverURL, nil
+}
+
+// ServiceShutdown releases the loopback listener when the desktop app exits.
+func (s *PreviewStreamService) ServiceShutdown() error {
+	s.mu.Lock()
+	server := s.server
+	s.server = nil
+	s.serverURL = ""
+	s.mu.Unlock()
+	if server == nil {
+		return nil
+	}
+	return server.Close()
 }
 
 func (s *PreviewStreamService) CreateAttachmentPreviewURL(attachmentID string) (string, error) {
@@ -230,6 +274,17 @@ func (s *PreviewStreamService) CreateSharedPreviewURL(source, deviceID, sharedFo
 }
 
 func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The loopback endpoint is requested from the Wails webview origin. Media
+	// playback itself does not require CORS in every engine, but exposing the
+	// range headers and handling preflight keeps the endpoint consistent across
+	// WebKit and WebView2.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Range")
+	w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	item, ok := s.token(r.URL.Query().Get("token"))
 	if !ok {
 		http.Error(w, "preview token expired", http.StatusNotFound)
@@ -272,10 +327,26 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		streamOffset := int64(0)
 		if rangeSpec != nil && rangeSpec.hasStart {
 			streamOffset = rangeSpec.start
+		} else if rangeSpec != nil {
+			// A suffix range is commonly used by browsers to locate an MP4's
+			// moov atom. Resolve the file size before opening the byte stream so
+			// a request such as bytes=-1MB does not transfer the whole file from
+			// byte zero just to discard its prefix.
+			entry, err := s.chatService.GetFriendSharedEntryDetails(item.deviceID, item.sharedFolderID, item.relativePath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			start, _, ok := resolvePreviewRange(rangeSpec, entry.Size)
+			if !ok {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
+				http.Error(w, (&previewRangeError{contentRange: fmt.Sprintf("bytes */%d", entry.Size)}).Error(), http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			streamOffset = start
 		}
 		started := false
 		var invalidRange *previewRangeError
-		skipBytes := int64(0)
 		remaining := int64(-1)
 		err := s.chatService.engine.StreamFriendSharedEntryRange(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath, streamOffset,
 			func(entry chat.SharedEntry) error {
@@ -297,11 +368,6 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 					w.Header().Set("Content-Length", fmt.Sprint(remaining))
 					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, entry.Size))
 					w.WriteHeader(http.StatusPartialContent)
-					// A suffix range is resolved after the peer tells us the file
-					// size, so discard the leading bytes from the offset-zero stream.
-					if !rangeSpec.hasStart {
-						skipBytes = start
-					}
 				}
 				started = true
 				return nil
@@ -309,14 +375,6 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			func(data []byte) error {
 				if !started {
 					return fmt.Errorf("预览尚未建立")
-				}
-				if skipBytes > 0 {
-					if int64(len(data)) <= skipBytes {
-						skipBytes -= int64(len(data))
-						return nil
-					}
-					data = data[skipBytes:]
-					skipBytes = 0
 				}
 				if rangeSpec != nil {
 					if remaining <= 0 {

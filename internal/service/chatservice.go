@@ -782,11 +782,13 @@ func (s *ChatService) GetSharedEntryDetails(folderID, relativePath string) (chat
 
 func sharedPreviewMime(entry chat.SharedEntry) string {
 	mimeType := strings.ToLower(strings.TrimSpace(entry.MimeType))
-	if strings.HasPrefix(mimeType, "image/") || mimeType == "application/pdf" {
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "video/") || mimeType == "application/pdf" {
 		return mimeType
 	}
 	if guessed := mime.TypeByExtension(filepath.Ext(entry.Name)); guessed != "" {
-		return guessed
+		if strings.HasPrefix(guessed, "image/") || strings.HasPrefix(guessed, "video/") || guessed == "application/pdf" {
+			return guessed
+		}
 	}
 	return ""
 }
