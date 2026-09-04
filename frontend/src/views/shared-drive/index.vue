@@ -391,6 +391,11 @@ function captureVideoFrame(url: string): Promise<string> {
       video.load()
       resolve(value)
     }
+    // The preview stream is served from the loopback HTTP origin while the
+    // page runs in the Wails origin. CORS is enabled by the stream service;
+    // this attribute is required before assigning src so Canvas can export
+    // the captured video frame as a thumbnail.
+    video.crossOrigin = 'anonymous'
     video.muted = true
     video.playsInline = true
     video.preload = 'auto'

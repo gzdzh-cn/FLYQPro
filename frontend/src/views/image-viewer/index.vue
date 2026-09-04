@@ -27,7 +27,7 @@
         <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
       <iframe v-if="source && isPdfPreview" :key="viewerContentKey" class="pdf-preview" :src="source" :title="imageViewerName" />
-      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline preload="metadata" @error="handleVideoError" @dblclick.stop />
+      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline crossorigin="anonymous" preload="metadata" @error="handleVideoError" @dblclick.stop />
       <template v-else>
         <img v-if="thumbnailSource" class="preview-image preview-thumbnail" :class="{ 'preview-image-faded': originalReady }" :src="thumbnailSource" :alt="imageViewerName" :style="imageTransform" draggable="false" />
         <img v-if="originalSource" class="preview-image preview-original" :class="{ 'preview-image-visible': originalReady }" :src="originalSource" :alt="imageViewerName" :style="imageTransform" draggable="false" @load="handleOriginalLoad" @error="handleOriginalError" />
