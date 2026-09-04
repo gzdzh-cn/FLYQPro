@@ -381,6 +381,7 @@ function captureVideoFrame(url: string): Promise<string> {
     const video = document.createElement('video')
     const canvas = document.createElement('canvas')
     let settled = false
+    let frameCaptured = false
     const timer = window.setTimeout(() => finish(''), 12000)
     const finish = (value: string) => {
       if (settled) return
@@ -400,24 +401,31 @@ function captureVideoFrame(url: string): Promise<string> {
     video.playsInline = true
     video.preload = 'auto'
     video.addEventListener('error', () => finish(''), { once: true })
-    video.addEventListener('loadedmetadata', () => {
-      const duration = Number.isFinite(video.duration) ? video.duration : 0
-      video.currentTime = duration > 0.4 ? Math.min(duration * 0.1, 1) : 0
-    }, { once: true })
-    video.addEventListener('seeked', () => {
+    const captureFrame = () => {
+      if (settled || frameCaptured || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
       const width = video.videoWidth
       const height = video.videoHeight
-      if (!width || !height) { finish(''); return }
+      if (!width || !height) return
       const ratio = Math.min(1, 640 / Math.max(width, height))
       canvas.width = Math.max(1, Math.round(width * ratio))
       canvas.height = Math.max(1, Math.round(height * ratio))
       try {
         canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height)
+        frameCaptured = true
         finish(canvas.toDataURL('image/jpeg', 0.8))
       } catch {
         finish('')
       }
+    }
+    video.addEventListener('loadedmetadata', () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0
+      video.currentTime = duration > 0.4 ? Math.min(duration * 0.1, 1) : 0
     }, { once: true })
+    // Some codecs/providers never emit seeked for a remote stream. The first
+    // decoded frame is already a valid thumbnail, while seeked upgrades it to
+    // a later frame when seeking is available.
+    video.addEventListener('loadeddata', captureFrame)
+    video.addEventListener('seeked', captureFrame)
     video.src = url
     video.load()
   })
