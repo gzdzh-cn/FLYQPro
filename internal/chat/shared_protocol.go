@@ -23,6 +23,7 @@ import (
 const sharedDriveCapability = "shared-drive-v2"
 const sharedThumbnailBatchCapability = "shared-thumbnail-batch-v1"
 const maxSharedPreviewSize = 32 * 1024 * 1024
+const sharedStreamAccessCheckInterval = 2 * time.Second
 
 type sharedTransferSession struct {
 	mu         sync.Mutex
@@ -276,11 +277,15 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 	}
 	buffer := make([]byte, 256*1024)
 	hash := sha256.New()
+	lastAccessCheck := time.Now()
 	transferred := message.Offset
 	for {
-		if !e.sharedAccessAllowed(hello.DeviceID) {
-			_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: SharedDisabledError})
-			return
+		if time.Since(lastAccessCheck) >= sharedStreamAccessCheckInterval {
+			lastAccessCheck = time.Now()
+			if !e.sharedAccessAllowed(hello.DeviceID) {
+				_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: SharedDisabledError})
+				return
+			}
 		}
 		read, readErr := file.Read(buffer)
 		if read > 0 {
@@ -540,19 +545,12 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if offset < 0 {
 		return fmt.Errorf("SHARED_OFFSET_INVALID")
 	}
-	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
-	if clean == "." || strings.Contains(clean, "..") {
+	clean, err := normalizeSharedRelativePath(relativePath)
+	if err != nil || clean == "" {
 		return fmt.Errorf("SHARED_PATH_INVALID")
 	}
-	entry, err := e.findFriendSharedEntry(ctx, deviceID, folderID, clean)
-	if err != nil {
-		return err
-	}
-	if entry.IsDirectory || !sharedPreviewableEntry(entry) {
-		return fmt.Errorf("该文件类型不支持在线预览")
-	}
-	if entry.Size < 0 {
-		return fmt.Errorf("共享文件大小无效")
+	if strings.TrimSpace(folderID) == "" {
+		return fmt.Errorf("共享文件夹 ID 不能为空")
 	}
 	peer, err := e.peer(deviceID)
 	if err != nil || peer.Relation != PeerRelation {
@@ -563,6 +561,18 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 		return err
 	}
 	defer conn.Close()
+	// Start watching cancellation as soon as the authenticated connection is
+	// available. The browser may cancel while the peer is still preparing the
+	// response frame; closing the connection also unblocks that Decode call.
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+	defer close(stopWatch)
 	transferID := newID()
 	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: offset}); err != nil {
 		return err
@@ -574,16 +584,25 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if response.Type == "share_error" {
 		return fmt.Errorf("%s", response.Status)
 	}
-	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != offset {
+	responsePath, pathErr := normalizeSharedRelativePath(response.RelativePath)
+	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != offset || pathErr != nil || responsePath != clean {
 		return fmt.Errorf("共享文件预览响应无效")
 	}
-	if response.FileSize < offset {
+	if response.FileSize < 0 || response.FileSize < offset {
 		return fmt.Errorf("共享文件大小无效")
 	}
-	entry.Name = response.FileName
-	entry.Size = response.FileSize
-	if response.MimeType != "" {
-		entry.MimeType = response.MimeType
+	entry := SharedEntry{
+		EntryID:      sharedEntryID(clean),
+		Name:         response.FileName,
+		RelativePath: clean,
+		Size:         response.FileSize,
+		MimeType:     response.MimeType,
+	}
+	if entry.Name == "" {
+		entry.Name = filepath.Base(filepath.FromSlash(clean))
+	}
+	if !sharedPreviewableEntry(entry) {
+		return fmt.Errorf("该文件类型不支持在线预览")
 	}
 	if before != nil {
 		if err := before(entry); err != nil {
@@ -622,7 +641,7 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 		case "share_error":
 			return fmt.Errorf("%s", message.Status)
 		case "share_complete":
-			if received != expectedBytes || (offset == 0 && message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
+			if message.TransferID != transferID || received != expectedBytes || (offset == 0 && message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
 				return fmt.Errorf("共享文件校验失败")
 			}
 			return nil

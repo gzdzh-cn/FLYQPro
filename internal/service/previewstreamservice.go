@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -113,6 +114,18 @@ type previewToken struct {
 	expiresAt      time.Time
 }
 
+type friendPreviewStream func(
+	context.Context,
+	string,
+	string,
+	string,
+	int64,
+	func(chat.SharedEntry) error,
+	func([]byte) error,
+) error
+
+type friendPreviewDetails func(string, string, string) (chat.SharedEntry, error)
+
 // PreviewStreamService exposes short-lived, identifier-bound media URLs. The
 // browser can consume these URLs as normal HTTP streams, avoiding a large
 // base64 string and allowing a preview to begin as soon as the first bytes
@@ -159,15 +172,22 @@ func (s *PreviewStreamService) issueToken(token previewToken) (string, error) {
 }
 
 func (s *PreviewStreamService) token(value string) (previewToken, bool) {
+	key := strings.TrimSpace(value)
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	item, ok := s.tokens[strings.TrimSpace(value)]
-	if !ok || time.Now().After(item.expiresAt) {
+	item, ok := s.tokens[key]
+	if !ok || now.After(item.expiresAt) {
 		if ok {
-			delete(s.tokens, strings.TrimSpace(value))
+			delete(s.tokens, key)
 		}
 		return previewToken{}, false
 	}
+	// A long video may need several HTTP Range requests over many minutes.
+	// Renew on each active request so seeking later in the same preview does
+	// not fail just because the original URL was issued five minutes ago.
+	item.expiresAt = now.Add(previewTokenLifetime)
+	s.tokens[key] = item
 	return item, true
 }
 
@@ -279,10 +299,20 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// range headers and handling preflight keeps the endpoint consistent across
 	// WebKit and WebView2.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Range")
+	w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	// Chromium may send this preflight when the Wails origin is treated as a
+	// public/private-network boundary. The endpoint is loopback-only and still
+	// requires a short-lived preview token.
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	item, ok := s.token(r.URL.Query().Get("token"))
@@ -318,95 +348,154 @@ func (s *PreviewStreamService) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "preview unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		rangeSpec, rangeErr := parsePreviewRange(r.Header.Get("Range"))
-		if rangeErr != nil {
-			w.Header().Set("Content-Range", "bytes */*")
-			http.Error(w, rangeErr.Error(), http.StatusRequestedRangeNotSatisfiable)
+		serveFriendPreview(w, r, item,
+			func(ctx context.Context, deviceID, folderID, relativePath string, offset int64, before func(chat.SharedEntry) error, write func([]byte) error) error {
+				return s.chatService.engine.StreamFriendSharedEntryRange(ctx, deviceID, folderID, relativePath, offset, before, write)
+			},
+			s.chatService.GetFriendSharedEntryDetails,
+		)
+		return
+	}
+	http.Error(w, "preview unavailable", http.StatusNotFound)
+}
+
+func serveFriendPreview(w http.ResponseWriter, r *http.Request, item previewToken, stream friendPreviewStream, details friendPreviewDetails) {
+	rangeSpec, rangeErr := parsePreviewRange(r.Header.Get("Range"))
+	if rangeErr != nil {
+		w.Header().Set("Content-Range", "bytes */*")
+		http.Error(w, rangeErr.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	// HEAD and suffix-range requests need the total size before a body can be
+	// described. They receive metadata only; a HEAD must never start reading the
+	// video itself.
+	var metadata chat.SharedEntry
+	needsMetadata := r.Method == http.MethodHead || (rangeSpec != nil && !rangeSpec.hasStart)
+	if needsMetadata {
+		if details == nil {
+			http.Error(w, "preview metadata unavailable", http.StatusBadGateway)
 			return
 		}
-		streamOffset := int64(0)
-		if rangeSpec != nil && rangeSpec.hasStart {
+		var err error
+		metadata, err = details(item.deviceID, item.sharedFolderID, item.relativePath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if metadata.IsDirectory || (!isImageMime(metadata.MimeType, metadata.Name) && !isVideoMime(metadata.MimeType, metadata.Name)) {
+			http.Error(w, "该文件不支持媒体预览", http.StatusUnsupportedMediaType)
+			return
+		}
+	}
+
+	if r.Method == http.MethodHead {
+		if _, err := writeFriendPreviewHeaders(w, metadata, rangeSpec); err != nil {
+			writePreviewRangeError(w, err)
+		}
+		return
+	}
+
+	streamOffset := int64(0)
+	if rangeSpec != nil {
+		if rangeSpec.hasStart {
 			streamOffset = rangeSpec.start
-		} else if rangeSpec != nil {
-			// A suffix range is commonly used by browsers to locate an MP4's
-			// moov atom. Resolve the file size before opening the byte stream so
-			// a request such as bytes=-1MB does not transfer the whole file from
-			// byte zero just to discard its prefix.
-			entry, err := s.chatService.GetFriendSharedEntryDetails(item.deviceID, item.sharedFolderID, item.relativePath)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			start, _, ok := resolvePreviewRange(rangeSpec, entry.Size)
+		} else {
+			start, _, ok := resolvePreviewRange(rangeSpec, metadata.Size)
 			if !ok {
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
-				http.Error(w, (&previewRangeError{contentRange: fmt.Sprintf("bytes */%d", entry.Size)}).Error(), http.StatusRequestedRangeNotSatisfiable)
+				writePreviewRangeError(w, &previewRangeError{contentRange: fmt.Sprintf("bytes */%d", metadata.Size)})
 				return
 			}
 			streamOffset = start
 		}
-		started := false
-		var invalidRange *previewRangeError
-		remaining := int64(-1)
-		err := s.chatService.engine.StreamFriendSharedEntryRange(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath, streamOffset,
-			func(entry chat.SharedEntry) error {
-				if !isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name) {
-					return fmt.Errorf("该文件不支持媒体预览")
-				}
-				start, end, ok := resolvePreviewRange(rangeSpec, entry.Size)
-				if !ok {
-					invalidRange = &previewRangeError{contentRange: fmt.Sprintf("bytes */%d", entry.Size)}
-					return invalidRange
-				}
-				w.Header().Set("Content-Type", previewMime(entry.MimeType, entry.Name))
-				w.Header().Set("Accept-Ranges", "bytes")
-				w.Header().Set("Cache-Control", "no-store")
-				if rangeSpec == nil {
-					w.Header().Set("Content-Length", fmt.Sprint(entry.Size))
-				} else {
-					remaining = end - start + 1
-					w.Header().Set("Content-Length", fmt.Sprint(remaining))
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, entry.Size))
-					w.WriteHeader(http.StatusPartialContent)
-				}
-				started = true
-				return nil
-			},
-			func(data []byte) error {
-				if !started {
-					return fmt.Errorf("预览尚未建立")
-				}
-				if rangeSpec != nil {
-					if remaining <= 0 {
-						return io.EOF
-					}
-					if int64(len(data)) > remaining {
-						data = data[:remaining]
-					}
-				}
-				n, err := w.Write(data)
-				if rangeSpec != nil {
-					remaining -= int64(n)
-				}
-				if flusher, ok := w.(http.Flusher); ok {
-					flusher.Flush()
-				}
-				if err == nil && rangeSpec != nil && remaining == 0 {
+	}
+
+	started := false
+	remaining := int64(-1)
+	var headerErr error
+	err := stream(r.Context(), item.deviceID, item.sharedFolderID, item.relativePath, streamOffset,
+		func(entry chat.SharedEntry) error {
+			if entry.IsDirectory || (!isImageMime(entry.MimeType, entry.Name) && !isVideoMime(entry.MimeType, entry.Name)) {
+				return fmt.Errorf("该文件不支持媒体预览")
+			}
+			remaining, headerErr = writeFriendPreviewHeaders(w, entry, rangeSpec)
+			if headerErr != nil {
+				return headerErr
+			}
+			started = true
+			flushPreview(w)
+			return nil
+		},
+		func(data []byte) error {
+			if !started {
+				return fmt.Errorf("预览尚未建立")
+			}
+			if rangeSpec != nil {
+				if remaining <= 0 {
 					return io.EOF
 				}
-				return err
-			})
-		if invalidRange != nil {
-			w.Header().Set("Content-Range", invalidRange.contentRange)
-			http.Error(w, invalidRange.Error(), http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-		if err != nil && !started {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-		}
+				if int64(len(data)) > remaining {
+					data = data[:remaining]
+				}
+			}
+			n, writeErr := w.Write(data)
+			if rangeSpec != nil {
+				remaining -= int64(n)
+			}
+			flushPreview(w)
+			if writeErr == nil && rangeSpec != nil && remaining == 0 {
+				return io.EOF
+			}
+			return writeErr
+		})
+	if headerErr != nil {
+		writePreviewRangeError(w, headerErr)
 		return
 	}
-	http.Error(w, "preview unavailable", http.StatusNotFound)
+	if err != nil && !started {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// writeFriendPreviewHeaders returns the number of bytes still expected for a
+// response. Headers are sent before the first body write, so the browser can
+// begin buffering as soon as the first remote chunk arrives.
+func writeFriendPreviewHeaders(w http.ResponseWriter, entry chat.SharedEntry, spec *previewRangeSpec) (int64, error) {
+	if entry.Size < 0 {
+		return 0, fmt.Errorf("共享文件大小无效")
+	}
+	start, end, ok := resolvePreviewRange(spec, entry.Size)
+	if !ok {
+		return 0, &previewRangeError{contentRange: fmt.Sprintf("bytes */%d", entry.Size)}
+	}
+	w.Header().Set("Content-Type", previewMime(entry.MimeType, entry.Name))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "no-store")
+	if spec == nil {
+		w.Header().Set("Content-Length", fmt.Sprint(entry.Size))
+		w.WriteHeader(http.StatusOK)
+		return entry.Size, nil
+	}
+	remaining := end - start + 1
+	w.Header().Set("Content-Length", fmt.Sprint(remaining))
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, entry.Size))
+	w.WriteHeader(http.StatusPartialContent)
+	return remaining, nil
+}
+
+func writePreviewRangeError(w http.ResponseWriter, err error) {
+	if rangeErr, ok := err.(*previewRangeError); ok {
+		w.Header().Set("Content-Range", rangeErr.contentRange)
+		http.Error(w, rangeErr.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadGateway)
+}
+
+func flushPreview(w http.ResponseWriter) {
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func previewMime(mimeType, name string) string {
