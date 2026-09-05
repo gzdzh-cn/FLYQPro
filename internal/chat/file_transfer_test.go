@@ -28,3 +28,18 @@ func TestFileOfferResponseWireFieldsArePortable(t *testing.T) {
 		t.Fatalf("wire response fields did not round-trip: %+v", output)
 	}
 }
+
+func TestFileWindowWireFieldsRoundTrip(t *testing.T) {
+	input := wireMessage{Type: "file_window", AttachmentID: "a", ChunkIndex: 8, ChunkSize: 256 * 1024, WindowID: 3, WindowSize: 16, WindowBytes: 4 * 1024 * 1024}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output wireMessage
+	if err := json.Unmarshal(data, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Type != input.Type || output.AttachmentID != input.AttachmentID || output.ChunkSize != input.ChunkSize || output.WindowID != input.WindowID || output.WindowSize != input.WindowSize || output.WindowBytes != input.WindowBytes {
+		t.Fatalf("file window fields did not round-trip: %+v", output)
+	}
+}

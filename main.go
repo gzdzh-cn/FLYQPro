@@ -10,6 +10,7 @@ import (
 	"flyqpro/internal/version"
 	"github.com/gogf/gf/v2/os/gctx"
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/dock"
 )
 
@@ -60,7 +61,7 @@ func main() {
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "flyqpro-main",
 		Title:            "飞秋Pro",
 		Frameless:        runtime.GOOS == "darwin",
@@ -70,6 +71,7 @@ func main() {
 		MinHeight:        640,
 		BackgroundType:   backgroundType,
 		BackgroundColour: application.NewRGBA(15, 17, 21, 255),
+		EnableFileDrop:   true,
 		Windows: application.WindowsWindow{
 			Theme:                  0,
 			NonClientRegionSupport: true,
@@ -85,6 +87,14 @@ func main() {
 		CloseButtonState:    application.ButtonEnabled,
 		URL:                 "/",
 	})
+	removeFileDropHandler := mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(event *application.WindowEvent) {
+		paths := event.Context().DroppedFiles()
+		if len(paths) == 0 {
+			return
+		}
+		mainWindow.EmitEvent("chat:file-dropped", map[string]any{"filenames": paths})
+	})
+	defer removeFileDropHandler()
 
 	if err := chatService.Start(); err != nil {
 		log.Fatal(err)

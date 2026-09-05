@@ -354,6 +354,10 @@ type wireMessage struct {
 	AttachmentID        string                   `json:"attachmentId,omitempty"`
 	MessageIDs          []string                 `json:"messageIds,omitempty"`
 	ChunkIndex          int                      `json:"chunkIndex,omitempty"`
+	ChunkSize           int                      `json:"chunkSize,omitempty"`
+	WindowSize          int                      `json:"windowSize,omitempty"`
+	WindowID            int                      `json:"windowId,omitempty"`
+	WindowBytes         int64                    `json:"windowBytes,omitempty"`
 	Transferred         int64                    `json:"transferred,omitempty"`
 	Payload             string                   `json:"payload,omitempty"`
 	Capabilities        []string                 `json:"capabilities,omitempty"`

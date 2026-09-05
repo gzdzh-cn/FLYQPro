@@ -67,6 +67,7 @@ export const useChatStore = defineStore('chat', {
     activePeerId: '',
     lastMessageEvent: null as Message | null,
     transferProgress: {} as Record<string, TransferProgress>,
+    transferHistory: {} as Record<string, TransferProgress>,
     attachmentMigration: { active: false, phase: '', sourceRoot: '', targetRoot: '', current: 0, total: 0, fileName: '', peerDeviceId: '', migrated: 0, skipped: 0, failed: 0, unclassified: 0, errorMessage: '' } as AttachmentMigrationProgress & { active: boolean },
   }),
   getters: {
@@ -114,11 +115,13 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:transfer-progress') {
         const progress = value as TransferProgress
         if (progress?.attachmentId) {
-          if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) delete this.transferProgress[progress.attachmentId]
-          else this.transferProgress[progress.attachmentId] = {
-            ...this.transferProgress[progress.attachmentId],
-            ...progress,
-          }
+          const snapshot = { ...this.transferHistory[progress.attachmentId], ...this.transferProgress[progress.attachmentId], ...progress }
+          if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) {
+            this.transferHistory[progress.attachmentId] = snapshot
+            delete this.transferProgress[progress.attachmentId]
+            const historyIds = Object.keys(this.transferHistory)
+            while (historyIds.length > 100) delete this.transferHistory[historyIds.shift() as string]
+          } else this.transferProgress[progress.attachmentId] = snapshot
         }
         return
       }

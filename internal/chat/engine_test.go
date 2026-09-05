@@ -48,10 +48,25 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}
+	}
+}
+
+func TestTransferTuningNormalizesDefaultsAndBounds(t *testing.T) {
+	got := normalizeTransferTuning(transferTuning{})
+	if got.chunkSize != defaultTransferChunkSize || got.windowSize != initialTransferWindow {
+		t.Fatalf("default tuning = %+v", got)
+	}
+	got = normalizeTransferTuning(transferTuning{chunkSize: 123, windowSize: maxTransferWindow + 1})
+	if got.chunkSize != defaultTransferChunkSize || got.windowSize != initialTransferWindow {
+		t.Fatalf("invalid tuning was not reset: %+v", got)
+	}
+	got = normalizeTransferTuning(transferTuning{chunkSize: maxTransferChunkSize, windowSize: maxTransferWindow})
+	if got.chunkSize != maxTransferChunkSize || got.windowSize != maxTransferWindow {
+		t.Fatalf("valid tuning was changed: %+v", got)
 	}
 }
 

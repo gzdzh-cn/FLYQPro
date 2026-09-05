@@ -110,6 +110,20 @@ export interface TransferProgress {
   total: number
   percent: number
   speed?: number
+  averageSpeed?: number
+  peakSpeed?: number
+  etaSeconds?: number
+  elapsedMs?: number
+  chunkSize?: number
+  windowSize?: number
+  windowBytes?: number
+  ackLatencyMs?: number
+  transport?: string
+  protocol?: string
+  tuningState?: 'probing' | 'accelerating' | 'stable' | 'backing_off' | string
+  tuningReason?: string
+  updatedAt?: string
+  verified?: boolean
   sent?: number
   received?: number
   remoteReceived?: number
