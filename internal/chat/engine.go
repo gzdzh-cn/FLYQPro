@@ -16,6 +16,7 @@ import (
 	"hash"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net"
 	"os"
@@ -67,15 +68,18 @@ type Engine struct {
 }
 
 type transferMetric struct {
-	startedAt time.Time
-	lastAt    time.Time
-	lastBytes int64
-	peakSpeed float64
+	startedAt     time.Time
+	lastAt        time.Time
+	lastBytes     int64
+	peakSpeed     float64
+	smoothedSpeed float64
+	speedSampleAt time.Time
 }
 
 type transferTuning struct {
 	chunkSize  int
 	windowSize int
+	binary     bool
 }
 
 type binaryFileFrameHeader struct {
@@ -218,6 +222,10 @@ func (s *wireSession) writeFileWindow(file *os.File, attachmentID string, window
 }
 
 func (s *wireSession) writeBinaryFileWindow(file *os.File, attachmentID string, windowID, startIndex, chunkSize, windowSize int, remaining int64) (chunks int, bytes int64, err error) {
+	return s.writeBinaryFileWindowWithAckTarget(file, attachmentID, windowID, startIndex, chunkSize, windowSize, remaining, 0)
+}
+
+func (s *wireSession) writeBinaryFileWindowWithAckTarget(file *os.File, attachmentID string, windowID, startIndex, chunkSize, windowSize int, remaining, ackTargetBytes int64) (chunks int, bytes int64, err error) {
 	if remaining <= 0 {
 		return 0, 0, nil
 	}
@@ -234,7 +242,7 @@ func (s *wireSession) writeBinaryFileWindow(file *os.File, attachmentID string, 
 		return 0, 0, errAttachmentCanceled
 	}
 	writer := bufio.NewWriterSize(s.conn, 1024*1024)
-	if err := json.NewEncoder(writer).Encode(wireMessage{Type: "file_window", AttachmentID: attachmentID, WindowID: windowID, ChunkIndex: startIndex, ChunkSize: chunkSize, WindowSize: chunkCount, WindowBytes: windowBytes, TransferMode: binaryTransferMode}); err != nil {
+	if err := json.NewEncoder(writer).Encode(wireMessage{Type: "file_window", AttachmentID: attachmentID, WindowID: windowID, ChunkIndex: startIndex, ChunkSize: chunkSize, WindowSize: chunkCount, WindowBytes: windowBytes, AckTargetBytes: ackTargetBytes, TransferMode: binaryTransferMode}); err != nil {
 		return 0, 0, err
 	}
 	if err := writeBinaryFileFrameHeader(writer, header); err != nil {
@@ -311,6 +319,10 @@ type incomingFile struct {
 	windowSize          int
 	windowChunks        int
 	windowBytes         int64
+	binaryAckBytes      int64
+	binaryAckWindows    int
+	binaryAckTarget     int64
+	binaryLastAckAt     time.Time
 	nextChunk           int
 	chunkSize           int
 	binary              bool
@@ -358,11 +370,19 @@ const (
 	minTransferChunkSize     = 256 * 1024
 	mediumTransferChunkSize  = 512 * 1024
 	maxTransferChunkSize     = 1024 * 1024
+	defaultBinaryChunkSize   = mediumTransferChunkSize
+	binaryInitialWindow      = 16
 	initialTransferWindow    = 4
 	minTransferWindow        = 1
 	// Window growth is bounded by protocol safety, while writeFileWindow keeps
 	// memory bounded with a streaming buffer instead of retaining a full window.
 	maxTransferWindow         = 256
+	minInFlightBytes          = 4 * 1024 * 1024
+	initialInFlightBytes      = 16 * 1024 * 1024
+	maxInFlightBytes          = 128 * 1024 * 1024
+	initialBinaryAckBytes     = 8 * 1024 * 1024
+	maxBinaryAckBytes         = 64 * 1024 * 1024
+	binaryAckInterval         = 100 * time.Millisecond
 	binaryFileFrameHeaderSize = 32
 	binaryFileFrameVersion    = 1
 	maxBinaryFileFramePayload = 256 * 1024 * 1024
@@ -480,7 +500,7 @@ func nextTransferChunkSize(size int) int {
 
 func adjustTransferTuning(current transferTuning, ackLatency time.Duration, diskWriteMs int64, throughput, previousThroughput float64, allowMediumChunk bool) (transferTuning, string, string) {
 	next := normalizeTransferTuning(current)
-	if ackLatency > 150*time.Millisecond || (previousThroughput > 0 && throughput < previousThroughput*0.70) {
+	if ackLatency > 150*time.Millisecond || diskWriteMs > 300 || (previousThroughput > 0 && throughput < previousThroughput*0.70) {
 		if next.windowSize > minTransferWindow {
 			next.windowSize = maxInt(minTransferWindow, next.windowSize/2)
 		}
@@ -493,7 +513,7 @@ func adjustTransferTuning(current transferTuning, ackLatency time.Duration, disk
 		}
 		return next, "backing_off", "确认延迟升高或窗口吞吐下降，降低发送窗口"
 	}
-	if ackLatency <= 75*time.Millisecond && (previousThroughput == 0 || throughput >= previousThroughput*0.85) {
+	if ackLatency <= 75*time.Millisecond && diskWriteMs <= 200 && (previousThroughput == 0 || throughput >= previousThroughput*0.85) {
 		if next.chunkSize < maxTransferChunkSize && next.windowSize >= 16 {
 			previousBytes := next.chunkSize * next.windowSize
 			if allowMediumChunk {
@@ -520,6 +540,13 @@ func (e *Engine) transferTuningForPeer(deviceID string) transferTuning {
 		return transferTuning{chunkSize: defaultTransferChunkSize, windowSize: initialTransferWindow}
 	}
 	return normalizeTransferTuning(tuning)
+}
+
+func (e *Engine) hasTransferTuningForPeer(deviceID string) bool {
+	e.mu.RLock()
+	_, ok := e.transferTuning[deviceID]
+	e.mu.RUnlock()
+	return ok
 }
 
 func (e *Engine) rememberTransferTuning(deviceID string, tuning transferTuning) {
@@ -898,22 +925,33 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 		}
 		remaining -= int64(len(data))
 	}
-	flushStarted := time.Now()
-	if err := transfer.writer.Flush(); err != nil {
-		return e.failBinaryFileWindow(transfer, "INSUFFICIENT_STORAGE", err)
-	}
-	diskWriteDuration += time.Since(flushStarted)
-
 	transfer.nextChunk += chunkCount
 	transfer.windowChunks = chunkCount
 	transfer.windowBytes = payloadLen
 	transfer.binaryPending = false
+	transfer.binaryAckBytes += payloadLen
+	transfer.binaryAckWindows++
 	diskWriteMs := diskWriteDuration.Milliseconds()
-	options := transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, diskWriteMs: diskWriteMs, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)}
+	options := transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, ackTargetBytes: transfer.binaryAckTarget, diskWriteMs: diskWriteMs, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)}
 	e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", options)
 	transfer.lastProgress = transfer.received
-	if err := transfer.session.write(wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: transfer.attachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: payloadLen, ChunkSize: chunkSize, WindowSize: chunkCount, DiskWriteMs: diskWriteMs, TransferMode: binaryTransferMode, Status: "receiving"}); err != nil {
-		return err
+	ackDue := transfer.binaryAckTarget <= 0 || transfer.binaryAckBytes >= transfer.binaryAckTarget || transfer.received >= transfer.expected || time.Since(transfer.binaryLastAckAt) >= binaryAckInterval
+	if ackDue {
+		flushStarted := time.Now()
+		if err := transfer.writer.Flush(); err != nil {
+			return e.failBinaryFileWindow(transfer, "INSUFFICIENT_STORAGE", err)
+		}
+		diskWriteDuration += time.Since(flushStarted)
+		diskWriteMs = diskWriteDuration.Milliseconds()
+		ackBytes := transfer.binaryAckBytes
+		ackWindows := transfer.binaryAckWindows
+		ack := wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: transfer.attachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: ackBytes, ChunkSize: chunkSize, WindowSize: ackWindows, DiskWriteMs: diskWriteMs, TransferMode: binaryTransferMode, Status: "receiving", AckCumulative: transfer.binaryAckTarget > 0}
+		if err := transfer.session.write(ack); err != nil {
+			return err
+		}
+		transfer.binaryAckBytes = 0
+		transfer.binaryAckWindows = 0
+		transfer.binaryLastAckAt = time.Now()
 	}
 	transfer.windowChunks = 0
 	transfer.windowBytes = 0
@@ -1316,6 +1354,15 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			transfer.chunkSize = message.ChunkSize
 			transfer.binaryPending = binaryWindow
 			transfer.expectedWindowBytes = message.WindowBytes
+			if binaryWindow {
+				transfer.binaryAckTarget = message.AckTargetBytes
+				if transfer.binaryAckTarget < 0 {
+					transfer.binaryAckTarget = 0
+				}
+				if transfer.binaryLastAckAt.IsZero() {
+					transfer.binaryLastAckAt = time.Now()
+				}
+			}
 		}
 		e.mu.Unlock()
 		if transfer != nil && !validWindow {
@@ -1648,6 +1695,7 @@ type transferProgressOptions struct {
 	windowSize          int
 	windowBytes         int64
 	inFlightBytes       int64
+	ackTargetBytes      int64
 	socketWriteMs       int64
 	ackWaitMs           int64
 	confirmedThroughput float64
@@ -1660,6 +1708,25 @@ type transferProgressOptions struct {
 	tuningState         string
 	tuningReason        string
 	verified            *bool
+}
+
+const transferSpeedSmoothingWindow = 750 * time.Millisecond
+
+func smoothTransferSpeed(previous, sample float64, elapsed time.Duration) float64 {
+	if sample <= 0 {
+		return previous
+	}
+	if previous <= 0 || elapsed <= 0 {
+		return sample
+	}
+	alpha := 1 - math.Exp(-float64(elapsed)/float64(transferSpeedSmoothingWindow))
+	if alpha < 0.12 {
+		alpha = 0.12
+	}
+	if alpha > 0.40 {
+		alpha = 0.40
+	}
+	return previous + alpha*(sample-previous)
 }
 
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
@@ -1708,6 +1775,9 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.inFlightBytes > 0 {
 		value["inFlightBytes"] = option.inFlightBytes
 	}
+	if option.ackTargetBytes > 0 {
+		value["ackTargetBytes"] = option.ackTargetBytes
+	}
 	if option.socketWriteMs > 0 {
 		value["socketWriteMs"] = option.socketWriteMs
 	}
@@ -1746,22 +1816,41 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	metric, ok := e.transferMetrics[metricKey]
 	now := time.Now()
 	reset := !ok || transferred < metric.lastBytes || phase == "awaiting_acceptance" || phase == "preparing_thumbnail"
+	var rawSpeed float64
 	if reset {
 		metric = transferMetric{startedAt: now, lastAt: now, lastBytes: transferred}
 	} else {
-		elapsed := now.Sub(metric.lastAt).Seconds()
+		sampleStartedAt := metric.speedSampleAt
+		if sampleStartedAt.IsZero() {
+			sampleStartedAt = metric.lastAt
+		}
+		elapsedDuration := now.Sub(sampleStartedAt)
+		elapsed := elapsedDuration.Seconds()
 		if elapsed > 0 && transferred > metric.lastBytes {
-			speed := option.windowThroughput
-			if speed <= 0 {
-				speed = float64(transferred-metric.lastBytes) / elapsed
+			rawSpeed = option.windowThroughput
+			if direction == "remote-receive" && option.confirmedThroughput > 0 {
+				rawSpeed = option.confirmedThroughput
 			}
-			if speed > metric.peakSpeed {
-				metric.peakSpeed = speed
+			if rawSpeed <= 0 {
+				rawSpeed = float64(transferred-metric.lastBytes) / elapsed
 			}
-			value["speed"] = int64(speed)
+			metric.smoothedSpeed = smoothTransferSpeed(metric.smoothedSpeed, rawSpeed, elapsedDuration)
+			metric.speedSampleAt = now
+			if metric.smoothedSpeed > metric.peakSpeed {
+				metric.peakSpeed = metric.smoothedSpeed
+			}
 		}
 		metric.lastAt = now
 		metric.lastBytes = transferred
+	}
+	if rawSpeed > 0 {
+		value["rawSpeed"] = int64(rawSpeed)
+	}
+	if metric.smoothedSpeed > 0 {
+		value["speed"] = int64(metric.smoothedSpeed)
+	}
+	if metric.peakSpeed > 0 {
+		value["peakSpeed"] = int64(metric.peakSpeed)
 	}
 	if !metric.startedAt.IsZero() {
 		elapsedMs := now.Sub(metric.startedAt).Milliseconds()
@@ -1769,11 +1858,12 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 			average := float64(transferred) / (float64(elapsedMs) / 1000)
 			value["averageSpeed"] = int64(average)
 			value["elapsedMs"] = elapsedMs
-			if metric.peakSpeed > 0 {
-				value["peakSpeed"] = int64(metric.peakSpeed)
+			etaSpeed := metric.smoothedSpeed
+			if etaSpeed <= 0 {
+				etaSpeed = average
 			}
-			if total > transferred && average > 0 {
-				value["etaSeconds"] = int64(float64(total-transferred) / average)
+			if total > transferred && etaSpeed > 0 {
+				value["etaSeconds"] = int64(float64(total-transferred) / etaSpeed)
 			}
 		}
 	}
@@ -3431,11 +3521,29 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if supportsBinary {
 		transferMode = binaryTransferMode
 	}
+	hasSavedTuning := e.hasTransferTuningForPeer(peer.DeviceID)
 	tuning := e.transferTuningForPeer(peer.DeviceID)
 	if !supportsWindowed {
 		tuning = transferTuning{chunkSize: defaultTransferChunkSize, windowSize: 1}
-	} else if !supportsBinary && tuning.chunkSize == mediumTransferChunkSize {
-		tuning.chunkSize = minTransferChunkSize
+	} else if supportsBinary && (!hasSavedTuning || !tuning.binary) {
+		tuning = transferTuning{chunkSize: defaultBinaryChunkSize, windowSize: binaryInitialWindow, binary: true}
+	} else if supportsBinary {
+		// A previous run may have backed off while the peer was temporarily
+		// busy. Do not let that transient state become the permanent starting
+		// point for every large transfer; binary mode always probes with the
+		// current high-throughput baseline and can back off again if needed.
+		tuning.binary = true
+		if tuning.chunkSize < defaultBinaryChunkSize {
+			tuning.chunkSize = defaultBinaryChunkSize
+		}
+		if tuning.windowSize < binaryInitialWindow {
+			tuning.windowSize = binaryInitialWindow
+		}
+	} else if !supportsBinary {
+		tuning.binary = false
+		if tuning.chunkSize == mediumTransferChunkSize {
+			tuning.chunkSize = minTransferChunkSize
+		}
 	}
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
@@ -3588,6 +3696,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 					log.Printf("文件传输调优: peer=%s mode=%s chunk=%d window=%d throughput=%.1fMB/s ack=%s disk=%dms state=%s", peer.DeviceID, transferMode, tuning.chunkSize, tuning.windowSize, throughput/(1024*1024), ackLatency, progress.DiskWriteMs, progressOptions.tuningState)
 				}
 				lastThroughput = throughput
+				tuning.binary = false
 				e.rememberTransferTuning(peer.DeviceID, tuning)
 				windowID++
 				if progress.Transferred >= message.AttachmentSize || sent >= message.AttachmentSize {
@@ -3678,10 +3787,8 @@ type binaryWindowAck struct {
 	receivedAt time.Time
 }
 
-const initialInFlightBytes int64 = 4 * 1024 * 1024
-
 func adjustInFlightBudget(current int64, chunkSize int, ackLatency time.Duration, diskWriteMs int64, throughput, previousThroughput float64) (int64, string, string) {
-	minimum := int64(maxInt(chunkSize, 1024*1024))
+	minimum := int64(maxInt(chunkSize, minInFlightBytes))
 	if current < minimum {
 		current = minimum
 	}
@@ -3692,18 +3799,51 @@ func adjustInFlightBudget(current int64, chunkSize int, ackLatency time.Duration
 		}
 		return next, "backing_off", "确认延迟、写盘耗时或窗口吞吐恶化，降低在途数据"
 	}
-	if ackLatency <= 100*time.Millisecond && (previousThroughput == 0 || throughput >= previousThroughput*0.90) {
-		increase := current / 4
-		if increase < minimum {
-			increase = minimum
+	if ackLatency <= 250*time.Millisecond && (previousThroughput == 0 || throughput >= previousThroughput*0.90) {
+		// Move through explicit bandwidth-delay-product probe steps. A 25%
+		// increase takes too many ACK cycles to reach a useful LAN window for
+		// multi-gigabyte files, while doubling still keeps every transition at
+		// a bounded window boundary.
+		next := current * 2
+		if next < current+minimum {
+			next = current + minimum
 		}
-		next := current + increase
-		if next > int64(maxBinaryFileFramePayload) {
-			next = int64(maxBinaryFileFramePayload)
+		if next > maxInFlightBytes {
+			next = maxInFlightBytes
 		}
 		return next, "accelerating", "确认延迟稳定且吞吐保持上升，增加在途数据"
 	}
 	return current, "stable", ""
+}
+
+// effectiveAckLatency removes the receiver's measured flush time from the
+// sender-side wait. The raw wait includes the time needed to persist the
+// acknowledged bytes, so treating it as network latency makes a healthy
+// transfer halve its in-flight budget after every large window.
+func effectiveAckLatency(ackLatency time.Duration, diskWriteMs int64) time.Duration {
+	if diskWriteMs <= 0 {
+		return ackLatency
+	}
+	latency := ackLatency - time.Duration(diskWriteMs)*time.Millisecond
+	if latency < 0 {
+		return 0
+	}
+	return latency
+}
+
+func binaryAckTargetForBudget(budget int64) int64 {
+	target := budget / 2
+	minimum := int64(minInFlightBytes)
+	if budget >= initialInFlightBytes {
+		minimum = initialBinaryAckBytes
+	}
+	if target < minimum {
+		target = minimum
+	}
+	if target > maxBinaryAckBytes {
+		target = maxBinaryAckBytes
+	}
+	return target
 }
 
 // transferBinaryFilePipelined keeps several binary windows in flight. TCP
@@ -3714,12 +3854,14 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 		return tuning, fmt.Errorf("文件大小无效")
 	}
 	tuning = normalizeTransferTuning(tuning)
-	tuning.windowSize = minInt(tuning.windowSize, maxInt(1, int(initialInFlightBytes/int64(tuning.chunkSize))))
-	inFlightBudget := initialInFlightBytes
+	tuning.binary = true
+	tuning.windowSize = minInt(tuning.windowSize, maxInt(1, int(maxInFlightBytes/int64(tuning.chunkSize))))
+	inFlightBudget := int64(initialInFlightBytes)
 	if candidate := int64(tuning.chunkSize * tuning.windowSize); candidate > inFlightBudget {
 		inFlightBudget = candidate
 	}
 	tuneTCPBuffers(session.conn, inFlightBudget)
+	log.Printf("文件传输开始: peer=%s attachment=%s mode=%s chunk=%d window=%d in_flight=%d ack_target=%d", peerID, message.AttachmentID, binaryTransferMode, tuning.chunkSize, tuning.windowSize, inFlightBudget, binaryAckTargetForBudget(inFlightBudget))
 	ackCtx, cancel := context.WithCancel(ctx)
 	completed := false
 	defer func() {
@@ -3774,6 +3916,8 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 	var sent, confirmed, inFlight int64
 	windowID, chunkIndex := 0, 0
 	lastThroughput := 0.0
+	stableCycles, degradedCycles := 0, 0
+	lastDiagnosticAt := time.Time{}
 	var lastConfirmedAt time.Time
 	var lastConfirmedBytes int64
 	exhausted := false
@@ -3789,7 +3933,7 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 			}
 			windowSize = minInt(windowSize, budgetWindowSize)
 			started := time.Now()
-			chunks, windowBytes, err := session.writeBinaryFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize, message.AttachmentSize-sent)
+			chunks, windowBytes, err := session.writeBinaryFileWindowWithAckTarget(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize, message.AttachmentSize-sent, binaryAckTargetForBudget(inFlightBudget))
 			writeDuration := time.Since(started)
 			if err != nil {
 				if errors.Is(err, errAttachmentCanceled) || session.isCanceled() {
@@ -3808,7 +3952,7 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 			if sent >= message.AttachmentSize || chunks < windowSize {
 				exhausted = true
 			}
-			e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: chunks, windowBytes: windowBytes, inFlightBytes: inFlight, socketWriteMs: writeDuration.Milliseconds(), transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"})
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: chunks, windowBytes: windowBytes, inFlightBytes: inFlight, ackTargetBytes: binaryAckTargetForBudget(inFlightBudget), socketWriteMs: writeDuration.Milliseconds(), transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"})
 		}
 
 		if len(pending) == 0 {
@@ -3818,31 +3962,58 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 		if err != nil {
 			return tuning, err
 		}
-		window := pending[0]
-		pending = pending[1:]
 		if ack.progress.Status == "canceled" {
 			return tuning, errAttachmentCanceled
 		}
 		if ack.progress.Status == "failed" {
 			return tuning, fmt.Errorf("对方接收文件失败: %s", ack.progress.Reason)
 		}
-		if ack.progress.WindowID != window.id || ack.progress.WindowBytes != window.bytes || ack.progress.ChunkSize != window.chunkSize || ack.progress.WindowSize != window.windowSize || ack.progress.Transferred < confirmed || ack.progress.Transferred > sent {
+		ackIndex := -1
+		for index := range pending {
+			if pending[index].id == ack.progress.WindowID {
+				ackIndex = index
+				break
+			}
+		}
+		if ackIndex < 0 {
 			return tuning, fmt.Errorf("文件窗口确认无效")
 		}
+		ackedBytes := int64(0)
+		for index := 0; index <= ackIndex; index++ {
+			window := pending[index]
+			if index == 0 && (window.chunkSize != ack.progress.ChunkSize || (!ack.progress.AckCumulative && window.windowSize != ack.progress.WindowSize)) {
+				return tuning, fmt.Errorf("文件窗口确认参数无效")
+			}
+			ackedBytes += window.bytes
+		}
+		cumulative := ack.progress.AckCumulative || ackIndex > 0 && ack.progress.WindowBytes == ackedBytes
+		if cumulative {
+			if ack.progress.WindowBytes != ackedBytes || ack.progress.Transferred != confirmed+ackedBytes {
+				return tuning, fmt.Errorf("累计文件窗口确认无效")
+			}
+		} else {
+			if ackIndex != 0 || ack.progress.WindowBytes != pending[0].bytes || ack.progress.Transferred < confirmed || ack.progress.Transferred > sent {
+				return tuning, fmt.Errorf("文件窗口确认无效")
+			}
+			ackedBytes = pending[0].bytes
+		}
+		ackStart := pending[0].sentAt
+		ackWindow := pending[ackIndex]
+		pending = pending[ackIndex+1:]
 		confirmed = ack.progress.Transferred
-		inFlight -= window.bytes
+		inFlight -= ackedBytes
 		if inFlight < 0 {
 			return tuning, fmt.Errorf("文件窗口在途字节无效")
 		}
-		elapsed := ack.receivedAt.Sub(window.sentAt)
+		elapsed := ack.receivedAt.Sub(ackStart)
 		if elapsed <= 0 {
 			elapsed = time.Nanosecond
 		}
-		ackWait := ack.receivedAt.Sub(window.sentAt.Add(window.writeDuration))
+		ackWait := ack.receivedAt.Sub(ackWindow.sentAt.Add(ackWindow.writeDuration))
 		if ackWait < 0 {
 			ackWait = 0
 		}
-		throughput := float64(window.bytes) / elapsed.Seconds()
+		throughput := float64(ackedBytes) / elapsed.Seconds()
 		confirmedThroughput := throughput
 		if !lastConfirmedAt.IsZero() && confirmed > lastConfirmedBytes {
 			confirmedElapsed := ack.receivedAt.Sub(lastConfirmedAt).Seconds()
@@ -3852,20 +4023,47 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 		}
 		lastConfirmedAt = ack.receivedAt
 		lastConfirmedBytes = confirmed
-		var state, reason string
-		tuning, state, reason = adjustTransferTuning(tuning, ackWait, ack.progress.DiskWriteMs, throughput, lastThroughput, true)
-		var budgetState, budgetReason string
-		inFlightBudget, budgetState, budgetReason = adjustInFlightBudget(inFlightBudget, tuning.chunkSize, ackWait, ack.progress.DiskWriteMs, throughput, lastThroughput)
-		tuneTCPBuffers(session.conn, inFlightBudget)
-		if state == "stable" && budgetState != "stable" {
-			state, reason = budgetState, budgetReason
-		} else if reason == "" {
-			reason = budgetReason
+		effectiveAckWait := effectiveAckLatency(ackWait, ack.progress.DiskWriteMs)
+		healthy := effectiveAckWait <= 250*time.Millisecond && ack.progress.DiskWriteMs <= 300 && (lastThroughput == 0 || throughput >= lastThroughput*0.90)
+		if healthy {
+			stableCycles++
+		} else {
+			stableCycles = 0
 		}
+		// Require two consecutive bad samples. A single delayed Wi-Fi ACK or
+		// scheduler pause must not permanently collapse the transfer window.
+		degraded := effectiveAckWait > time.Second || ack.progress.DiskWriteMs > 500 || (lastThroughput > 0 && throughput < lastThroughput*0.75)
+		if degraded {
+			degradedCycles++
+		} else {
+			degradedCycles = 0
+		}
+		state, reason := "stable", ""
+		if stableCycles >= 2 || degradedCycles >= 2 {
+			var tuneReason string
+			tuning, state, tuneReason = adjustTransferTuning(tuning, effectiveAckWait, ack.progress.DiskWriteMs, throughput, lastThroughput, true)
+			var budgetState, budgetReason string
+			inFlightBudget, budgetState, budgetReason = adjustInFlightBudget(inFlightBudget, tuning.chunkSize, effectiveAckWait, ack.progress.DiskWriteMs, throughput, lastThroughput)
+			if state == "stable" && budgetState != "stable" {
+				state, reason = budgetState, budgetReason
+			} else {
+				reason = tuneReason
+				if reason == "" {
+					reason = budgetReason
+				}
+			}
+			if state != "stable" {
+				stableCycles = 0
+			}
+		}
+		tuneTCPBuffers(session.conn, inFlightBudget)
 		lastThroughput = throughput
-		options := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: window.windowSize, windowBytes: window.bytes, inFlightBytes: inFlight, socketWriteMs: window.writeDuration.Milliseconds(), ackWaitMs: ackWait.Milliseconds(), ackLatency: ackWait, diskWriteMs: ack.progress.DiskWriteMs, windowThroughput: throughput, confirmedThroughput: confirmedThroughput, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: state, tuningReason: reason}
+		options := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: ackWindow.windowSize, windowBytes: ackedBytes, inFlightBytes: inFlight, ackTargetBytes: binaryAckTargetForBudget(inFlightBudget), socketWriteMs: ackWindow.writeDuration.Milliseconds(), ackWaitMs: ackWait.Milliseconds(), ackLatency: ackWait, diskWriteMs: ack.progress.DiskWriteMs, windowThroughput: throughput, confirmedThroughput: confirmedThroughput, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: state, tuningReason: reason}
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmed, message.AttachmentSize, "remote-receive", "receiving", options)
-		log.Printf("文件传输窗口: peer=%s attachment=%s mode=%s window=%d chunk=%d bytes=%d in_flight=%d write=%dms ack=%dms throughput=%.1fMB/s state=%s reason=%s", peerID, message.AttachmentID, binaryTransferMode, window.id, tuning.chunkSize, window.bytes, inFlight, window.writeDuration.Milliseconds(), ackWait.Milliseconds(), throughput/(1024*1024), state, reason)
+		if reason != "" || lastDiagnosticAt.IsZero() || time.Since(lastDiagnosticAt) >= time.Second {
+			log.Printf("文件传输确认: peer=%s attachment=%s mode=%s window=%d chunk=%d ack_bytes=%d in_flight=%d write=%dms ack=%dms throughput=%.1fMB/s state=%s reason=%s", peerID, message.AttachmentID, binaryTransferMode, ackWindow.id, tuning.chunkSize, ackedBytes, inFlight, ackWindow.writeDuration.Milliseconds(), ackWait.Milliseconds(), throughput/(1024*1024), state, reason)
+			lastDiagnosticAt = time.Now()
+		}
 		e.rememberTransferTuning(peerID, tuning)
 	}
 

@@ -112,6 +112,7 @@ export interface TransferProgress {
   speed?: number
   averageSpeed?: number
   peakSpeed?: number
+  rawSpeed?: number
   etaSeconds?: number
   elapsedMs?: number
   chunkSize?: number
@@ -119,6 +120,7 @@ export interface TransferProgress {
   windowBytes?: number
   windowThroughput?: number
   inFlightBytes?: number
+  ackTargetBytes?: number
   socketWriteMs?: number
   ackWaitMs?: number
   confirmedThroughput?: number

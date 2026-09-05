@@ -96,12 +96,60 @@ func TestAdjustTransferTuningAcceleratesAndBacksOff(t *testing.T) {
 
 func TestAdjustInFlightBudget(t *testing.T) {
 	budget, state, reason := adjustInFlightBudget(initialInFlightBytes, minTransferChunkSize, 10*time.Millisecond, 1, 12*1024*1024, 10*1024*1024)
-	if state != "accelerating" || reason == "" || budget <= initialInFlightBytes {
+	if state != "accelerating" || reason == "" || budget != initialInFlightBytes*2 {
 		t.Fatalf("stable transfer did not grow in-flight budget: budget=%d state=%s reason=%s", budget, state, reason)
 	}
 	backedOff, state, reason := adjustInFlightBudget(budget, minTransferChunkSize, 500*time.Millisecond, 400, 4*1024*1024, 12*1024*1024)
 	if state != "backing_off" || reason == "" || backedOff >= budget {
 		t.Fatalf("slow transfer did not back off in-flight budget: budget=%d backedOff=%d state=%s reason=%s", budget, backedOff, state, reason)
+	}
+}
+
+func TestEffectiveAckLatencyExcludesFlushTime(t *testing.T) {
+	if got := effectiveAckLatency(900*time.Millisecond, 700); got != 200*time.Millisecond {
+		t.Fatalf("effective ACK latency = %s, want 200ms", got)
+	}
+	if got := effectiveAckLatency(100*time.Millisecond, 250); got != 0 {
+		t.Fatalf("flush time should not produce negative latency: %s", got)
+	}
+}
+
+func TestBinaryAckTargetTracksInFlightBudget(t *testing.T) {
+	if got := binaryAckTargetForBudget(initialInFlightBytes); got != 8*1024*1024 {
+		t.Fatalf("initial ACK target = %d, want %d", got, 8*1024*1024)
+	}
+	if got := binaryAckTargetForBudget(maxInFlightBytes); got != maxBinaryAckBytes {
+		t.Fatalf("maximum ACK target = %d, want %d", got, maxBinaryAckBytes)
+	}
+	if got := binaryAckTargetForBudget(minInFlightBytes); got != minInFlightBytes {
+		t.Fatalf("minimum ACK target = %d, want %d", got, minInFlightBytes)
+	}
+}
+
+func TestSmoothTransferSpeedLimitsWindowJumps(t *testing.T) {
+	first := smoothTransferSpeed(0, 8*1024*1024, 0)
+	if first != 8*1024*1024 {
+		t.Fatalf("first speed sample = %v", first)
+	}
+	second := smoothTransferSpeed(first, 80*1024*1024, 100*time.Millisecond)
+	if second <= first || second >= 80*1024*1024 {
+		t.Fatalf("speed jump was not smoothed: first=%v second=%v", first, second)
+	}
+	third := smoothTransferSpeed(second, 12*1024*1024, 100*time.Millisecond)
+	if third >= second || third <= 12*1024*1024 {
+		t.Fatalf("speed drop was not smoothed: second=%v third=%v", second, third)
+	}
+}
+
+func TestEmitTransferProgressPrefersConfirmedRemoteSpeed(t *testing.T) {
+	engine := NewEngine()
+	engine.emitTransferProgress("message", "attachment", "peer", 0, 100, "remote-receive", "receiving")
+	engine.emitTransferProgress("message", "attachment", "peer", 1, 100, "remote-receive", "receiving", transferProgressOptions{windowThroughput: 80, confirmedThroughput: 12})
+	engine.transferMetricsMu.Lock()
+	metric := engine.transferMetrics["attachment|remote-receive"]
+	engine.transferMetricsMu.Unlock()
+	if metric.smoothedSpeed != 12 {
+		t.Fatalf("remote progress used window speed instead of confirmed speed: %v", metric.smoothedSpeed)
 	}
 }
 

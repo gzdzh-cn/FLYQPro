@@ -74,10 +74,9 @@ func TestBinaryPipelineKeepsMultipleWindowsInFlight(t *testing.T) {
 				continue
 			}
 			firstBatchAcked = true
-			for _, window := range initialWindows {
-				if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, FileSize: int64(len(payload)), Transferred: int64(received.Len()), WindowID: window.WindowID, WindowBytes: window.WindowBytes, ChunkSize: window.ChunkSize, WindowSize: window.WindowSize, Status: "receiving", TransferMode: binaryTransferMode}); err != nil {
-					t.Fatal(err)
-				}
+			lastWindow := initialWindows[len(initialWindows)-1]
+			if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, FileSize: int64(len(payload)), Transferred: int64(received.Len()), WindowID: lastWindow.WindowID, WindowBytes: int64(received.Len()), ChunkSize: lastWindow.ChunkSize, WindowSize: len(initialWindows), AckCumulative: true, Status: "receiving", TransferMode: binaryTransferMode}); err != nil {
+				t.Fatal(err)
 			}
 		} else if err := writeWire(receiver, ack); err != nil {
 			t.Fatal(err)

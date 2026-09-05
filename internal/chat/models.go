@@ -358,6 +358,8 @@ type wireMessage struct {
 	WindowSize          int                      `json:"windowSize,omitempty"`
 	WindowID            int                      `json:"windowId,omitempty"`
 	WindowBytes         int64                    `json:"windowBytes,omitempty"`
+	AckTargetBytes      int64                    `json:"ackTargetBytes,omitempty"`
+	AckCumulative       bool                     `json:"ackCumulative,omitempty"`
 	DiskWriteMs         int64                    `json:"diskWriteMs,omitempty"`
 	TransferMode        string                   `json:"transferMode,omitempty"`
 	Transferred         int64                    `json:"transferred,omitempty"`
