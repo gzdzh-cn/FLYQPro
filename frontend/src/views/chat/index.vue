@@ -139,6 +139,7 @@
               <div class="attachment-details-grid">
                 <p><span>分块 / 窗口</span><strong>{{ detailProgress.chunkSize ? formatBytes(detailProgress.chunkSize) : '兼容模式' }} · {{ detailProgress.windowSize ? `${detailProgress.windowSize} 块` : '逐块确认' }}</strong></p>
                 <p><span>窗口数据量</span><strong>{{ detailProgress.windowBytes ? formatBytes(detailProgress.windowBytes) : '未提供' }}</strong></p>
+                <p><span>在途数据</span><strong>{{ detailProgress.inFlightBytes ? formatBytes(detailProgress.inFlightBytes) : '未提供' }}</strong></p>
                 <p><span>确认延迟</span><strong>{{ detailProgress.ackLatencyMs ? `${detailProgress.ackLatencyMs} ms` : '正在测量' }}</strong></p>
                 <p><span>调优状态</span><strong>{{ tuningStateLabel(detailProgress.tuningState) }}</strong></p>
                 <p><span>通道 / 模式</span><strong>{{ detailProgress.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress.transferMode) }}</strong></p>

@@ -3,6 +3,7 @@ package chat
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,91 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBinaryPipelineKeepsMultipleWindowsInFlight(t *testing.T) {
+	const payloadSize = 6 * 1024 * 1024
+	payload := bytes.Repeat([]byte("pipeline-data"), payloadSize/len("pipeline-data"))
+	path := t.TempDir() + "/payload.bin"
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	sender, receiver := net.Pipe()
+	defer sender.Close()
+	defer receiver.Close()
+	message := Message{MessageID: "message", AttachmentID: "attachment", AttachmentName: "payload.bin", AttachmentSize: int64(len(payload))}
+	engine := NewEngine()
+	result := make(chan error, 1)
+	go func() {
+		_, transferErr := engine.transferBinaryFilePipelined(context.Background(), "peer", message, file, newWireSession(sender), newWireReader(sender), transferTuning{chunkSize: minTransferChunkSize, windowSize: initialTransferWindow}, "dzhgo/2")
+		result <- transferErr
+	}()
+
+	reader := newWireReader(receiver)
+	var received bytes.Buffer
+	initialWindows := make([]wireMessage, 0, initialTransferWindow)
+	firstBatchAcked := false
+	for {
+		var control wireMessage
+		if err := reader.Decode(&control); err != nil {
+			t.Fatal(err)
+		}
+		if control.Type == "file_complete" {
+			if control.AttachmentID != message.AttachmentID {
+				t.Fatalf("unexpected completion attachment: %+v", control)
+			}
+			if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, FileSize: int64(len(payload)), Transferred: int64(len(payload)), Status: "completed", TransferMode: binaryTransferMode}); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		if control.Type != "file_window" || control.TransferMode != binaryTransferMode {
+			t.Fatalf("unexpected pipeline control: %+v", control)
+		}
+		header, err := readBinaryFileFrameHeader(reader.reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		windowPayload := make([]byte, header.PayloadLen)
+		if _, err := io.ReadFull(reader.reader, windowPayload); err != nil {
+			t.Fatal(err)
+		}
+		received.Write(windowPayload)
+		initialWindows = append(initialWindows, control)
+		ack := wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, FileSize: int64(len(payload)), Transferred: int64(received.Len()), WindowID: control.WindowID, WindowBytes: int64(len(windowPayload)), ChunkSize: control.ChunkSize, WindowSize: control.WindowSize, Status: "receiving", TransferMode: binaryTransferMode}
+		if !firstBatchAcked {
+			if len(initialWindows) < initialTransferWindow {
+				continue
+			}
+			firstBatchAcked = true
+			for _, window := range initialWindows {
+				if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, FileSize: int64(len(payload)), Transferred: int64(received.Len()), WindowID: window.WindowID, WindowBytes: window.WindowBytes, ChunkSize: window.ChunkSize, WindowSize: window.WindowSize, Status: "receiving", TransferMode: binaryTransferMode}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		} else if err := writeWire(receiver, ack); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(initialWindows) < initialTransferWindow {
+		t.Fatalf("sender did not put multiple windows in flight: got %d", len(initialWindows))
+	}
+	if !bytes.Equal(received.Bytes(), payload) {
+		t.Fatal("pipelined payload changed during transfer")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pipelined transfer did not finish")
+	}
+}
 
 func TestRequiredAttachmentBytesAddsSafetyMargin(t *testing.T) {
 	if got, want := requiredAttachmentBytes(100), int64(100)+attachmentSafetyMargin; got != want {

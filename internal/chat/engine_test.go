@@ -94,6 +94,17 @@ func TestAdjustTransferTuningAcceleratesAndBacksOff(t *testing.T) {
 	}
 }
 
+func TestAdjustInFlightBudget(t *testing.T) {
+	budget, state, reason := adjustInFlightBudget(initialInFlightBytes, minTransferChunkSize, 10*time.Millisecond, 1, 12*1024*1024, 10*1024*1024)
+	if state != "accelerating" || reason == "" || budget <= initialInFlightBytes {
+		t.Fatalf("stable transfer did not grow in-flight budget: budget=%d state=%s reason=%s", budget, state, reason)
+	}
+	backedOff, state, reason := adjustInFlightBudget(budget, minTransferChunkSize, 500*time.Millisecond, 400, 4*1024*1024, 12*1024*1024)
+	if state != "backing_off" || reason == "" || backedOff >= budget {
+		t.Fatalf("slow transfer did not back off in-flight budget: budget=%d backedOff=%d state=%s reason=%s", budget, backedOff, state, reason)
+	}
+}
+
 func TestSubnetHostTargetsIncludesPeerAndExcludesLocalAndBroadcast(t *testing.T) {
 	_, subnet, err := net.ParseCIDR("192.168.43.4/24")
 	if err != nil {

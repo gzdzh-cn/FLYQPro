@@ -118,6 +118,10 @@ export interface TransferProgress {
   windowSize?: number
   windowBytes?: number
   windowThroughput?: number
+  inFlightBytes?: number
+  socketWriteMs?: number
+  ackWaitMs?: number
+  confirmedThroughput?: number
   ackLatencyMs?: number
   diskWriteMs?: number
   transferMode?: 'binary-window' | 'json-window' | 'legacy-chunk' | string
