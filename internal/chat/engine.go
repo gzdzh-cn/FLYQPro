@@ -57,6 +57,7 @@ type Engine struct {
 	friendRemovalSyncMu     sync.Mutex
 	transferMetricsMu       sync.Mutex
 	transferMetrics         map[string]transferMetric
+	transferLastBytes       map[string]int64
 	transferTuning          map[string]transferTuning
 	presenceMu              sync.Mutex
 	discoveryScanMu         sync.Mutex
@@ -69,6 +70,7 @@ type Engine struct {
 
 type transferMetric struct {
 	startedAt     time.Time
+	startedBytes  int64
 	lastAt        time.Time
 	lastBytes     int64
 	peakSpeed     float64
@@ -433,7 +435,7 @@ func readBinaryFileFrameHeader(reader io.Reader) (binaryFileFrameHeader, error) 
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferTuning: make(map[string]transferTuning)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning)}
 }
 
 func configureTCPConnection(conn net.Conn) {
@@ -1703,6 +1705,7 @@ type transferProgressOptions struct {
 	diskWriteMs         int64
 	windowThroughput    float64
 	transferMode        string
+	displayLocalMetrics bool
 	transport           string
 	protocol            string
 	tuningState         string
@@ -1710,7 +1713,8 @@ type transferProgressOptions struct {
 	verified            *bool
 }
 
-const transferSpeedSmoothingWindow = 750 * time.Millisecond
+const transferSpeedSmoothingWindow = 1500 * time.Millisecond
+const transferSpeedSampleInterval = 500 * time.Millisecond
 
 func smoothTransferSpeed(previous, sample float64, elapsed time.Duration) float64 {
 	if sample <= 0 {
@@ -1808,6 +1812,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.verified != nil {
 		value["verified"] = *option.verified
 	}
+	displayMetrics := direction != "send" || option.displayLocalMetrics
 	e.transferMetricsMu.Lock()
 	if e.transferMetrics == nil {
 		e.transferMetrics = make(map[string]transferMetric)
@@ -1818,8 +1823,8 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	reset := !ok || transferred < metric.lastBytes || phase == "awaiting_acceptance" || phase == "preparing_thumbnail"
 	var rawSpeed float64
 	if reset {
-		metric = transferMetric{startedAt: now, lastAt: now, lastBytes: transferred}
-	} else {
+		metric = transferMetric{startedAt: now, startedBytes: transferred, lastAt: now, lastBytes: transferred}
+	} else if displayMetrics {
 		sampleStartedAt := metric.speedSampleAt
 		if sampleStartedAt.IsZero() {
 			sampleStartedAt = metric.lastAt
@@ -1830,32 +1835,42 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 			rawSpeed = option.windowThroughput
 			if direction == "remote-receive" && option.confirmedThroughput > 0 {
 				rawSpeed = option.confirmedThroughput
+			} else if direction == "remote-receive" && option.transferMode == binaryTransferMode {
+				// Binary ACKs can arrive in a burst. Until the sampler has a
+				// meaningful interval, retain the previous display speed.
+				rawSpeed = 0
 			}
-			if rawSpeed <= 0 {
+			if rawSpeed <= 0 && !(direction == "remote-receive" && option.transferMode == binaryTransferMode) {
 				rawSpeed = float64(transferred-metric.lastBytes) / elapsed
 			}
-			metric.smoothedSpeed = smoothTransferSpeed(metric.smoothedSpeed, rawSpeed, elapsedDuration)
-			metric.speedSampleAt = now
-			if metric.smoothedSpeed > metric.peakSpeed {
-				metric.peakSpeed = metric.smoothedSpeed
+			if rawSpeed > 0 {
+				metric.smoothedSpeed = smoothTransferSpeed(metric.smoothedSpeed, rawSpeed, elapsedDuration)
+				metric.speedSampleAt = now
+				if metric.smoothedSpeed > metric.peakSpeed {
+					metric.peakSpeed = metric.smoothedSpeed
+				}
 			}
 		}
 		metric.lastAt = now
 		metric.lastBytes = transferred
 	}
-	if rawSpeed > 0 {
+	if displayMetrics && rawSpeed > 0 {
 		value["rawSpeed"] = int64(rawSpeed)
 	}
-	if metric.smoothedSpeed > 0 {
+	if displayMetrics && metric.smoothedSpeed > 0 {
 		value["speed"] = int64(metric.smoothedSpeed)
 	}
-	if metric.peakSpeed > 0 {
+	if displayMetrics && metric.peakSpeed > 0 {
 		value["peakSpeed"] = int64(metric.peakSpeed)
 	}
-	if !metric.startedAt.IsZero() {
+	if displayMetrics && !metric.startedAt.IsZero() {
 		elapsedMs := now.Sub(metric.startedAt).Milliseconds()
 		if elapsedMs > 0 {
-			average := float64(transferred) / (float64(elapsedMs) / 1000)
+			measuredBytes := transferred - metric.startedBytes
+			if measuredBytes < 0 {
+				measuredBytes = 0
+			}
+			average := float64(measuredBytes) / (float64(elapsedMs) / 1000)
 			value["averageSpeed"] = int64(average)
 			value["elapsedMs"] = elapsedMs
 			etaSpeed := metric.smoothedSpeed
@@ -1868,8 +1883,16 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		}
 	}
 	if phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected" {
+		if e.transferLastBytes == nil {
+			e.transferLastBytes = make(map[string]int64)
+		}
+		e.transferLastBytes[metricKey] = transferred
 		delete(e.transferMetrics, metricKey)
 	} else {
+		if e.transferLastBytes == nil {
+			e.transferLastBytes = make(map[string]int64)
+		}
+		e.transferLastBytes[metricKey] = transferred
 		e.transferMetrics[metricKey] = metric
 	}
 	e.transferMetricsMu.Unlock()
@@ -3604,8 +3627,11 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		return errAttachmentCanceled
 	}
 	protocolLabel := fmt.Sprintf("%s/%d", responseDialect.Name, responseDialect.Major)
-	progressOptions := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: int64(tuning.chunkSize * tuning.windowSize), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"}
+	progressOptions := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: int64(tuning.chunkSize * tuning.windowSize), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"}
 	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring", progressOptions)
+	if supportsProgress {
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "remote-receive", "receiving", progressOptions)
+	}
 	var sent, lastProgress int64
 	windowID, chunkIndex := 0, 0
 	lastThroughput := 0.0
@@ -3669,7 +3695,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 				chunkIndex += chunks
 				sent += windowBytes
 				writeFinished := time.Now()
-				progressOptions = transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: windowSize, windowBytes: windowBytes, transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "stable"}
+				progressOptions = transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: windowSize, windowBytes: windowBytes, transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "stable"}
 				progress, ackErr := acknowledge(progressOptions)
 				if ackErr != nil {
 					return ackErr
@@ -3719,13 +3745,13 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 					if !supportsProgress {
 						return nil
 					}
-					_, err := acknowledge(transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel})
+					_, err := acknowledge(transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel})
 					return err
 				}(); err != nil {
 					return err
 				}
 				if sent-lastProgress >= int64(defaultTransferChunkSize) || sent == message.AttachmentSize {
-					e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel})
+					e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel})
 					lastProgress = sent
 				}
 			}
@@ -3918,8 +3944,8 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 	lastThroughput := 0.0
 	stableCycles, degradedCycles := 0, 0
 	lastDiagnosticAt := time.Time{}
-	var lastConfirmedAt time.Time
-	var lastConfirmedBytes int64
+	rateSampleAt := time.Now()
+	var rateSampleBytes int64
 	exhausted := false
 	for !exhausted || len(pending) > 0 {
 		for !exhausted && inFlight < inFlightBudget {
@@ -4014,15 +4040,16 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 			ackWait = 0
 		}
 		throughput := float64(ackedBytes) / elapsed.Seconds()
-		confirmedThroughput := throughput
-		if !lastConfirmedAt.IsZero() && confirmed > lastConfirmedBytes {
-			confirmedElapsed := ack.receivedAt.Sub(lastConfirmedAt).Seconds()
-			if confirmedElapsed > 0 {
-				confirmedThroughput = float64(confirmed-lastConfirmedBytes) / confirmedElapsed
+		confirmedThroughput := float64(0)
+		confirmedElapsed := ack.receivedAt.Sub(rateSampleAt)
+		if confirmedElapsed >= transferSpeedSampleInterval || confirmed >= message.AttachmentSize {
+			confirmedBytes := confirmed - rateSampleBytes
+			if confirmedBytes > 0 && confirmedElapsed > 0 {
+				confirmedThroughput = float64(confirmedBytes) / confirmedElapsed.Seconds()
+				rateSampleAt = ack.receivedAt
+				rateSampleBytes = confirmed
 			}
 		}
-		lastConfirmedAt = ack.receivedAt
-		lastConfirmedBytes = confirmed
 		effectiveAckWait := effectiveAckLatency(ackWait, ack.progress.DiskWriteMs)
 		healthy := effectiveAckWait <= 250*time.Millisecond && ack.progress.DiskWriteMs <= 300 && (lastThroughput == 0 || throughput >= lastThroughput*0.90)
 		if healthy {
@@ -4183,6 +4210,16 @@ func readFileOfferResponse(reader *wireReader, attachmentID string) (wireMessage
 }
 
 func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string) Message {
+	confirmedBytes := message.AttachmentSize
+	if status != "sent" {
+		confirmedBytes = e.lastTransferBytes(message.AttachmentID, "remote-receive")
+		if confirmedBytes < 0 {
+			confirmedBytes = 0
+		}
+		if confirmedBytes > message.AttachmentSize {
+			confirmedBytes = message.AttachmentSize
+		}
+	}
 	message.Status, message.AttachmentStatus = status, status
 	_ = UpdateMessageStatus(ctx, message.MessageID, status)
 	_ = SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: messageAttachmentSHA(ctx, message), ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime, LocalPath: message.AttachmentPath, Status: status})
@@ -4196,9 +4233,25 @@ func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, stat
 	phase := map[string]string{"sent": "completed", "failed": "failed", "not_friend": "failed", "canceled": "canceled", "rejected": "rejected"}[status]
 	if phase != "" {
 		verified := status == "sent"
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, strings.TrimPrefix(message.ConversationID, "conv-"), message.AttachmentSize, message.AttachmentSize, "send", phase, transferProgressOptions{verified: &verified})
+		peerID := strings.TrimPrefix(message.ConversationID, "conv-")
+		if status != "sent" {
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "remote-receive", phase, transferProgressOptions{transferMode: binaryTransferMode, verified: &verified})
+		}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "send", phase, transferProgressOptions{verified: &verified})
 	}
 	return message
+}
+
+func (e *Engine) lastTransferBytes(attachmentID, direction string) int64 {
+	e.transferMetricsMu.Lock()
+	defer e.transferMetricsMu.Unlock()
+	if metric, ok := e.transferMetrics[attachmentID+"|"+direction]; ok {
+		return metric.lastBytes
+	}
+	if bytes, ok := e.transferLastBytes[attachmentID+"|"+direction]; ok {
+		return bytes
+	}
+	return 0
 }
 
 func (e *Engine) generateAttachmentThumbnail(message Message, path string) <-chan Message {

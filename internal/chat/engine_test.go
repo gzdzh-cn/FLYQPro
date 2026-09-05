@@ -153,6 +153,27 @@ func TestEmitTransferProgressPrefersConfirmedRemoteSpeed(t *testing.T) {
 	}
 }
 
+func TestEmitTransferProgressDoesNotExposeBinarySocketBurstAsSpeed(t *testing.T) {
+	engine := NewEngine()
+	engine.emitTransferProgress("message", "attachment", "peer", 0, 100, "send", "transferring", transferProgressOptions{transferMode: binaryTransferMode, windowThroughput: 500 * 1024 * 1024})
+	engine.emitTransferProgress("message", "attachment", "peer", 90, 100, "send", "transferring", transferProgressOptions{transferMode: binaryTransferMode, windowThroughput: 500 * 1024 * 1024})
+	engine.transferMetricsMu.Lock()
+	metric := engine.transferMetrics["attachment|send"]
+	engine.transferMetricsMu.Unlock()
+	if metric.smoothedSpeed != 0 {
+		t.Fatalf("binary socket burst was exposed as display speed: %v", metric.smoothedSpeed)
+	}
+}
+
+func TestLastTransferBytesKeepsTerminalRemoteConfirmation(t *testing.T) {
+	engine := NewEngine()
+	engine.emitTransferProgress("message", "attachment", "peer", 0, 100, "remote-receive", "receiving", transferProgressOptions{transferMode: binaryTransferMode})
+	engine.emitTransferProgress("message", "attachment", "peer", 30, 100, "remote-receive", "failed", transferProgressOptions{transferMode: binaryTransferMode})
+	if got := engine.lastTransferBytes("attachment", "remote-receive"); got != 30 {
+		t.Fatalf("terminal remote confirmation = %d, want 30", got)
+	}
+}
+
 func TestSubnetHostTargetsIncludesPeerAndExcludesLocalAndBroadcast(t *testing.T) {
 	_, subnet, err := net.ParseCIDR("192.168.43.4/24")
 	if err != nil {

@@ -95,7 +95,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span class="attachment-pending-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !['awaiting_acceptance', 'completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ formatSpeed(transferProgressFor(message)?.speed || 0) }}/秒</span><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
+                <div v-if="transferProgressFor(message) && !['awaiting_acceptance', 'completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferProgressFor(message) && ((isImageMessage(message) && !attachmentCompletedLocal(message)) || ['awaiting_acceptance', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase))" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">查看传输详情</button></div>
               </template>
@@ -342,7 +342,7 @@ const attachmentDetailsVisible = ref(false)
 const attachmentDetails = ref<AttachmentDetails>()
 const attachmentDetailsMessage = ref<any>()
 const detailAttachmentId = computed(() => attachmentDetailsMessage.value?.attachmentId || attachmentDetails.value?.attachmentId || '')
-const detailProgress = computed<any>(() => detailAttachmentId.value ? (store.transferProgress[detailAttachmentId.value] || store.transferHistory[detailAttachmentId.value]) : undefined)
+const detailProgress = computed<any>(() => transferProgressFor(attachmentDetailsMessage.value))
 const detailPeer = computed<Peer | undefined>(() => {
   const conversationId = attachmentDetailsMessage.value?.conversationId || ''
   const peerId = conversationId.startsWith('conv-') ? conversationId.slice(5) : detailProgress.value?.peerDeviceId
@@ -587,7 +587,7 @@ function clearCurrentConversation() {
         const removedMessages = store.clearConversationLocal(peerDeviceId)
         removedMessages.forEach((message: any) => {
           delete messagePreviews[message.messageId]
-          if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId] }
+          if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId]; delete store.transferProgressByDirection[message.attachmentId]; delete store.transferHistoryByDirection[message.attachmentId] }
         })
         newMessageCount.value = 0
         userNearBottom.value = true
@@ -1030,7 +1030,7 @@ async function cancelAttachment(message: any) {
   attachmentActions[message.attachmentId] = true
   message.attachmentStatus = 'canceled'
   message.status = 'canceled'
-  try { await nextTick(); await ChatService.CancelAttachment(message.attachmentId); delete store.transferProgress[message.attachmentId]; if (!isOutgoing) Message.info('文件传输已取消')
+  try { await nextTick(); await ChatService.CancelAttachment(message.attachmentId); if (!isOutgoing) Message.info('文件传输已取消')
   } catch (error: any) { message.attachmentStatus = previousStatus; message.status = previousMessageStatus; Message.error(error?.message || '取消传输失败')
   } finally { delete attachmentActions[message.attachmentId] }
 }
@@ -1052,21 +1052,22 @@ function attachmentAwaitingAcceptance(message: any): boolean {
   return !progress || progress.phase === 'awaiting_acceptance'
 }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
-function formatSpeed(value: number) { const bytes = Math.max(0, value); return bytes ? formatBytes(bytes) : '0 B' }
+function formatSpeed(value: number) {
+  const bytes = Math.max(0, Number(value || 0))
+  if (!bytes) return '0 B'
+  if (bytes >= 1024 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024 / 1024)} GB`
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${Math.round(bytes)} B`
+}
 function formatTransferRate(value?: number): { primary: string; secondary: string } {
   const bytes = Number(value || 0)
   if (!(bytes > 0)) return { primary: '正在测量', secondary: '' }
-  const primary = bytes >= 1024 * 1024 * 1024
-    ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB/s`
-    : bytes >= 1024 * 1024
-      ? `${(bytes / 1024 / 1024).toFixed(1)} MB/s`
-      : bytes >= 1024
-        ? `${(bytes / 1024).toFixed(1)} KB/s`
-        : `${Math.round(bytes)} B/s`
+  const primary = `${formatSpeed(bytes)}/s`
   const bits = bytes * 8
   const secondary = bits >= 1000 * 1000 * 1000
-    ? `${(bits / 1000 / 1000 / 1000).toFixed(1)} Gbps`
-    : `${(bits / 1000 / 1000).toFixed(1)} Mbps`
+    ? `${Math.round(bits / 1000 / 1000 / 1000)} Gbps`
+    : `${Math.round(bits / 1000 / 1000)} Mbps`
   return { primary, secondary }
 }
 function formatDuration(value?: number) { const seconds = Math.max(0, Math.round(Number(value || 0) / 1000)); if (!seconds) return '正在测量'; const minutes = Math.floor(seconds / 60); return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒` }
@@ -1079,8 +1080,36 @@ function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '�
 function transferDirectionLabel(direction?: string) { return ({ send: '发送', receive: '接收', 'remote-receive': '对方接收' } as Record<string, string>)[direction || ''] || direction || '未知' }
 function tuningStateLabel(state?: string) { return ({ probing: '探测中', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
 function transferModeLabel(mode?: string) { return ({ 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
-function transferProgressFor(message: any): any { return message?.attachmentId ? (store.transferProgress[message.attachmentId] || store.transferHistory[message.attachmentId]) : undefined }
-function attachmentTransfer(details: any): any { return details?.attachmentId ? (store.transferProgress[details.attachmentId] || store.transferHistory[details.attachmentId]) : undefined }
+const terminalTransferPhases = new Set(['completed', 'canceled', 'rejected', 'failed'])
+function transferProgressFor(message: any): any {
+  if (!message?.attachmentId) return undefined
+  const attachmentId = message.attachmentId
+  const directions = store.transferProgressByDirection[attachmentId] || store.transferHistoryByDirection[attachmentId]
+  if (!directions) return store.transferProgress[attachmentId] || store.transferHistory[attachmentId]
+  const mine = message.senderDeviceId === deviceInfo.value?.deviceId
+  const preferred = mine ? directions['remote-receive'] : directions.receive
+  const diagnostics = mine ? directions.send : directions.receive
+  if (!preferred) {
+    if (mine && diagnostics && ['binary-window', 'json-window'].includes(diagnostics.transferMode || '') && !terminalTransferPhases.has(diagnostics.phase)) {
+      return { ...diagnostics, transferred: 0, remoteReceived: 0, speed: undefined, averageSpeed: undefined, peakSpeed: undefined, etaSeconds: undefined, elapsedMs: undefined }
+    }
+    return diagnostics || directions.send || directions.receive
+  }
+  const merged = { ...(diagnostics || {}), ...preferred }
+  if (mine) {
+    merged.sent = diagnostics?.sent ?? diagnostics?.transferred ?? merged.sent
+    merged.remoteReceived = preferred.remoteReceived ?? preferred.transferred ?? 0
+    merged.transferred = preferred.transferred ?? merged.remoteReceived
+    merged.total = preferred.total || diagnostics?.total || message.attachmentSize || 0
+  }
+  const terminal = [diagnostics, preferred].find((item) => item && terminalTransferPhases.has(item.phase))
+  if (terminal) {
+    merged.phase = terminal.phase
+    if (terminal.verified !== undefined) merged.verified = terminal.verified
+  }
+  return merged
+}
+function attachmentTransfer(details: any): any { return details?.attachmentId ? transferProgressFor(attachmentDetailsMessage.value) : undefined }
 function transferProgressTransferred(message: any): number {
   const progress = transferProgressFor(message)
   if (!progress) return 0
@@ -1093,6 +1122,10 @@ function transferProgressPercent(message: any): number {
   if (progress.phase === 'completed') return 100
   const total = progress.total || message.attachmentSize || 0
   return total ? Math.min(100, Math.round(transferProgressTransferred(message) / total * 100)) : (progress.percent || 0)
+}
+function transferSpeedLabel(message: any): string {
+  const progress = transferProgressFor(message)
+  return progress?.speed ? `${formatSpeed(progress.speed)}/秒` : '正在测量'
 }
 function transferProgressLabel(message: any): string {
   const progress = transferProgressFor(message)
@@ -1247,7 +1280,7 @@ async function confirmPendingDelete() {
     if (kind === 'hide') {
       for (const message of store.messages[`conv-${peer.deviceId}`] || []) {
         delete messagePreviews[message.messageId]
-        if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId] }
+        if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId]; delete store.transferProgressByDirection[message.attachmentId]; delete store.transferHistoryByDirection[message.attachmentId] }
       }
       delete store.messages[`conv-${peer.deviceId}`]
       // Remove the local conversation snapshot as well.  The backend clears

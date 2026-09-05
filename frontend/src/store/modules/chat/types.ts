@@ -140,6 +140,8 @@ export interface TransferProgress {
   phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
 }
 
+export type TransferProgressByDirection = Partial<Record<TransferProgress['direction'], TransferProgress>>
+
 export interface NetworkStatus {
   status: string
   interfaces: string[]

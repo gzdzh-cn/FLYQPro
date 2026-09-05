@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress } from './types'
+import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection } from './types'
 
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
 
@@ -68,6 +68,8 @@ export const useChatStore = defineStore('chat', {
     lastMessageEvent: null as Message | null,
     transferProgress: {} as Record<string, TransferProgress>,
     transferHistory: {} as Record<string, TransferProgress>,
+    transferProgressByDirection: {} as Record<string, TransferProgressByDirection>,
+    transferHistoryByDirection: {} as Record<string, TransferProgressByDirection>,
     attachmentMigration: { active: false, phase: '', sourceRoot: '', targetRoot: '', current: 0, total: 0, fileName: '', peerDeviceId: '', migrated: 0, skipped: 0, failed: 0, unclassified: 0, errorMessage: '' } as AttachmentMigrationProgress & { active: boolean },
   }),
   getters: {
@@ -115,13 +117,27 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:transfer-progress') {
         const progress = value as TransferProgress
         if (progress?.attachmentId) {
-          const snapshot = { ...this.transferHistory[progress.attachmentId], ...this.transferProgress[progress.attachmentId], ...progress }
+          const attachmentId = progress.attachmentId
+          const activeDirections = this.transferProgressByDirection[attachmentId] || {}
+          const historyDirections = this.transferHistoryByDirection[attachmentId] || {}
+          const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
+          const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
+          const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }
           if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) {
-            this.transferHistory[progress.attachmentId] = snapshot
-            delete this.transferProgress[progress.attachmentId]
+            this.transferHistory[attachmentId] = snapshot
+            this.transferHistoryByDirection[attachmentId] = directions
+            delete this.transferProgress[attachmentId]
+            delete this.transferProgressByDirection[attachmentId]
             const historyIds = Object.keys(this.transferHistory)
-            while (historyIds.length > 100) delete this.transferHistory[historyIds.shift() as string]
-          } else this.transferProgress[progress.attachmentId] = snapshot
+            while (historyIds.length > 100) {
+              const oldId = historyIds.shift() as string
+              delete this.transferHistory[oldId]
+              delete this.transferHistoryByDirection[oldId]
+            }
+          } else {
+            this.transferProgress[attachmentId] = snapshot
+            this.transferProgressByDirection[attachmentId] = { ...activeDirections, [progress.direction]: directionSnapshot }
+          }
         }
         return
       }
