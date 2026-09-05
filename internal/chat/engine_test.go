@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"flyqpro/internal/service/db"
 )
@@ -48,7 +49,7 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "file-stream-v3", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}
@@ -67,6 +68,29 @@ func TestTransferTuningNormalizesDefaultsAndBounds(t *testing.T) {
 	got = normalizeTransferTuning(transferTuning{chunkSize: maxTransferChunkSize, windowSize: maxTransferWindow})
 	if got.chunkSize != maxTransferChunkSize || got.windowSize != maxTransferWindow {
 		t.Fatalf("valid tuning was changed: %+v", got)
+	}
+	got = normalizeTransferTuning(transferTuning{chunkSize: mediumTransferChunkSize, windowSize: 16})
+	if got.chunkSize != mediumTransferChunkSize || got.windowSize != 16 {
+		t.Fatalf("medium transfer tuning was changed: %+v", got)
+	}
+}
+
+func TestAdjustTransferTuningAcceleratesAndBacksOff(t *testing.T) {
+	tuning, state, _ := adjustTransferTuning(transferTuning{chunkSize: minTransferChunkSize, windowSize: 4}, 10*time.Millisecond, 1, 12*1024*1024, 10*1024*1024, true)
+	if state != "accelerating" || tuning.windowSize != 8 || tuning.chunkSize != minTransferChunkSize {
+		t.Fatalf("expected window acceleration, got tuning=%+v state=%s", tuning, state)
+	}
+	tuning, state, _ = adjustTransferTuning(transferTuning{chunkSize: minTransferChunkSize, windowSize: 16}, 10*time.Millisecond, 1, 20*1024*1024, 18*1024*1024, true)
+	if state != "accelerating" || tuning.chunkSize != mediumTransferChunkSize || tuning.windowSize != 8 {
+		t.Fatalf("expected chunk acceleration, got tuning=%+v state=%s", tuning, state)
+	}
+	tuning, state, _ = adjustTransferTuning(transferTuning{chunkSize: maxTransferChunkSize, windowSize: 32}, 350*time.Millisecond, 250, 5*1024*1024, 20*1024*1024, true)
+	if state != "backing_off" || tuning.chunkSize != mediumTransferChunkSize || tuning.windowSize != 16 {
+		t.Fatalf("expected multiplicative backoff, got tuning=%+v state=%s", tuning, state)
+	}
+	tuning, state, _ = adjustTransferTuning(transferTuning{chunkSize: minTransferChunkSize, windowSize: 16}, 10*time.Millisecond, 1, 20*1024*1024, 18*1024*1024, false)
+	if state != "accelerating" || tuning.chunkSize != maxTransferChunkSize || tuning.chunkSize == mediumTransferChunkSize {
+		t.Fatalf("JSON compatibility path selected unsupported medium chunk: tuning=%+v state=%s", tuning, state)
 	}
 }
 

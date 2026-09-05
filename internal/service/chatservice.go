@@ -1677,7 +1677,7 @@ func (s *ChatService) SaveAttachmentCopy(attachmentID string) error {
 }
 
 func (s *ChatService) GetAttachmentDetails(attachmentID string) (chat.AttachmentDetails, error) {
-	attachment, _, err := s.attachmentFile(attachmentID)
+	attachment, err := chat.GetAttachment(gctx.New(), attachmentID)
 	if err != nil {
 		return chat.AttachmentDetails{}, err
 	}

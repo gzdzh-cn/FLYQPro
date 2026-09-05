@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -75,6 +76,33 @@ type transferMetric struct {
 type transferTuning struct {
 	chunkSize  int
 	windowSize int
+}
+
+type binaryFileFrameHeader struct {
+	WindowID   uint32
+	StartChunk uint32
+	ChunkCount uint32
+	ChunkSize  uint32
+	PayloadLen uint64
+}
+
+type wireReader struct {
+	reader *bufio.Reader
+}
+
+func newWireReader(reader io.Reader) *wireReader {
+	return &wireReader{reader: bufio.NewReaderSize(reader, 1024*1024)}
+}
+
+func (r *wireReader) Decode(message *wireMessage) error {
+	line, err := r.reader.ReadBytes('\n')
+	if err != nil {
+		return err
+	}
+	if len(line) > maxWireJSONFrameSize {
+		return fmt.Errorf("控制帧过大")
+	}
+	return json.Unmarshal(line, message)
 }
 
 // SetSharedThumbnailProvider lets the desktop service supply a persistent
@@ -157,10 +185,12 @@ func (s *wireSession) writeFileWindow(file *os.File, attachmentID string, window
 	defer s.writeMu.Unlock()
 	writer := bufio.NewWriterSize(s.conn, 1024*1024)
 	encoder := json.NewEncoder(writer)
-	if err := encoder.Encode(wireMessage{Type: "file_window", AttachmentID: attachmentID, WindowID: windowID, ChunkSize: chunkSize, WindowSize: windowSize}); err != nil {
+	if err := encoder.Encode(wireMessage{Type: "file_window", AttachmentID: attachmentID, WindowID: windowID, ChunkSize: chunkSize, WindowSize: windowSize, TransferMode: jsonWindowTransferMode}); err != nil {
 		return 0, 0, err
 	}
-	buffer := make([]byte, chunkSize)
+	pooled := fileChunkBufferPool.Get().([]byte)
+	defer fileChunkBufferPool.Put(pooled)
+	buffer := pooled[:chunkSize]
 	for index := 0; index < windowSize; index++ {
 		if s.isCanceled() {
 			return chunks, bytes, errAttachmentCanceled
@@ -187,6 +217,39 @@ func (s *wireSession) writeFileWindow(file *os.File, attachmentID string, window
 	return chunks, bytes, nil
 }
 
+func (s *wireSession) writeBinaryFileWindow(file *os.File, attachmentID string, windowID, startIndex, chunkSize, windowSize int, remaining int64) (chunks int, bytes int64, err error) {
+	if remaining <= 0 {
+		return 0, 0, nil
+	}
+	windowBytes := int64(chunkSize) * int64(windowSize)
+	if remaining < windowBytes {
+		windowBytes = remaining
+	}
+	chunkCount := int((windowBytes + int64(chunkSize) - 1) / int64(chunkSize))
+	header := binaryFileFrameHeader{WindowID: uint32(windowID), StartChunk: uint32(startIndex), ChunkCount: uint32(chunkCount), ChunkSize: uint32(chunkSize), PayloadLen: uint64(windowBytes)}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.isCanceled() {
+		return 0, 0, errAttachmentCanceled
+	}
+	writer := bufio.NewWriterSize(s.conn, 1024*1024)
+	if err := json.NewEncoder(writer).Encode(wireMessage{Type: "file_window", AttachmentID: attachmentID, WindowID: windowID, ChunkIndex: startIndex, ChunkSize: chunkSize, WindowSize: chunkCount, WindowBytes: windowBytes, TransferMode: binaryTransferMode}); err != nil {
+		return 0, 0, err
+	}
+	if err := writeBinaryFileFrameHeader(writer, header); err != nil {
+		return 0, 0, err
+	}
+	written, copyErr := io.CopyN(writer, file, windowBytes)
+	if copyErr != nil {
+		return 0, written, copyErr
+	}
+	if err := writer.Flush(); err != nil {
+		return 0, written, err
+	}
+	return chunkCount, written, nil
+}
+
 func (s *wireSession) cancel(attachmentID string) {
 	s.stateMu.Lock()
 	if s.canceled {
@@ -195,7 +258,13 @@ func (s *wireSession) cancel(attachmentID string) {
 	}
 	s.canceled = true
 	s.stateMu.Unlock()
-	_ = s.write(wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
+	if s.writeMu.TryLock() {
+		_ = writeWire(s.conn, wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
+		s.writeMu.Unlock()
+	}
+	// Closing the connection interrupts a large in-flight binary window. The
+	// receiver cleanup path removes its partial file when the cancel frame could
+	// not be written because another writer held the session lock.
 	s.close()
 }
 
@@ -208,36 +277,45 @@ func (s *wireSession) isCanceled() bool {
 func (s *wireSession) close() { s.closeOnce.Do(func() { _ = s.conn.Close() }) }
 
 type pendingIncomingOffer struct {
-	attachment Attachment
-	message    Message
-	senderID   string
-	session    *wireSession
-	createdAt  time.Time
+	attachment  Attachment
+	message     Message
+	senderID    string
+	session     *wireSession
+	createdAt   time.Time
+	windowed    bool
+	binary      bool
+	chunkSize   int
+	windowSize  int
+	windowBytes int64
 }
 
 type incomingFile struct {
-	file         *os.File
-	tempPath     string
-	attachmentID string
-	messageID    string
-	senderID     string
-	fileName     string
-	mimeType     string
-	expected     int64
-	received     int64
-	lastProgress int64
-	sha256       string
-	digest       hash.Hash
-	targetPath   string
-	session      *wireSession
-	windowed     bool
-	windowID     int
-	nextWindowID int
-	windowSize   int
-	windowChunks int
-	windowBytes  int64
-	nextChunk    int
-	chunkSize    int
+	file                *os.File
+	writer              *bufio.Writer
+	tempPath            string
+	attachmentID        string
+	messageID           string
+	senderID            string
+	fileName            string
+	mimeType            string
+	expected            int64
+	received            int64
+	lastProgress        int64
+	sha256              string
+	digest              hash.Hash
+	targetPath          string
+	session             *wireSession
+	windowed            bool
+	windowID            int
+	nextWindowID        int
+	windowSize          int
+	windowChunks        int
+	windowBytes         int64
+	nextChunk           int
+	chunkSize           int
+	binary              bool
+	binaryPending       bool
+	expectedWindowBytes int64
 }
 
 type outgoingTransfer struct {
@@ -272,15 +350,67 @@ const discoveryPresencePrefix = "presence:"
 
 const (
 	fileWindowCapability     = "file-window-v2"
+	fileStreamCapability     = "file-stream-v3"
+	binaryTransferMode       = "binary-window"
+	jsonWindowTransferMode   = "json-window"
+	legacyTransferMode       = "legacy-chunk"
 	defaultTransferChunkSize = 256 * 1024
 	minTransferChunkSize     = 256 * 1024
+	mediumTransferChunkSize  = 512 * 1024
 	maxTransferChunkSize     = 1024 * 1024
 	initialTransferWindow    = 4
 	minTransferWindow        = 1
 	// Window growth is bounded by protocol safety, while writeFileWindow keeps
 	// memory bounded with a streaming buffer instead of retaining a full window.
-	maxTransferWindow = 256
+	maxTransferWindow         = 256
+	binaryFileFrameHeaderSize = 32
+	binaryFileFrameVersion    = 1
+	maxBinaryFileFramePayload = 256 * 1024 * 1024
+	maxWireJSONFrameSize      = 16 * 1024 * 1024
 )
+
+var fileChunkBufferPool = sync.Pool{New: func() any { return make([]byte, maxTransferChunkSize) }}
+
+var binaryFileFrameMagic = [4]byte{'F', 'Q', 'F', '3'}
+
+func validTransferChunkSize(size int) bool {
+	return size == minTransferChunkSize || size == mediumTransferChunkSize || size == maxTransferChunkSize
+}
+
+func writeBinaryFileFrameHeader(writer io.Writer, header binaryFileFrameHeader) error {
+	var encoded [binaryFileFrameHeaderSize]byte
+	copy(encoded[:4], binaryFileFrameMagic[:])
+	encoded[4] = binaryFileFrameVersion
+	binary.BigEndian.PutUint16(encoded[6:8], binaryFileFrameHeaderSize)
+	binary.BigEndian.PutUint32(encoded[8:12], header.WindowID)
+	binary.BigEndian.PutUint32(encoded[12:16], header.StartChunk)
+	binary.BigEndian.PutUint32(encoded[16:20], header.ChunkCount)
+	binary.BigEndian.PutUint32(encoded[20:24], header.ChunkSize)
+	binary.BigEndian.PutUint64(encoded[24:32], header.PayloadLen)
+	_, err := writer.Write(encoded[:])
+	return err
+}
+
+func readBinaryFileFrameHeader(reader io.Reader) (binaryFileFrameHeader, error) {
+	var encoded [binaryFileFrameHeaderSize]byte
+	if _, err := io.ReadFull(reader, encoded[:]); err != nil {
+		return binaryFileFrameHeader{}, err
+	}
+	if string(encoded[:4]) != string(binaryFileFrameMagic[:]) || encoded[4] != binaryFileFrameVersion || binary.BigEndian.Uint16(encoded[6:8]) != binaryFileFrameHeaderSize {
+		return binaryFileFrameHeader{}, fmt.Errorf("二进制文件帧头无效")
+	}
+	header := binaryFileFrameHeader{
+		WindowID:   binary.BigEndian.Uint32(encoded[8:12]),
+		StartChunk: binary.BigEndian.Uint32(encoded[12:16]),
+		ChunkCount: binary.BigEndian.Uint32(encoded[16:20]),
+		ChunkSize:  binary.BigEndian.Uint32(encoded[20:24]),
+		PayloadLen: binary.BigEndian.Uint64(encoded[24:32]),
+	}
+	if header.ChunkCount == 0 || header.PayloadLen == 0 || header.PayloadLen > maxBinaryFileFramePayload {
+		return binaryFileFrameHeader{}, fmt.Errorf("二进制文件帧大小无效")
+	}
+	return header, nil
+}
 
 func NewEngine() *Engine {
 	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferTuning: make(map[string]transferTuning)}
@@ -301,7 +431,7 @@ func configureTCPConnection(conn net.Conn) {
 }
 
 func normalizeTransferTuning(value transferTuning) transferTuning {
-	if value.chunkSize != minTransferChunkSize && value.chunkSize != maxTransferChunkSize {
+	if !validTransferChunkSize(value.chunkSize) {
 		value.chunkSize = defaultTransferChunkSize
 	}
 	if value.windowSize < minTransferWindow || value.windowSize > maxTransferWindow {
@@ -315,6 +445,51 @@ func maxInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func nextTransferChunkSize(size int) int {
+	switch size {
+	case minTransferChunkSize:
+		return mediumTransferChunkSize
+	case mediumTransferChunkSize:
+		return maxTransferChunkSize
+	default:
+		return maxTransferChunkSize
+	}
+}
+
+func adjustTransferTuning(current transferTuning, ackLatency time.Duration, diskWriteMs int64, throughput, previousThroughput float64, allowMediumChunk bool) (transferTuning, string, string) {
+	next := normalizeTransferTuning(current)
+	if ackLatency > 150*time.Millisecond || (previousThroughput > 0 && throughput < previousThroughput*0.70) {
+		if next.windowSize > minTransferWindow {
+			next.windowSize = maxInt(minTransferWindow, next.windowSize/2)
+		}
+		if (ackLatency > 300*time.Millisecond || diskWriteMs > 200) && next.chunkSize > minTransferChunkSize {
+			if allowMediumChunk {
+				next.chunkSize = maxInt(minTransferChunkSize, next.chunkSize/2)
+			} else {
+				next.chunkSize = minTransferChunkSize
+			}
+		}
+		return next, "backing_off", "确认延迟升高或窗口吞吐下降，降低发送窗口"
+	}
+	if ackLatency <= 75*time.Millisecond && (previousThroughput == 0 || throughput >= previousThroughput*0.85) {
+		if next.chunkSize < maxTransferChunkSize && next.windowSize >= 16 {
+			previousBytes := next.chunkSize * next.windowSize
+			if allowMediumChunk {
+				next.chunkSize = nextTransferChunkSize(next.chunkSize)
+			} else {
+				next.chunkSize = maxTransferChunkSize
+			}
+			next.windowSize = maxInt(initialTransferWindow, previousBytes/next.chunkSize)
+			return next, "accelerating", "传输稳定，增大分块以降低协议开销"
+		}
+		if next.windowSize < maxTransferWindow {
+			next.windowSize = minInt(maxTransferWindow, next.windowSize*2)
+			return next, "accelerating", "确认延迟稳定且吞吐上升，扩大发送窗口"
+		}
+	}
+	return next, "stable", ""
 }
 
 func (e *Engine) transferTuningForPeer(deviceID string) transferTuning {
@@ -529,7 +704,7 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	var hello wireMessage
-	decoder := json.NewDecoder(conn)
+	decoder := newWireReader(conn)
 	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.DeviceID == e.identity.DeviceID {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "PROTOCOL_UNSUPPORTED"})
 		return
@@ -624,12 +799,105 @@ func (e *Engine) handleConnection(raw net.Conn) {
 	defer e.cleanupAttachmentSession(session)
 	_ = conn.SetDeadline(time.Time{})
 	for {
+		if transfer := e.pendingBinaryTransfer(session); transfer != nil {
+			if err := e.receiveBinaryFileWindow(decoder, transfer); err != nil {
+				return
+			}
+			continue
+		}
 		var message wireMessage
 		if err := decoder.Decode(&message); err != nil {
 			return
 		}
 		e.handleWire(conn, hello, message, session)
 	}
+}
+
+func (e *Engine) pendingBinaryTransfer(session *wireSession) *incomingFile {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, transfer := range e.incoming {
+		if transfer.session == session && transfer.binary && transfer.binaryPending {
+			return transfer
+		}
+	}
+	return nil
+}
+
+func (e *Engine) failBinaryFileWindow(transfer *incomingFile, reason string, err error) error {
+	messageID, attachmentID, expected, received := transfer.messageID, transfer.attachmentID, transfer.expected, transfer.received
+	session := transfer.session
+	e.failIncomingFile(attachmentID, reason)
+	_ = session.write(wireMessage{Type: "file_progress", MessageID: messageID, AttachmentID: attachmentID, FileSize: expected, Transferred: received, Status: "failed", Reason: reason, TransferMode: binaryTransferMode})
+	return err
+}
+
+func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingFile) error {
+	header, err := readBinaryFileFrameHeader(reader.reader)
+	if err != nil {
+		return e.failBinaryFileWindow(transfer, "INVALID_BINARY_FRAME", err)
+	}
+	payloadLen := int64(header.PayloadLen)
+	chunkCount := int(header.ChunkCount)
+	chunkSize := int(header.ChunkSize)
+	minPayloadLen := int64(chunkCount-1)*int64(chunkSize) + 1
+	valid := int(header.WindowID) == transfer.windowID && int(header.StartChunk) == transfer.nextChunk && chunkCount == transfer.windowSize && validTransferChunkSize(chunkSize) && chunkSize == transfer.chunkSize && payloadLen >= minPayloadLen && payloadLen <= int64(chunkCount)*int64(chunkSize) && payloadLen == transfer.expectedWindowBytes && payloadLen <= transfer.expected-transfer.received
+	if !valid {
+		return e.failBinaryFileWindow(transfer, "INVALID_BINARY_FRAME", fmt.Errorf("二进制文件窗口参数无效"))
+	}
+
+	pooled := fileChunkBufferPool.Get().([]byte)
+	defer fileChunkBufferPool.Put(pooled)
+	remaining := payloadLen
+	var diskWriteDuration time.Duration
+	for remaining > 0 {
+		readSize := int64(len(pooled))
+		if remaining < readSize {
+			readSize = remaining
+		}
+		data := pooled[:int(readSize)]
+		if _, err := io.ReadFull(reader.reader, data); err != nil {
+			return e.failBinaryFileWindow(transfer, "TRUNCATED_BINARY_FRAME", err)
+		}
+		writeStarted := time.Now()
+		written, writeErr := transfer.writer.Write(data)
+		diskWriteDuration += time.Since(writeStarted)
+		if writeErr != nil || written != len(data) {
+			if writeErr == nil {
+				writeErr = io.ErrShortWrite
+			}
+			return e.failBinaryFileWindow(transfer, "INSUFFICIENT_STORAGE", writeErr)
+		}
+		if transfer.digest != nil {
+			_, _ = transfer.digest.Write(data)
+		}
+		transfer.received += int64(len(data))
+		if transfer.received-transfer.lastProgress >= 4*1024*1024 || transfer.received >= transfer.expected {
+			e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)})
+			transfer.lastProgress = transfer.received
+		}
+		remaining -= int64(len(data))
+	}
+	flushStarted := time.Now()
+	if err := transfer.writer.Flush(); err != nil {
+		return e.failBinaryFileWindow(transfer, "INSUFFICIENT_STORAGE", err)
+	}
+	diskWriteDuration += time.Since(flushStarted)
+
+	transfer.nextChunk += chunkCount
+	transfer.windowChunks = chunkCount
+	transfer.windowBytes = payloadLen
+	transfer.binaryPending = false
+	diskWriteMs := diskWriteDuration.Milliseconds()
+	options := transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, diskWriteMs: diskWriteMs, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)}
+	e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", options)
+	transfer.lastProgress = transfer.received
+	if err := transfer.session.write(wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: transfer.attachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: payloadLen, ChunkSize: chunkSize, WindowSize: chunkCount, DiskWriteMs: diskWriteMs, TransferMode: binaryTransferMode, Status: "receiving"}); err != nil {
+		return err
+	}
+	transfer.windowChunks = 0
+	transfer.windowBytes = 0
+	return nil
 }
 
 func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessage, session *wireSession) {
@@ -930,6 +1198,16 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
 		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "sent", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentThumbnail: thumbnailData, AttachmentThumbnailMime: thumbnailMime, AttachmentStatus: "pending"}
 		attachment := Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, Status: "pending"}
+		windowed := hasCapability(hello.Capabilities, fileWindowCapability)
+		binaryMode := windowed && hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode
+		windowSize := message.WindowSize
+		if windowSize < minTransferWindow || windowSize > maxTransferWindow {
+			windowSize = initialTransferWindow
+		}
+		chunkSize := message.ChunkSize
+		if !validTransferChunkSize(chunkSize) {
+			chunkSize = defaultTransferChunkSize
+		}
 		supportsDemand := session != nil && hasCapability(hello.Capabilities, "attachment-demand-v1")
 		if supportsDemand && !e.Profile().AutoSave {
 			if err := SaveMessage(context.Background(), messageRecord); err != nil {
@@ -945,7 +1223,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 				return
 			}
 			e.mu.Lock()
-			e.pendingIncoming[attachmentID] = &pendingIncomingOffer{attachment: attachment, message: messageRecord, senderID: hello.DeviceID, session: session, createdAt: time.Now()}
+			e.pendingIncoming[attachmentID] = &pendingIncomingOffer{attachment: attachment, message: messageRecord, senderID: hello.DeviceID, session: session, createdAt: time.Now(), windowed: windowed, binary: binaryMode, chunkSize: chunkSize, windowSize: windowSize, windowBytes: message.WindowBytes}
 			e.mu.Unlock()
 			_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
 			_ = session.write(wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "pending", Reason: "AWAITING_USER"})
@@ -969,22 +1247,25 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		e.mu.Lock()
 		if transfer := e.incoming[attachmentID]; transfer != nil {
-			transfer.windowed = hasCapability(hello.Capabilities, fileWindowCapability)
-			transfer.windowSize = message.WindowSize
-			transfer.chunkSize = message.ChunkSize
-			if transfer.windowSize < minTransferWindow || transfer.windowSize > maxTransferWindow {
-				transfer.windowSize = initialTransferWindow
-			}
-			if transfer.chunkSize != minTransferChunkSize && transfer.chunkSize != maxTransferChunkSize {
-				transfer.chunkSize = defaultTransferChunkSize
-			}
+			transfer.windowed = windowed
+			transfer.binary = binaryMode
+			transfer.windowSize = windowSize
+			transfer.chunkSize = chunkSize
+			transfer.expectedWindowBytes = message.WindowBytes
 		}
 		e.mu.Unlock()
 		if err := sessionWrite(session, conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted"}); err != nil {
 			e.failIncomingFile(attachmentID, "STORAGE_UNAVAILABLE")
 			return
 		}
-		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving")
+		incomingMode := legacyTransferMode
+		if hasCapability(hello.Capabilities, fileWindowCapability) {
+			incomingMode = jsonWindowTransferMode
+		}
+		if hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode {
+			incomingMode = binaryTransferMode
+		}
+		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving", transferProgressOptions{chunkSize: message.ChunkSize, windowSize: message.WindowSize, windowBytes: message.WindowBytes, transferMode: incomingMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "probing"})
 	case "file_thumbnail":
 		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
 		if thumbnailData == "" || message.AttachmentID == "" {
@@ -1002,7 +1283,9 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 	case "file_window":
 		e.mu.Lock()
 		transfer := e.incoming[message.AttachmentID]
-		validWindow := transfer != nil && transfer.senderID == hello.DeviceID && hasCapability(hello.Capabilities, fileWindowCapability) && message.WindowSize >= minTransferWindow && message.WindowSize <= maxTransferWindow && (message.ChunkSize == minTransferChunkSize || message.ChunkSize == maxTransferChunkSize) && message.WindowID == transfer.nextWindowID
+		binaryWindow := transfer != nil && transfer.binary && message.TransferMode == binaryTransferMode
+		validMode := message.TransferMode == "" || message.TransferMode == jsonWindowTransferMode || (binaryWindow && hasCapability(hello.Capabilities, fileStreamCapability))
+		validWindow := transfer != nil && transfer.senderID == hello.DeviceID && hasCapability(hello.Capabilities, fileWindowCapability) && validMode && message.WindowSize >= minTransferWindow && message.WindowSize <= maxTransferWindow && validTransferChunkSize(message.ChunkSize) && message.WindowID == transfer.nextWindowID
 		if validWindow {
 			transfer.windowed = true
 			transfer.windowID = message.WindowID
@@ -1011,6 +1294,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			transfer.windowChunks = 0
 			transfer.windowBytes = 0
 			transfer.chunkSize = message.ChunkSize
+			transfer.binaryPending = binaryWindow
+			transfer.expectedWindowBytes = message.WindowBytes
 		}
 		e.mu.Unlock()
 		if transfer != nil && !validWindow {
@@ -1043,7 +1328,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "FILE_SIZE_EXCEEDED"})
 			return
 		}
-		if _, err := transfer.file.Write(data); err != nil {
+		if _, err := transfer.writer.Write(data); err != nil {
 			e.failIncomingFile(message.AttachmentID, "INSUFFICIENT_STORAGE")
 			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
 			return
@@ -1056,12 +1341,27 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		transfer.windowChunks++
 		transfer.windowBytes += int64(len(data))
 		if transfer.received-transfer.lastProgress >= 256*1024 || (transfer.expected > 0 && transfer.received >= transfer.expected) {
-			e.emitTransferProgress(transfer.messageID, message.AttachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring")
+			mode := legacyTransferMode
+			if transfer.windowed {
+				mode = jsonWindowTransferMode
+			}
+			e.emitTransferProgress(transfer.messageID, message.AttachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: transfer.windowBytes, transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)})
 			transfer.lastProgress = transfer.received
 		}
 		acknowledge := !transfer.windowed || transfer.windowChunks >= transfer.windowSize || (transfer.expected > 0 && transfer.received >= transfer.expected)
 		if acknowledge {
-			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: transfer.windowBytes, ChunkSize: transfer.chunkSize, WindowSize: transfer.windowSize, Status: "receiving"})
+			flushStarted := time.Now()
+			if err := transfer.writer.Flush(); err != nil {
+				e.failIncomingFile(message.AttachmentID, "INSUFFICIENT_STORAGE")
+				_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
+				return
+			}
+			diskWriteMs := time.Since(flushStarted).Milliseconds()
+			mode := legacyTransferMode
+			if transfer.windowed {
+				mode = jsonWindowTransferMode
+			}
+			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: transfer.windowBytes, ChunkSize: transfer.chunkSize, WindowSize: transfer.windowSize, DiskWriteMs: diskWriteMs, TransferMode: mode, Status: "receiving"})
 			transfer.windowChunks = 0
 			transfer.windowBytes = 0
 		}
@@ -1069,14 +1369,20 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		e.mu.RLock()
 		transfer := e.incoming[message.AttachmentID]
 		messageID, total := message.MessageID, message.FileSize
+		transferMode := legacyTransferMode
 		if transfer != nil {
 			messageID, total = transfer.messageID, transfer.expected
+			if transfer.binary {
+				transferMode = binaryTransferMode
+			} else if transfer.windowed {
+				transferMode = jsonWindowTransferMode
+			}
 		}
 		e.mu.RUnlock()
 		status := e.finishIncomingFile(message.AttachmentID)
 		// finishIncomingFile removes the transfer, so use the message metadata
 		// supplied by the sender for the final optional acknowledgement.
-		_ = sessionWrite(session, conn, wireMessage{Type: "file_progress", MessageID: messageID, AttachmentID: message.AttachmentID, Transferred: total, FileSize: total, Status: status})
+		_ = sessionWrite(session, conn, wireMessage{Type: "file_progress", MessageID: messageID, AttachmentID: message.AttachmentID, Transferred: total, FileSize: total, TransferMode: transferMode, Status: status})
 	case "file_accept":
 		// A receiver sends file_accept on the existing offer connection. The
 		// sender side consumes it in transferFileWithDialect.
@@ -1160,7 +1466,7 @@ func (e *Engine) beginIncomingFile(message Message, attachment Attachment, sende
 		return err
 	}
 	e.mu.Lock()
-	e.incoming[attachment.AttachmentID] = &incomingFile{file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, sha256: attachment.SHA256, digest: sha256.New(), targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize}
+	e.incoming[attachment.AttachmentID] = &incomingFile{file: file, writer: bufio.NewWriterSize(file, 1024*1024), tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, sha256: attachment.SHA256, digest: sha256.New(), targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize}
 	e.mu.Unlock()
 	e.emit("chat:message", message)
 	e.emit("chat:attachment", message)
@@ -1263,8 +1569,12 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	if transfer == nil {
 		return "failed"
 	}
-	_ = transfer.file.Close()
-	valid := transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
+	flushErr := error(nil)
+	if transfer.writer != nil {
+		flushErr = transfer.writer.Flush()
+	}
+	closeErr := transfer.file.Close()
+	valid := flushErr == nil && closeErr == nil && transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
 	status := "pending"
 	localPath := transfer.tempPath
 	if valid && transfer.targetPath != "" && !e.IsAttachmentMigrationActive() {
@@ -1314,15 +1624,18 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 }
 
 type transferProgressOptions struct {
-	chunkSize    int
-	windowSize   int
-	windowBytes  int64
-	ackLatency   time.Duration
-	transport    string
-	protocol     string
-	tuningState  string
-	tuningReason string
-	verified     *bool
+	chunkSize        int
+	windowSize       int
+	windowBytes      int64
+	ackLatency       time.Duration
+	diskWriteMs      int64
+	windowThroughput float64
+	transferMode     string
+	transport        string
+	protocol         string
+	tuningState      string
+	tuningReason     string
+	verified         *bool
 }
 
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
@@ -1371,6 +1684,15 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.ackLatency > 0 {
 		value["ackLatencyMs"] = option.ackLatency.Milliseconds()
 	}
+	if option.diskWriteMs > 0 {
+		value["diskWriteMs"] = option.diskWriteMs
+	}
+	if option.windowThroughput > 0 {
+		value["windowThroughput"] = int64(option.windowThroughput)
+	}
+	if option.transferMode != "" {
+		value["transferMode"] = option.transferMode
+	}
 	if option.tuningState != "" {
 		value["tuningState"] = option.tuningState
 	}
@@ -1393,7 +1715,10 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	} else {
 		elapsed := now.Sub(metric.lastAt).Seconds()
 		if elapsed > 0 && transferred > metric.lastBytes {
-			speed := float64(transferred-metric.lastBytes) / elapsed
+			speed := option.windowThroughput
+			if speed <= 0 {
+				speed = float64(transferred-metric.lastBytes) / elapsed
+			}
 			if speed > metric.peakSpeed {
 				metric.peakSpeed = speed
 			}
@@ -1500,12 +1825,28 @@ func (e *Engine) AcceptIncomingAttachment(ctx context.Context, attachmentID, tar
 		e.mu.Unlock()
 		return offer.attachment, err
 	}
+	e.mu.Lock()
+	if transfer := e.incoming[attachmentID]; transfer != nil {
+		transfer.windowed = offer.windowed
+		transfer.binary = offer.binary
+		transfer.chunkSize = offer.chunkSize
+		transfer.windowSize = offer.windowSize
+		transfer.expectedWindowBytes = offer.windowBytes
+	}
+	e.mu.Unlock()
 	_ = offer.session.conn.SetDeadline(time.Time{})
 	if err := offer.session.write(wireMessage{Type: "file_accept", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted"}); err != nil {
 		e.cancelIncomingFromRemote(attachmentID, false)
 		return offer.attachment, err
 	}
-	e.emitTransferProgress(message.MessageID, attachmentID, offer.senderID, 0, attachment.FileSize, "receive", "receiving")
+	mode := legacyTransferMode
+	if offer.windowed {
+		mode = jsonWindowTransferMode
+	}
+	if offer.binary {
+		mode = binaryTransferMode
+	}
+	e.emitTransferProgress(message.MessageID, attachmentID, offer.senderID, 0, attachment.FileSize, "receive", "receiving", transferProgressOptions{chunkSize: offer.chunkSize, windowSize: offer.windowSize, windowBytes: offer.windowBytes, transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "probing"})
 	return GetAttachment(ctx, attachmentID)
 }
 
@@ -1937,7 +2278,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
 	if dialect.Major >= 2 {
-		capabilities = append(capabilities, "file-progress-v1", fileWindowCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
+		capabilities = append(capabilities, "file-progress-v1", fileWindowCapability, fileStreamCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)
@@ -3045,10 +3386,20 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	e.rememberPeerDialect(peer.DeviceID, responseDialect, response.Capabilities)
 	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1") && responseDialect.Major >= 2
 	supportsWindowed := supportsProgress && hasCapability(response.Capabilities, fileWindowCapability) && responseDialect.Major >= 2
+	supportsBinary := supportsWindowed && hasCapability(response.Capabilities, fileStreamCapability)
 	supportsPreflight := hasCapability(response.Capabilities, "storage-preflight-v1") && responseDialect.Major >= 2
+	transferMode := legacyTransferMode
+	if supportsWindowed {
+		transferMode = jsonWindowTransferMode
+	}
+	if supportsBinary {
+		transferMode = binaryTransferMode
+	}
 	tuning := e.transferTuningForPeer(peer.DeviceID)
 	if !supportsWindowed {
 		tuning = transferTuning{chunkSize: defaultTransferChunkSize, windowSize: 1}
+	} else if !supportsBinary && tuning.chunkSize == mediumTransferChunkSize {
+		tuning.chunkSize = minTransferChunkSize
 	}
 	e.touchPeer(peer.DeviceID)
 	if !peer.Online {
@@ -3066,6 +3417,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if supportsWindowed {
 		offer.ChunkSize, offer.WindowSize = tuning.chunkSize, tuning.windowSize
 		offer.WindowID, offer.WindowBytes = 0, int64(tuning.chunkSize*tuning.windowSize)
+		offer.TransferMode = transferMode
 	}
 	if err := session.write(offer); err != nil {
 		return err
@@ -3108,12 +3460,17 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		return errAttachmentCanceled
 	}
 	protocolLabel := fmt.Sprintf("%s/%d", responseDialect.Name, responseDialect.Major)
-	progressOptions := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: int64(tuning.chunkSize * tuning.windowSize), transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"}
+	progressOptions := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: int64(tuning.chunkSize * tuning.windowSize), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"}
 	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring", progressOptions)
 	var sent, lastProgress int64
 	windowID, chunkIndex := 0, 0
 	lastThroughput := 0.0
-	stableWindows := 0
+	var legacyBuffer []byte
+	if !supportsWindowed {
+		pooled := fileChunkBufferPool.Get().([]byte)
+		defer fileChunkBufferPool.Put(pooled)
+		legacyBuffer = pooled[:defaultTransferChunkSize]
+	}
 	acknowledge := func(options transferProgressOptions) (wireMessage, error) {
 		progress, err := readFileProgress(decoder, message.AttachmentID)
 		if err != nil {
@@ -3142,7 +3499,14 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		if supportsWindowed {
 			windowSize := tuning.windowSize
 			windowStart := time.Now()
-			chunks, windowBytes, writeErr := session.writeFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize)
+			var chunks int
+			var windowBytes int64
+			var writeErr error
+			if supportsBinary {
+				chunks, windowBytes, writeErr = session.writeBinaryFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize, message.AttachmentSize-sent)
+			} else {
+				chunks, windowBytes, writeErr = session.writeFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize)
+			}
 			if writeErr != nil {
 				if errors.Is(writeErr, errAttachmentCanceled) || session.isCanceled() {
 					return errAttachmentCanceled
@@ -3155,7 +3519,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			chunkIndex += chunks
 			sent += windowBytes
 			writeFinished := time.Now()
-			progressOptions = transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: windowSize, windowBytes: windowBytes, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "stable"}
+			progressOptions = transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: windowSize, windowBytes: windowBytes, transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "stable"}
 			progress, ackErr := acknowledge(progressOptions)
 			if ackErr != nil {
 				return ackErr
@@ -3167,42 +3531,19 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			windowDuration := time.Since(windowStart).Seconds()
 			throughput := float64(windowBytes) / windowDuration
 			progressOptions.ackLatency = ackLatency
+			progressOptions.diskWriteMs = progress.DiskWriteMs
+			progressOptions.windowThroughput = throughput
 			progressOptions.tuningState = "stable"
 			if sent-lastProgress >= int64(tuning.chunkSize) || sent == message.AttachmentSize {
 				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", progressOptions)
 				lastProgress = sent
 			}
-			if ackLatency > 100*time.Millisecond || (lastThroughput > 0 && throughput < lastThroughput*0.75) {
-				stableWindows = 0
-				if tuning.windowSize > minTransferWindow {
-					tuning.windowSize = maxInt(minTransferWindow, tuning.windowSize/2)
-				}
-				if ackLatency > 250*time.Millisecond && tuning.chunkSize > minTransferChunkSize {
-					tuning.chunkSize = minTransferChunkSize
-				}
-				progressOptions.tuningState = "backing_off"
-				progressOptions.tuningReason = "确认延迟升高或窗口吞吐下降，降低发送窗口"
-			} else if ackLatency <= 20*time.Millisecond && (lastThroughput == 0 || throughput >= lastThroughput*0.9) {
-				stableWindows++
-				if stableWindows >= 2 {
-					stableWindows = 0
-					if tuning.windowSize < maxTransferWindow {
-						tuning.windowSize = minInt(maxTransferWindow, tuning.windowSize*2)
-						progressOptions.tuningState = "accelerating"
-						progressOptions.tuningReason = "确认延迟稳定且吞吐上升，扩大发送窗口"
-					} else if tuning.chunkSize < maxTransferChunkSize {
-						tuning.chunkSize = maxTransferChunkSize
-						progressOptions.tuningState = "accelerating"
-						progressOptions.tuningReason = "窗口已稳定，增大分块以降低编码开销"
-					}
-				}
-			} else {
-				stableWindows = 0
-			}
+			tuning, progressOptions.tuningState, progressOptions.tuningReason = adjustTransferTuning(tuning, ackLatency, progress.DiskWriteMs, throughput, lastThroughput, supportsBinary)
 			if progressOptions.tuningState != "stable" || progressOptions.tuningReason != "" {
 				// Publish the decision after measuring this window so the details
 				// panel shows the actual adjustment and its reason immediately.
 				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", progressOptions)
+				log.Printf("文件传输调优: peer=%s mode=%s chunk=%d window=%d throughput=%.1fMB/s ack=%s disk=%dms state=%s", peer.DeviceID, transferMode, tuning.chunkSize, tuning.windowSize, throughput/(1024*1024), ackLatency, progress.DiskWriteMs, progressOptions.tuningState)
 			}
 			lastThroughput = throughput
 			e.rememberTransferTuning(peer.DeviceID, tuning)
@@ -3213,10 +3554,9 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			continue
 		}
 
-		buffer := make([]byte, defaultTransferChunkSize)
-		n, readErr := file.Read(buffer)
+		n, readErr := file.Read(legacyBuffer)
 		if n > 0 {
-			if err := session.write(wireMessage{Type: "file_chunk", AttachmentID: message.AttachmentID, ChunkIndex: chunkIndex, Payload: base64.StdEncoding.EncodeToString(buffer[:n])}); err != nil {
+			if err := session.write(wireMessage{Type: "file_chunk", AttachmentID: message.AttachmentID, ChunkIndex: chunkIndex, Payload: base64.StdEncoding.EncodeToString(legacyBuffer[:n])}); err != nil {
 				if session.isCanceled() {
 					return errAttachmentCanceled
 				}
@@ -3228,13 +3568,13 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 				if !supportsProgress {
 					return nil
 				}
-				_, err := acknowledge(transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transport: "TLS/TCP", protocol: protocolLabel})
+				_, err := acknowledge(transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel})
 				return err
 			}(); err != nil {
 				return err
 			}
 			if sent-lastProgress >= int64(defaultTransferChunkSize) || sent == message.AttachmentSize {
-				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transport: "TLS/TCP", protocol: protocolLabel})
+				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel})
 				lastProgress = sent
 			}
 		}
@@ -3267,7 +3607,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			phase = "failed"
 		}
 		verified := progress.Status == "completed"
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase, transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: progress.WindowBytes, transport: "TLS/TCP", protocol: protocolLabel, verified: &verified})
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase, transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: progress.WindowBytes, diskWriteMs: progress.DiskWriteMs, transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, verified: &verified})
 		if progress.Status == "failed" {
 			return fmt.Errorf("对方接收文件失败")
 		}

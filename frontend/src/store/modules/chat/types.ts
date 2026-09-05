@@ -117,7 +117,10 @@ export interface TransferProgress {
   chunkSize?: number
   windowSize?: number
   windowBytes?: number
+  windowThroughput?: number
   ackLatencyMs?: number
+  diskWriteMs?: number
+  transferMode?: 'binary-window' | 'json-window' | 'legacy-chunk' | string
   transport?: string
   protocol?: string
   tuningState?: 'probing' | 'accelerating' | 'stable' | 'backing_off' | string
