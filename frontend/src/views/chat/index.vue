@@ -93,7 +93,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span>等待对方接收</span><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
                 </template>
-                <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}</small></div>
+                <div v-if="transferProgressFor(message) && transferProgressFor(message)?.phase !== 'awaiting_acceptance' && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span>{{ transferProgressLabel(message) }}</span><strong>{{ transferProgressPercent(message) }}%</strong><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><small>{{ formatBytes(transferProgressTransferred(message)) }} / {{ formatBytes(transferProgressFor(message)?.total || message.attachmentSize || 0) }}<template v-if="transferProgressFor(message)?.speed"> · {{ formatSpeed(transferProgressFor(message).speed) }}/秒</template></small><button type="button" class="transfer-details-button" @click.stop="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop="showAttachmentDetails(message)">详情</button></div>
               </template>
               <template v-else>{{ message.content }}</template>
@@ -979,6 +979,7 @@ function attachmentAwaitingAcceptance(message: any): boolean {
   return !progress || progress.phase === 'awaiting_acceptance'
 }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+function formatSpeed(value: number) { return formatBytes(Math.max(0, value)) }
 function transferProgressFor(message: any): any { return message?.attachmentId ? store.transferProgress[message.attachmentId] : undefined }
 function transferProgressTransferred(message: any): number {
   const progress = transferProgressFor(message)

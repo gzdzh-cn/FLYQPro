@@ -31,7 +31,7 @@
         <div class="summary-item"><span>共享文件</span><strong>{{ formatStatNumber(settings.fileCount) }}</strong></div><div class="summary-item"><span>共享文件夹</span><strong>{{ formatStatNumber(settings.folderCount) }}</strong></div><div class="summary-item"><span>磁盘剩余</span><strong>{{ formatAvailableBytes() }}</strong></div>
       </section>
       <div class="shared-fixed-header">
-        <section v-if="mode === 'owner'" class="toolbar management-toolbar card"><div class="path-info"><span>{{ activeFolder ? '当前共享文件夹' : '共享文件夹' }}</span><strong :title="activeFolder?.rootPath">{{ activeFolder?.name || `${sharedFolders.length} 个共享文件夹` }}</strong></div><button @click="addSharedFolder">添加共享文件夹</button><button :disabled="!sharedFolders.length" @click="refresh">刷新</button><button v-if="activeFolderId" @click="createFolder">新建文件夹</button><button v-if="activeFolderId" @click="importFiles">导入文件</button><button v-if="activeFolderId" @click="importFolder">导入文件夹</button><button v-if="activeFolderId" @click="openOwnerFolder">在文件管理器中打开</button></section>
+        <section v-if="mode === 'owner'" class="toolbar management-toolbar card"><div class="path-info"><span>{{ activeFolder ? '当前共享文件夹' : '共享文件夹' }}</span><strong :title="activeFolder?.rootPath">{{ activeFolder?.name || `${sharedFolders.length} 个共享文件夹` }}</strong></div><button @click="addSharedFolder">添加共享文件夹</button><button class="refresh-button" :disabled="!sharedFolders.length || refreshing" @click="refresh"><IconLoading v-if="refreshing" class="refreshing-icon" />{{ refreshing ? '刷新中…' : '刷新' }}</button><button v-if="activeFolderId" @click="createFolder">新建文件夹</button><button v-if="activeFolderId" @click="importFiles">导入文件</button><button v-if="activeFolderId" @click="importFolder">导入文件夹</button><button v-if="activeFolderId" @click="openOwnerFolder">在文件管理器中打开</button></section>
         <section v-else-if="mode === 'invalid'" class="remote-banner card"><IconCloud /><div><strong>共享窗口参数无效</strong><span>无法确定要访问的好友设备，请从好友聊天窗口重新打开</span></div></section>
 
         <nav class="breadcrumbs card">
@@ -41,12 +41,12 @@
             <button @click="selectAll">{{ selected.size === entries.length && entries.length ? '取消全选' : '全选' }}</button>
             <button v-if="mode === 'friend'" :disabled="!selectedFiles.length || sharedDisabled" @click="downloadSelected">下载</button>
             <button v-if="mode === 'friend'" :disabled="!selectedFiles.length || sharedDisabled" @click="saveSelected">另存为</button>
-            <button :disabled="loading" @click="refresh">刷新</button>
+            <button class="refresh-button" :disabled="loading || refreshing" @click="refresh"><IconLoading v-if="refreshing" class="refreshing-icon" />{{ refreshing ? '刷新中…' : '刷新' }}</button>
             <button class="icon-action" :class="{ active: viewMode === 'list' }" title="列表视图" @click="viewMode = 'list'"><IconList /></button>
             <button class="icon-action" :class="{ active: viewMode === 'thumb' }" title="缩略图视图" @click="viewMode = 'thumb'"><IconApps /></button>
             <span class="view-note">{{ filteredEntries.length }} 项</span>
           </div>
-          <div v-else class="breadcrumb-actions" @click.stop><button :disabled="loading" @click="refresh">刷新</button><button class="icon-action" :class="{ active: viewMode === 'list' }" title="列表视图" @click="viewMode = 'list'"><IconList /></button><button class="icon-action" :class="{ active: viewMode === 'thumb' }" title="缩略图视图" @click="viewMode = 'thumb'"><IconApps /></button><span class="view-note">{{ sharedFolders.length }} 个文件夹</span></div>
+          <div v-else class="breadcrumb-actions" @click.stop><button class="refresh-button" :disabled="refreshing" @click="refresh"><IconLoading v-if="refreshing" class="refreshing-icon" />{{ refreshing ? '刷新中…' : '刷新' }}</button><button class="icon-action" :class="{ active: viewMode === 'list' }" title="列表视图" @click="viewMode = 'list'"><IconList /></button><button class="icon-action" :class="{ active: viewMode === 'thumb' }" title="缩略图视图" @click="viewMode = 'thumb'"><IconApps /></button><span class="view-note">{{ sharedFolders.length }} 个文件夹</span></div>
           <div v-if="searchVisible" class="breadcrumb-search" @click.stop>
             <IconSearch />
             <input v-model="search" autofocus placeholder="搜索文件和文件夹" @keydown.esc="searchVisible = false" />
@@ -134,9 +134,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { IconApps, IconCloud, IconClose, IconDown, IconFile, IconFolder, IconList, IconSearch, IconSettings, IconUp } from '@arco-design/web-vue/es/icon'
+import { IconApps, IconCloud, IconClose, IconDown, IconFile, IconFolder, IconList, IconLoading, IconSearch, IconSettings, IconUp } from '@arco-design/web-vue/es/icon'
 import { Clipboard, Events, System, Window } from '@wailsio/runtime'
 import { ChatService, ImageViewerService, PreviewStreamService, SharedDriveWindowService } from '/#/flyqpro/internal/service'
+import { captureVideoFrame, getOrLoadVideoThumbnail, getVideoThumbnail, putVideoThumbnail, type VideoThumbnailIdentity } from '@/utils/video-thumbnail-cache'
 
 interface Entry { entryId: string; name: string; relativePath: string; isDirectory: boolean; size: number; mimeType: string; modifiedAt: string; sha256?: string }
 interface SharedFolder { id: string; name: string; rootPath?: string; fileCount: number; folderCount: number; statsReady: boolean; statsLoading: boolean; updatedAt?: string }
@@ -157,7 +158,7 @@ const embedded = props.embeddedMode || sharedQuery.embedded
 const mode = ref<SharedMode>(props.embeddedMode ? (props.ownerMode ? 'owner' : props.friendDeviceId ? 'friend' : 'invalid') : sharedQuery.mode)
 const deviceId = props.embeddedMode ? props.friendDeviceId.trim() : sharedQuery.deviceId
 const settingsPage = ref(Boolean(!props.embeddedMode && sharedQuery.settings && mode.value === 'owner'))
-const isMac = ref(false); const isDark = ref(false); const loading = ref(false); const loadingMore = ref(false); const hasMore = ref(false); const nextOffset = ref(0); const sharedDisabled = ref(false); const search = ref(''); const searchVisible = ref(false); const relativePath = ref(''); const entries = ref<Entry[]>([]); const selected = reactive(new Set<string>()); const peerName = ref(''); const viewMode = ref<SharedViewMode>((localStorage.getItem('flyqpro.sharedDrive.viewMode') === 'thumb' ? 'thumb' : 'list')); const sharedFolders = ref<SharedFolder[]>([]); const activeFolderId = ref(''); const foldersLoading = ref(false)
+const isMac = ref(false); const isDark = ref(false); const loading = ref(false); const refreshing = ref(false); const loadingMore = ref(false); const hasMore = ref(false); const nextOffset = ref(0); const sharedDisabled = ref(false); const search = ref(''); const searchVisible = ref(false); const relativePath = ref(''); const entries = ref<Entry[]>([]); const selected = reactive(new Set<string>()); const peerName = ref(''); const viewMode = ref<SharedViewMode>((localStorage.getItem('flyqpro.sharedDrive.viewMode') === 'thumb' ? 'thumb' : 'list')); const sharedFolders = ref<SharedFolder[]>([]); const activeFolderId = ref(''); const foldersLoading = ref(false)
 const thumbnailUrls = reactive<Record<string, string>>({})
 const thumbnailLoading = reactive(new Set<string>())
 const thumbnailFailed = reactive(new Set<string>())
@@ -211,6 +212,17 @@ function displayFolderName(folder: SharedFolder) {
 }
 function thumbnailKey(entry: Entry) { return `${activeFolderId.value}:${entry.relativePath}` }
 function thumbnailResultKey(folderId: string, relativePath: string) { return `${folderId}:${relativePath}` }
+function videoThumbnailIdentity(entry: Entry): VideoThumbnailIdentity {
+  return {
+    source: mode.value === 'owner' ? 'shared-owner' : 'shared-friend',
+    deviceId: mode.value === 'friend' ? deviceId : '',
+    sharedFolderId: activeFolderId.value,
+    entryId: entry.entryId,
+    relativePath: entry.relativePath,
+    fileSize: entry.size,
+    modifiedAt: entry.modifiedAt,
+  }
+}
 function isImageEntry(entry: Entry) {
   const mime = String(entry.mimeType || '').toLowerCase()
   return mime.startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name)
@@ -299,6 +311,21 @@ function retryThumbnail(item: { entry: Entry; generation: number; attempt: numbe
 async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: number; attempt: number }>, generation: number) {
   if (generation !== thumbnailGeneration) return
   try {
+	const misses: Array<{ entry: Entry; generation: number; attempt: number }> = []
+	for (const item of items) {
+	  if (isVideoEntry(item.entry)) {
+	    const cached = await getVideoThumbnail(videoThumbnailIdentity(item.entry))
+	    if (generation !== thumbnailGeneration) return
+	    if (cached) {
+	      thumbnailUrls[thumbnailKey(item.entry)] = cached
+	      thumbnailLoading.delete(thumbnailKey(item.entry))
+	      continue
+	    }
+	  }
+	  misses.push(item)
+	}
+	if (!misses.length) return
+	items = misses
 	const results = await ChatService.GetFriendSharedEntryThumbnails(deviceId, items.map(({ entry }) => ({
 	      relativePath: entry.relativePath,
 	      sharedFolderId: activeFolderId.value,
@@ -314,7 +341,9 @@ async function loadThumbnailBatch(items: Array<{ entry: Entry; generation: numbe
 			const result: any = byPath.get(thumbnailResultKey(activeFolderId.value, path))
       if (result?.status === 'ready' && result.payload) {
         const mime = result.thumbnailMime || result.mimeType || 'image/jpeg'
-        thumbnailUrls[key] = `data:${mime};base64,${result.payload}`
+        const dataURL = `data:${mime};base64,${result.payload}`
+        thumbnailUrls[key] = dataURL
+        if (isVideoEntry(item.entry)) void putVideoThumbnail(videoThumbnailIdentity(item.entry), dataURL)
         thumbnailLoading.delete(key)
       } else if (result?.status === 'pending') {
         // Android generates video thumbnails asynchronously. Give the peer's
@@ -376,66 +405,14 @@ async function loadThumbnail(entry: Entry, generation: number) {
 function sharedPreviewURLFor(entry: Entry) {
   return PreviewStreamService.CreateSharedPreviewURL(mode.value === 'owner' ? 'shared-owner' : 'shared-friend', mode.value === 'friend' ? deviceId : '', activeFolderId.value, entry.relativePath)
 }
-function captureVideoFrame(url: string): Promise<string> {
-  return new Promise((resolve) => {
-    const video = document.createElement('video')
-    const canvas = document.createElement('canvas')
-    let settled = false
-    let frameCaptured = false
-    const timer = window.setTimeout(() => finish(''), 12000)
-    const finish = (value: string) => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timer)
-      video.pause()
-      video.removeAttribute('src')
-      video.load()
-      resolve(value)
-    }
-    // The preview stream is served from the loopback HTTP origin while the
-    // page runs in the Wails origin. CORS is enabled by the stream service;
-    // this attribute is required before assigning src so Canvas can export
-    // the captured video frame as a thumbnail.
-    video.crossOrigin = 'anonymous'
-    video.muted = true
-    video.playsInline = true
-    video.preload = 'auto'
-    video.addEventListener('error', () => finish(''), { once: true })
-    const captureFrame = () => {
-      if (settled || frameCaptured || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
-      const width = video.videoWidth
-      const height = video.videoHeight
-      if (!width || !height) return
-      const ratio = Math.min(1, 640 / Math.max(width, height))
-      canvas.width = Math.max(1, Math.round(width * ratio))
-      canvas.height = Math.max(1, Math.round(height * ratio))
-      try {
-        canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height)
-        frameCaptured = true
-        finish(canvas.toDataURL('image/jpeg', 0.8))
-      } catch {
-        finish('')
-      }
-    }
-    video.addEventListener('loadedmetadata', () => {
-      const duration = Number.isFinite(video.duration) ? video.duration : 0
-      video.currentTime = duration > 0.4 ? Math.min(duration * 0.1, 1) : 0
-    }, { once: true })
-    // Some codecs/providers never emit seeked for a remote stream. The first
-    // decoded frame is already a valid thumbnail, while seeked upgrades it to
-    // a later frame when seeking is available.
-    video.addEventListener('loadeddata', captureFrame)
-    video.addEventListener('seeked', captureFrame)
-    video.src = url
-    video.load()
-  })
-}
 async function loadVideoThumbnail(item: { entry: Entry; generation: number; attempt: number }) {
   const path = item.entry.relativePath
   const key = thumbnailKey(item.entry)
   try {
-    const url = await sharedPreviewURLFor(item.entry)
-    const thumbnail = url ? await captureVideoFrame(url) : ''
+    const thumbnail = await getOrLoadVideoThumbnail(videoThumbnailIdentity(item.entry), async () => {
+      const url = await sharedPreviewURLFor(item.entry)
+      return url ? captureVideoFrame(url) : ''
+    })
     if (item.generation !== thumbnailGeneration) return
     if (thumbnail) {
       thumbnailUrls[key] = thumbnail
@@ -582,33 +559,37 @@ async function loadEntriesPage(append = false, preserve = false) {
 }
 function sharedRefreshKey() { return `${mode.value}:${deviceId}:${activeFolderId.value}:${relativePath.value}:${settingsPage.value}` }
 async function refresh(force = true) {
-  if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) {
-    sharedDisabled.value = true
-    entries.value = []
-    return
-  }
-  const key = sharedRefreshKey()
-  if (refreshPromise && refreshPromiseKey === key) return refreshPromise
-  if (!force && lastRefreshAt > 0 && Date.now() - lastRefreshAt < 15000) return
-  const request = (async () => {
-    try {
-      await loadSettings()
-      if (key !== sharedRefreshKey()) return
-      if (settingsPage.value) return
-      if (!activeFolderId.value) return
-      await loadEntriesPage(false, true)
-      lastRefreshAt = Date.now()
-    } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
-  })()
-  refreshPromise = request
-  refreshPromiseKey = key
+  if (refreshing.value) return
+  refreshing.value = true
+  let request: Promise<void> | undefined
   try {
+    if (mode.value === 'invalid' || (mode.value === 'friend' && !deviceId)) {
+      sharedDisabled.value = true
+      entries.value = []
+      return
+    }
+    const key = sharedRefreshKey()
+    if (refreshPromise && refreshPromiseKey === key) return await refreshPromise
+    if (!force && lastRefreshAt > 0 && Date.now() - lastRefreshAt < 15000) return
+    request = (async () => {
+      try {
+        await loadSettings()
+        if (key !== sharedRefreshKey()) return
+        if (settingsPage.value) return
+        if (!activeFolderId.value) return
+        await loadEntriesPage(false, true)
+        lastRefreshAt = Date.now()
+      } catch (error: any) { Message.error(error?.message || '读取共享目录失败') }
+    })()
+    refreshPromise = request
+    refreshPromiseKey = key
     await request
   } finally {
     if (refreshPromise === request) {
       refreshPromise = undefined
       refreshPromiseKey = ''
     }
+    refreshing.value = false
   }
 }
 async function loadEntries() {
@@ -841,6 +822,9 @@ onBeforeUnmount(() => { entriesRequestId++; refreshPromise = undefined; window.r
 .thumb-meta { display:block; overflow:hidden; margin-top:3px; color:var(--muted); text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
 .thumb-placeholder.loading { color:var(--accent); }
 .file-icon.file-thumb { object-fit:cover; border-radius:4px; background:var(--page-bg); }
+.refresh-button { display:inline-flex; align-items:center; justify-content:center; gap:5px; }
+.refreshing-icon { animation:shared-refresh-spin .8s linear infinite; }
+@keyframes shared-refresh-spin { to { transform:rotate(360deg); } }
 .folder-list { overflow:auto; }
 .folder-row { display:flex; align-items:center; width:100%; min-height:64px; box-sizing:border-box; padding:10px 14px; border:0; border-bottom:1px solid var(--line); background:transparent; color:inherit; text-align:left; cursor:pointer; font:inherit; }
 .folder-row:hover { background:color-mix(in srgb,var(--accent) 8%,var(--surface)); }

@@ -52,6 +52,8 @@ type Engine struct {
 	locallyHiddenFriends    map[string]struct{}
 	friendRemovalSyncAt     map[string]time.Time
 	friendRemovalSyncMu     sync.Mutex
+	transferMetricsMu       sync.Mutex
+	transferMetrics         map[string]transferMetric
 	presenceMu              sync.Mutex
 	discoveryScanMu         sync.Mutex
 	discoveryMu             sync.Mutex
@@ -59,6 +61,11 @@ type Engine struct {
 	activeDiscoverySeen     map[string]struct{}
 	sharedThumbnailProvider func(root, relativePath string) (encoded, mimeType string, err error)
 	sharedFoldersProvider   func() ([]SharedFolder, error)
+}
+
+type transferMetric struct {
+	at    time.Time
+	bytes int64
 }
 
 // SetSharedThumbnailProvider lets the desktop service supply a persistent
@@ -208,7 +215,7 @@ const discoveryLeaseDuration = 90 * time.Second
 const discoveryPresencePrefix = "presence:"
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric)}
 }
 
 func (e *Engine) Start(ctx context.Context) error {
@@ -1159,6 +1166,24 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		"direction":    direction,
 		"phase":        phase,
 	}
+	e.transferMetricsMu.Lock()
+	if e.transferMetrics == nil {
+		e.transferMetrics = make(map[string]transferMetric)
+	}
+	metric, ok := e.transferMetrics[attachmentID]
+	now := time.Now()
+	if !ok || transferred < metric.bytes || phase == "awaiting_acceptance" {
+		metric = transferMetric{at: now, bytes: transferred}
+	} else if elapsed := now.Sub(metric.at).Seconds(); elapsed >= 0.2 {
+		value["speed"] = int64(float64(transferred-metric.bytes) / elapsed)
+		metric = transferMetric{at: now, bytes: transferred}
+	}
+	if phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected" {
+		delete(e.transferMetrics, attachmentID)
+	} else {
+		e.transferMetrics[attachmentID] = metric
+	}
+	e.transferMetricsMu.Unlock()
 	switch direction {
 	case "send":
 		value["sent"] = transferred
@@ -2834,7 +2859,8 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		return errAttachmentCanceled
 	}
 	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring")
-	buffer := make([]byte, 32*1024)
+	// Larger frames reduce JSON/base64 and acknowledgement overhead on LAN links.
+	buffer := make([]byte, 256*1024)
 	index := 0
 	var sent, lastProgress int64
 	for {

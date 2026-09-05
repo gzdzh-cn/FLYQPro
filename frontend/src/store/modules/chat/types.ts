@@ -109,6 +109,7 @@ export interface TransferProgress {
   transferred: number
   total: number
   percent: number
+  speed?: number
   sent?: number
   received?: number
   remoteReceived?: number

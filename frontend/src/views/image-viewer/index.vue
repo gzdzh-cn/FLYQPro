@@ -27,7 +27,13 @@
         <button type="button" class="image-nav-arrow" aria-label="上一张" title="上一张" :disabled="!canMovePrevious || loading" @pointerdown.stop @click.stop="moveImage(-1)"><icon-left /></button>
       </div>
       <iframe v-if="source && isPdfPreview" :key="viewerContentKey" class="pdf-preview" :src="source" :title="imageViewerName" />
-      <video v-else-if="source && isVideoPreview" :key="viewerContentKey" class="video-preview" :src="source" :title="imageViewerName" controls playsinline crossorigin="anonymous" preload="metadata" @error="handleVideoError" @dblclick.stop />
+      <template v-else-if="isVideoPreview">
+        <video v-if="source" ref="videoElement" :key="viewerContentKey" class="video-preview" :src="source" :poster="thumbnailSource || undefined" :title="imageViewerName" controls playsinline crossorigin="anonymous" preload="none" @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @wheel.stop @click.stop @contextmenu.stop @loadeddata="handleVideoReady" @canplay="handleVideoReady" @play="handleVideoPlay" @playing="handleVideoPlaying" @waiting="handleVideoWaiting" @pause="handleVideoPause" @ended="handleVideoPause" @error="handleVideoError" @dblclick.stop />
+        <img v-else-if="thumbnailSource" class="video-poster" :src="thumbnailSource" :alt="imageViewerName" draggable="false" />
+        <div v-else class="video-poster-empty" aria-hidden="true"></div>
+        <div v-if="videoLoading || videoPosterLoading" class="video-loading-state"><icon-loading /><span>{{ videoLoading ? '正在启动视频' : '正在加载视频预览' }}</span></div>
+        <button v-if="videoPaused && !videoLoading && !error" type="button" class="video-play-button" aria-label="播放视频" title="播放视频" @pointerdown.stop @click.stop="playVideo"><icon-play-circle-fill /></button>
+      </template>
       <template v-else>
         <img v-if="thumbnailSource" class="preview-image preview-thumbnail" :class="{ 'preview-image-faded': originalReady }" :src="thumbnailSource" :alt="imageViewerName" :style="imageTransform" draggable="false" />
         <img v-if="originalSource" class="preview-image preview-original" :class="{ 'preview-image-visible': originalReady }" :src="originalSource" :alt="imageViewerName" :style="imageTransform" draggable="false" @load="handleOriginalLoad" @error="handleOriginalError" />
@@ -51,7 +57,8 @@ import { useRoute } from 'vue-router'
 import { Events, Window } from '@wailsio/runtime'
 import { ChatService, PreviewStreamService } from '/#/flyqpro/internal/service'
 import { Message } from '@arco-design/web-vue'
-import { IconClose, IconCloseCircle, IconDownload, IconFullscreen, IconLeft, IconLoading, IconMinus, IconRight, IconRotateLeft, IconSave, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
+import { IconClose, IconCloseCircle, IconDownload, IconFullscreen, IconLeft, IconLoading, IconMinus, IconPlayCircleFill, IconRight, IconRotateLeft, IconSave, IconZoomIn, IconZoomOut } from '@arco-design/web-vue/es/icon'
+import { getOrLoadVideoThumbnail, type VideoThumbnailIdentity } from '@/utils/video-thumbnail-cache'
 
 const route = useRoute()
 const conversationId = computed(() => String(route.query.conversationId || ''))
@@ -84,6 +91,10 @@ const sharedIsVideo = ref(false)
 const loading = ref(false)
 const thumbnailPending = ref(false)
 const error = ref('')
+const videoElement = ref<HTMLVideoElement>()
+const videoPaused = ref(true)
+const videoLoading = ref(false)
+const videoPosterLoading = ref(false)
 const scale = ref(1)
 const rotation = ref(0)
 const offset = ref({ x: 0, y: 0 })
@@ -119,6 +130,7 @@ let pinchFrame = 0
 let pinchDelta = 0
 let dragFrame = 0
 let pendingDrag = { x: 0, y: 0 }
+let videoSourcePromise: Promise<string> | undefined
 const gestureActive = ref(false)
 const switchingImage = ref(false)
 type PointerPosition = { x: number; y: number }
@@ -289,6 +301,34 @@ async function sharedOriginalFor(relativePath: string) {
   return PreviewStreamService.CreateSharedPreviewURL(previewSource.value, sharedDeviceId.value, sharedFolderId.value, relativePath)
 }
 
+function videoThumbnailIdentity(relativePath: string, entry?: SharedPreviewEntry): VideoThumbnailIdentity {
+  return {
+    source: previewSource.value,
+    deviceId: sharedDeviceId.value,
+    sharedFolderId: sharedFolderId.value,
+    entryId: entry?.entryId || sharedEntryId.value,
+    relativePath,
+    fileSize: entry?.size || sharedFileSize.value,
+    modifiedAt: entry?.modifiedAt || sharedModifiedAt.value,
+  }
+}
+
+async function loadVideoPoster(relativePath: string, entry: SharedPreviewEntry | undefined, token: number) {
+  const thumbnail = await getOrLoadVideoThumbnail(videoThumbnailIdentity(relativePath, entry), async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const value = await sharedThumbnailFor(relativePath, entry)
+        if (value) return value
+      } catch { /* retry while the peer generates the thumbnail */ }
+      if (attempt < 5) await new Promise((resolve) => window.setTimeout(resolve, 300 + attempt * 200))
+    }
+    return ''
+  })
+  if (token !== loadToken || !thumbnail) return
+  thumbnailSource.value = thumbnail
+  thumbnailReady.value = true
+}
+
 function isImageSharedEntry(entry: SharedPreviewEntry) {
   return !entry.isDirectory && (String(entry.mimeType || '').toLowerCase().startsWith('image/') || /\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$/i.test(entry.name))
 }
@@ -299,7 +339,50 @@ function isSharedMediaEntry(entry: SharedPreviewEntry) { return isImageSharedEnt
 function handleVideoError() {
   if (isVideoPreview.value) {
     loading.value = false
+    videoPaused.value = true
+    videoLoading.value = false
     error.value = '视频暂时无法读取'
+  }
+}
+function handleVideoReady() {
+  loading.value = false
+  videoPaused.value = videoElement.value?.paused ?? true
+}
+function handleVideoPlay() {
+  videoPaused.value = false
+  error.value = ''
+}
+function handleVideoPlaying() {
+  videoLoading.value = false
+  videoPaused.value = false
+  error.value = ''
+}
+function handleVideoWaiting() {
+  if (!videoElement.value?.paused) videoLoading.value = true
+}
+function handleVideoPause() {
+  videoPaused.value = true
+}
+async function playVideo() {
+  const token = loadToken
+  if (videoLoading.value) return
+  videoLoading.value = true
+  try {
+    if (!source.value) {
+      if (!videoSourcePromise) videoSourcePromise = sharedOriginalFor(sharedCurrentPath.value || sharedRelativePath.value).catch(() => '')
+      const sourceValue = await videoSourcePromise
+      if (token !== loadToken || !sourceValue) throw new Error('视频地址暂时无法读取')
+      source.value = sourceValue
+      await nextTick()
+    }
+    const video = videoElement.value
+    if (!video || token !== loadToken) return
+    if (video.ended) video.currentTime = 0
+    await video.play()
+  } catch (playError: any) {
+    videoPaused.value = true
+    videoLoading.value = false
+    error.value = playError?.message ? `视频无法播放：${playError.message}` : '视频暂时无法播放'
   }
 }
 function parentSharedPath(path: string) {
@@ -327,14 +410,26 @@ async function loadCurrent() {
     thumbnailReady.value = false
     originalLoading.value = false
     originalReady.value = false
+    videoPaused.value = true
+    videoLoading.value = false
+    videoPosterLoading.value = false
+    videoSourcePromise = undefined
     sharedCurrentPath.value = activePath
     sharedName.value = entry?.name || activePath.split('/').filter(Boolean).pop() || '共享文件预览'
     sharedIsPdf.value = sharedPreviewType.value === 'pdf' || /\.pdf$/i.test(sharedName.value) || String(entry?.mimeType || '').toLowerCase() === 'application/pdf'
     sharedIsVideo.value = !sharedIsPdf.value && (sharedPreviewType.value === 'video' || (entry ? isVideoSharedEntry(entry) : false))
     resetTransform()
-    if (sharedIsPdf.value || sharedIsVideo.value) {
+    if (sharedIsVideo.value) {
+      loading.value = false
+      thumbnailPending.value = false
+      videoPosterLoading.value = true
+      void loadVideoPoster(activePath, entry, token).finally(() => { if (token === loadToken) videoPosterLoading.value = false })
+      void Window.SetTitle(`共享预览 - ${imageViewerName.value}`).catch(() => undefined)
+      return
+    }
+    if (sharedIsPdf.value) {
       try {
-        const sourceValue = sharedIsVideo.value ? await sharedOriginalFor(activePath) : await sharedSourceFor(activePath)
+        const sourceValue = await sharedSourceFor(activePath)
         if (token !== loadToken) return
         if (sourceValue) source.value = sourceValue
         else error.value = sharedIsVideo.value ? '视频暂时无法读取' : '共享文件预览失败'
@@ -389,6 +484,7 @@ async function loadCurrent() {
   thumbnailReady.value = false
   originalLoading.value = false
   originalReady.value = false
+  videoPaused.value = true
   sourceType.value = 'thumbnail'
   if (!message?.attachmentId) {
     loading.value = false
@@ -783,6 +879,15 @@ onBeforeUnmount(() => {
 .image-viewer-canvas .preview-thumbnail.preview-image-faded { opacity: 0; }
 .image-viewer-canvas .pdf-preview { width: calc(100% - 24px); height: calc(100% - 24px); border: 0; border-radius: 6px; background: #fff; }
 .image-viewer-canvas .video-preview { width: calc(100% - 24px); height: calc(100% - 24px); max-width: calc(100% - 24px); max-height: calc(100% - 24px); border-radius: 6px; background: #050608; object-fit: contain; }
+.image-viewer-canvas .video-poster { display: block; width: calc(100% - 24px); height: calc(100% - 24px); max-width: calc(100% - 24px); max-height: calc(100% - 24px); border-radius: 6px; background: #050608; object-fit: contain; user-select: none; }
+.image-viewer-canvas .video-poster-empty { width: calc(100% - 24px); height: calc(100% - 24px); border-radius: 6px; background: #050608; }
+.video-loading-state { position: absolute; z-index: 4; top: 50%; left: 50%; display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; transform: translate(-50%, -50%); border: 1px solid rgba(255, 255, 255, .18); border-radius: 6px; background: rgba(20, 24, 30, .78); color: #fff; font-size: 12px; pointer-events: none; }
+.video-loading-state > svg { font-size: 15px; animation: video-loading-spin .9s linear infinite; }
+@keyframes video-loading-spin { to { transform: rotate(360deg); } }
+.video-play-button { position: absolute; z-index: 3; left: 50%; top: 50%; display: inline-flex; width: 64px; height: 64px; padding: 0; align-items: center; justify-content: center; transform: translate(-50%, -50%); border: 1px solid rgba(255, 255, 255, .78); border-radius: 50%; background: rgba(20, 24, 30, .78); color: #fff; cursor: pointer; box-shadow: 0 8px 24px rgba(0, 0, 0, .3); -webkit-app-region: no-drag; --wails-draggable: no-drag; --wails-non-client-region: none; }
+.video-play-button:hover { background: rgba(55, 103, 232, .92); transform: translate(-50%, -50%) scale(1.05); }
+.video-play-button:active { transform: translate(-50%, -50%) scale(.97); }
+.video-play-button > svg { font-size: 34px; }
 .image-nav-side { position: absolute; z-index: 2; top: 0; bottom: 0; display: flex; width: 88px; align-items: center; opacity: 0; pointer-events: auto; transition: opacity .18s ease; --wails-draggable: no-drag; -webkit-app-region: no-drag; --wails-non-client-region: none; }
 .image-nav-side-prev { left: 0; justify-content: flex-start; padding-left: 14px; }
 .image-nav-side-next { right: 0; justify-content: flex-end; padding-right: 14px; }
