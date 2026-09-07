@@ -419,10 +419,10 @@ const (
 	parallelInitialStreams    = 1
 	parallelMaxStreams        = 4
 	parallelChunkSize         = 512 * 1024
-	parallelAckBytes          = 16 * 1024 * 1024
+	parallelAckBytes          = 8 * 1024 * 1024
 	parallelAckInterval       = 100 * time.Millisecond
 	parallelStreamThreshold   = 64 * 1024 * 1024
-	parallelInitialInFlight   = 32 * 1024 * 1024
+	parallelInitialInFlight   = 16 * 1024 * 1024
 	parallelMaxInFlight       = 128 * 1024 * 1024
 	parallelProgressInterval  = 250 * time.Millisecond
 )
@@ -4300,7 +4300,20 @@ func (e *Engine) sendParallelStream(ctx context.Context, peer Peer, dialect Prot
 	const frameBytes = 4 * 1024 * 1024
 	writer := bufio.NewWriterSize(session.conn, frameBytes)
 	var sent, confirmed int64
-	inFlightBudget := int64(parallelInitialInFlight)
+	// The v4 budget is attachment-wide. Each stream receives only its share;
+	// otherwise four streams could each reserve the full initial budget and
+	// create the ACK queue seen in the slow transfer screenshots.
+	// Keep the initial probe useful: one stream gets roughly 8 MiB. The
+	// maximum budget remains divided across all advertised streams.
+	streamDivisor := int64(maxInt(1, minInt(streamCount, 2)))
+	inFlightBudget := int64(parallelInitialInFlight) / streamDivisor
+	if inFlightBudget < int64(parallelChunkSize) {
+		inFlightBudget = int64(parallelChunkSize)
+	}
+	streamMaxBudget := int64(parallelMaxInFlight) / streamDivisor
+	if streamMaxBudget < inFlightBudget {
+		streamMaxBudget = inFlightBudget
+	}
 	chunkIndex := 0
 	type sentFrame struct {
 		end       int64
@@ -4371,10 +4384,10 @@ func (e *Engine) sendParallelStream(ctx context.Context, peer Peer, dialect Prot
 			stableSamples = 0
 			slowSamples = 0
 		}
-		if stableSamples >= 2 && inFlightBudget < parallelMaxInFlight {
+		if stableSamples >= 2 && inFlightBudget < streamMaxBudget {
 			inFlightBudget += 8 * 1024 * 1024
-			if inFlightBudget > parallelMaxInFlight {
-				inFlightBudget = parallelMaxInFlight
+			if inFlightBudget > streamMaxBudget {
+				inFlightBudget = streamMaxBudget
 			}
 			stableSamples = 0
 		} else if slowSamples >= 2 {
@@ -4473,17 +4486,26 @@ func (e *Engine) sendParallelStream(ctx context.Context, peer Peer, dialect Prot
 	report(parallelStreamProgress{streamID: streamID, sent: sent, confirmed: confirmed, length: length, done: true})
 }
 
-func parallelLaunchTarget(launched, completed, total int, confirmed, diskWriteMs int64) int {
+func parallelLaunchTarget(launched, completed, total int, confirmed, diskWriteMs int64, ackLatency time.Duration) int {
 	target := launched
 	// Each unopened connection owns a fixed range. Even when probing is slow,
 	// completion of an active range must schedule its unstarted successor.
 	if launched == completed && launched < total {
 		target++
 	}
-	if diskWriteMs <= 100 {
+	// Do not add streams while ACKs are already queueing. The previous logic
+	// looked only at confirmed bytes and disk time, so a delayed receiver could
+	// reach 4/4 streams while several tens of MiB were still unconfirmed.
+	if diskWriteMs <= 100 && ackLatency <= 8*time.Second {
+		// Allow the second stream after the first confirmed probe batch so a
+		// moderately delayed Wi-Fi ACK cannot leave the transfer single-stream.
 		if confirmed >= 8*1024*1024 && target < 2 {
 			target = 2
 		}
+		// ACK latency includes receiver batching and disk scheduling. Once two
+		// streams are active, keep filling the link up to four streams instead
+		// of leaving half the file range unopened; sustained throughput is the
+		// signal used for backing off after the pipeline is full.
 		if launched >= 2 && confirmed >= 32*1024*1024 {
 			target = total
 		}
@@ -4581,7 +4603,7 @@ func (e *Engine) transferParallelFile(ctx context.Context, peer Peer, message Me
 			if update.acknowledged {
 				lastDiskWriteMs = update.diskWriteMs
 			}
-			targetStreams := parallelLaunchTarget(launched, completed, streamCount, confirmed, lastDiskWriteMs)
+			targetStreams := parallelLaunchTarget(launched, completed, streamCount, confirmed, lastDiskWriteMs, lastDiagnosticAck)
 			if launched < targetStreams {
 				for streamID := launched; streamID < targetStreams; streamID++ {
 					if err := launchStream(streamID); err != nil {

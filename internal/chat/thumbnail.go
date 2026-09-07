@@ -10,11 +10,13 @@ import (
 	_ "image/png"
 	"os"
 	"strings"
+
+	imagedraw "golang.org/x/image/draw"
 )
 
 const (
-	thumbnailMaxEdge = 640
-	thumbnailMaxSize = 128 * 1024
+	thumbnailMaxEdge = 1024
+	thumbnailMaxSize = 256 * 1024
 )
 
 // buildImageThumbnail returns a small base64 encoded JPEG for image files.
@@ -101,12 +103,9 @@ func resizeThumbnail(source image.Image, maxEdge int) *image.RGBA {
 		height = 1
 	}
 	target := image.NewRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		sourceY := bound.Min.Y + y*bound.Dy()/height
-		for x := 0; x < width; x++ {
-			sourceX := bound.Min.X + x*bound.Dx()/width
-			target.Set(x, y, source.At(sourceX, sourceY))
-		}
-	}
+	// Nearest-neighbor sampling makes text and fine details visibly blurry in
+	// the chat preview. Catmull-Rom keeps edges sharp while the thumbnail is
+	// still bounded by the negotiated preview dimensions above.
+	imagedraw.CatmullRom.Scale(target, target.Bounds(), source, bound, imagedraw.Over, nil)
 	return target
 }

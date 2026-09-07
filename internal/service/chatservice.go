@@ -884,13 +884,7 @@ func (s *ChatService) RevealSharedEntry(folderID, relativePath string) error {
 		return err
 	}
 	path = filepath.Clean(path)
-	if runtime.GOOS == "darwin" {
-		return exec.Command("open", "-R", path).Run()
-	}
-	if runtime.GOOS == "windows" {
-		return exec.Command("explorer.exe", "/select,"+path).Run()
-	}
-	return exec.Command("xdg-open", filepath.Dir(path)).Run()
+	return revealFileInFolder(path)
 }
 
 // DownloadSharedEntry copies a locally shared file into the default shared
@@ -998,13 +992,7 @@ func (s *ChatService) RevealSharedDownload(targetPath string) error {
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("下载文件不存在")
 	}
-	if runtime.GOOS == "darwin" {
-		return exec.Command("open", "-R", target).Run()
-	}
-	if runtime.GOOS == "windows" {
-		return exec.Command("explorer.exe", "/select,"+target).Run()
-	}
-	return exec.Command("xdg-open", filepath.Dir(target)).Run()
+	return revealFileInFolder(target)
 }
 
 func sharedServicePathWithin(root, target string) bool {
@@ -1628,11 +1616,22 @@ func (s *ChatService) RevealAttachment(attachmentID string) error {
 		return err
 	}
 	path := filepath.Clean(attachment.LocalPath)
+	return revealFileInFolder(path)
+}
+
+func revealFileInFolder(path string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", "-R", path).Run()
 	case "windows":
-		return exec.Command("explorer.exe", "/select,"+path).Run()
+		// Explorer expects /select, and the target as separate command-line
+		// arguments. Starting it asynchronously also avoids waiting on the
+		// long-lived Explorer process.
+		command := exec.Command("explorer.exe", "/select,", path)
+		if err := command.Start(); err != nil {
+			return err
+		}
+		return command.Process.Release()
 	default:
 		return exec.Command("xdg-open", filepath.Dir(path)).Run()
 	}

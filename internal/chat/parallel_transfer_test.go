@@ -203,9 +203,12 @@ func TestParallelLaunchAlwaysSchedulesRemainingRanges(t *testing.T) {
 		{2, 2, 18 * 1024 * 1024, 500, 3},
 		{3, 3, 27 * 1024 * 1024, 500, 4},
 	} {
-		if got := parallelLaunchTarget(tc.launched, tc.completed, 4, tc.bytes, tc.diskMs); got != tc.want {
+		if got := parallelLaunchTarget(tc.launched, tc.completed, 4, tc.bytes, tc.diskMs, 0); got != tc.want {
 			t.Fatalf("%+v: got %d", tc, got)
 		}
+	}
+	if got := parallelLaunchTarget(1, 0, 4, 32*1024*1024, 0, 9*time.Second); got != 1 {
+		t.Fatalf("high ACK latency must not expand streams: got %d", got)
 	}
 }
 

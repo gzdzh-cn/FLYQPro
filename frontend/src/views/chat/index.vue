@@ -63,6 +63,7 @@
           <a-button type="text" aria-label="好友资料" title="好友资料" @pointerdown.prevent.stop="togglePeerInfo" @keydown.enter.space.prevent="togglePeerInfo"><icon-more /></a-button>
         </header>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
+          <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
           <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
@@ -71,11 +72,11 @@
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
-                  <button class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" :aria-busy="imageTransferActive(message)" @click="openImage(message)" @dblclick.stop.prevent="openImage(message)">
+                  <div class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" role="button" tabindex="0" :aria-busy="imageTransferActive(message)" @click="openImage(message)" @dblclick.stop.prevent="openImage(message)" @keydown.enter.space.prevent="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
-                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span>{{ transferProgressLabel(message) }}</span><a-button class="image-transfer-cancel" size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div>
-                  </button>
+                    <div v-if="imageTransferActive(message)" class="image-transfer-mask"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span class="image-transfer-status">{{ transferProgressLabel(message) }}</span><span class="image-transfer-actions"><button type="button" class="image-transfer-details" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button class="image-transfer-cancel" size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
+                  </div>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
                     <a-button size="mini" type="primary" :loading="attachmentActionBusy(message)" @click.stop.prevent="acceptAttachment(message)">接收</a-button>
                     <a-button size="mini" :loading="attachmentActionBusy(message)" @click.stop.prevent="saveAttachmentAs(message)">另存</a-button>
@@ -97,7 +98,7 @@
                 </template>
                 <div v-if="transferProgressFor(message) && !['awaiting_acceptance', 'completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
-                <div v-if="transferProgressFor(message) && ((isImageMessage(message) && !attachmentCompletedLocal(message)) || ['awaiting_acceptance', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase))" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">查看传输详情</button></div>
+                <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
               <template v-else>{{ message.content }}</template>
               <small>{{ formatTime(message.createdAt) }}<template v-if="messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) && (message.kind === 'file' || message.senderDeviceId === deviceInfo?.deviceId)"> <span class="message-status" :class="{ rejected: (message.attachmentStatus || message.status) === 'rejected' }">{{ messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) }}</span></template></small>
@@ -166,9 +167,9 @@
           <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @pointerdown.prevent.stop="selectEmoji(emoji)" @keydown.enter.prevent.stop="selectEmoji(emoji)">{{ emoji }}</button></div>
           <div v-if="pendingFiles.length || pendingImages.length" class="pending-files" :style="{ height: `${pendingComposerListHeight}px` }"><div v-for="(file, index) in pendingFiles" :key="file.id" class="pending-file"><icon-file /><span :title="file.path">{{ file.name }}</span><small>{{ formatBytes(file.size) }}</small><button type="button" title="移除文件" @click="pendingFiles.splice(index, 1)"><icon-close /></button></div><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
           <div class="composer-editor">
-            <textarea ref="composerInput" v-model="draft" :disabled="!activePeerCanSend" :placeholder="activePeerCanSend ? '输入消息，Enter 发送，Shift + Enter 换行' : '当前不是好友，请重新申请好友'" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
+            <textarea ref="composerInput" v-model="draft" :disabled="!activePeerCanSend" :placeholder="composerPlaceholder" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
           </div>
-          <div class="composer-foot"><span>{{ activePeerCanSend ? '消息将通过局域网加密传输' : '当前不是好友，请重新申请好友' }}</span><a-button type="primary" :loading="sendingMessage" :disabled="sendingMessage || !activePeerCanSend || (!draft.trim() && !pendingImages.length && !pendingFiles.length)" @click="sendMessage">发送</a-button></div>
+          <div class="composer-foot"><a-button type="primary" :loading="sendingMessage" :disabled="sendingMessage || !activePeerCanSend || (!draft.trim() && !pendingImages.length && !pendingFiles.length)" @click="sendMessage">发送</a-button></div>
           <button v-if="newMessageCount" class="new-message-button" @click="scrollToBottom(false, 'animated')">{{ newMessageCount }} 条新消息</button>
         </footer>
       </main>
@@ -359,7 +360,9 @@ let audioUnlocked = false
 let pendingNotificationTone = false
 let cancelNativeDrop: (() => void) | undefined
 let handleBrowserDrop: ((event: Event) => void) | undefined
+let handleFileDragState: ((event: Event) => void) | undefined
 const desktopForeground = ref(true)
+const draggingFiles = ref(false)
 const knownRequestStates = new Map<string, string>()
 let requestWatchReady = false
 let suppressScrollReadUntil = 0
@@ -375,7 +378,23 @@ let menuWarmupPaused = false
 
 const activePeer = computed(() => store.activePeer)
 const conversationVisible = computed(() => section.value === 'friends' && Boolean(activePeer.value))
-const activePeerCanSend = computed(() => Boolean(activePeer.value && activePeer.value.relation === 'friend' && activePeer.value.friendshipState !== 'removed'))
+const activePeerIsFriend = computed(() => {
+  const peer = activePeer.value
+  return Boolean(peer && peer.friendshipState !== 'removed' && (peer.relation === 'friend' || store.friends.some((item) => item.deviceId === peer.deviceId && item.relation === 'friend' && item.friendshipState !== 'removed')))
+})
+const activePeerCanSend = computed(() => {
+  const peer = activePeer.value
+  return Boolean(peer && peer.online && activePeerIsFriend.value)
+})
+const fileDropIndicatorVisible = computed(() => draggingFiles.value && conversationVisible.value && activePeerCanSend.value)
+const composerUnavailableText = computed(() => {
+  if (!activePeer.value) return '请选择好友'
+  if (!activePeerIsFriend.value) return '当前不是好友，请重新申请好友'
+  return '好友当前离线，暂不可发送'
+})
+const composerPlaceholder = computed(() => activePeerCanSend.value
+  ? '输入消息，Enter 发送，Shift + Enter 换行\n消息将通过局域网加密传输'
+  : composerUnavailableText.value)
 const orderedFriends = computed(() => [...store.friends].sort((left, right) => {
   const leftConversation = conversationForPeer(left.deviceId)
   const rightConversation = conversationForPeer(right.deviceId)
@@ -1049,9 +1068,9 @@ function notifyAttachmentResult(message: any) {
 }
 function attachmentNeedsDecision(message: any): boolean { return message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
 function attachmentAwaitingAcceptance(message: any): boolean {
-  if (message?.senderDeviceId !== deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
+  if (message?.senderDeviceId !== deviceInfo.value?.deviceId || !['pending', 'preparing_thumbnail'].includes(message?.attachmentStatus)) return false
   const progress = transferProgressFor(message)
-  return !progress || progress.phase === 'awaiting_acceptance'
+  return !progress || ['preparing_thumbnail', 'awaiting_acceptance'].includes(progress.phase)
 }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 function formatSpeed(value: number) {
@@ -1151,7 +1170,15 @@ function transferEtaLabel(message: any): string {
 }
 function imageTransferActive(message: any): boolean {
   const progress = transferProgressFor(message)
-  return Boolean(progress && ['preparing_thumbnail', 'transferring', 'receiving', 'remote-receive'].includes(progress.phase))
+  return Boolean(progress && ['transferring', 'receiving', 'remote-receive'].includes(progress.phase))
+}
+function transferDetailsActionVisible(message: any): boolean {
+  const progress = transferProgressFor(message)
+  if (!progress) return false
+  if (isImageMessage(message)) {
+    return !attachmentCompletedLocal(message) && !imageTransferActive(message) && !attachmentAwaitingAcceptance(message)
+  }
+  return ['awaiting_acceptance', 'failed', 'canceled', 'rejected'].includes(progress.phase)
 }
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
@@ -1456,7 +1483,7 @@ async function openSharedDrive() {
 }
 async function openFriendSharedDrive() {
   if (!activePeer.value) return
-  if (!activePeerCanSend.value) { Message.warning('当前不是好友，请重新申请好友'); return }
+  if (!activePeerIsFriend.value) { Message.warning('当前不是好友，请重新申请好友'); return }
   if (!activePeer.value.online) { Message.warning('好友不在线，暂不支持打开共享盘'); return }
   try {
     if (store.profile.sharedDriveMultiWindow === true) await SharedDriveWindowService.OpenFriendSharedDrive(activePeer.value.deviceId)
@@ -1520,6 +1547,10 @@ onMounted(async () => {
   window.addEventListener('pointerdown', closeContextMenusOnPointerDown)
   window.addEventListener('pointerdown', pauseMenuWarmup, { passive: true })
   window.addEventListener('keydown', pauseMenuWarmup)
+  handleFileDragState = (event: Event) => {
+    draggingFiles.value = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active)
+  }
+  window.addEventListener('flyqpro:file-drag-state', handleFileDragState)
   cancelNativeDrop = Events.On('chat:file-dropped', (event: any) => {
     const payload = event?.data ?? event ?? {}
     const paths = Array.isArray(payload) ? payload : (payload.filenames || payload.files || [])
@@ -1535,7 +1566,7 @@ onMounted(async () => {
   await load()
   scheduleMenuWarmup()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleFileDragState) window.removeEventListener('flyqpro:file-drag-state', handleFileDragState); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -1547,6 +1578,58 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .workspace { flex: 1; display: flex; min-width: 0; }.list-pane { width: 290px; flex: 0 0 290px; background: #fff; border-right: 1px solid #e5e6eb; display: flex; flex-direction: column; }.pane-title { padding: 26px 20px 18px; display: flex; justify-content: space-between; align-items: center; }.pane-title div { display: flex; align-items: baseline; gap: 8px; }.pane-title strong { font-size: 22px; }.pane-title span { color: #86909c; font-size: 13px; }.icon-button { border: 0; background: transparent; cursor: pointer; color: #4e5969; font-size: 22px; }.search { margin: 0 16px 14px; width: calc(100% - 32px); }.list-scroll { flex: 1; overflow: auto; padding: 0 0 20px; }.peer-row, .request-row { width: 100%; box-sizing: border-box; border: 0; background: transparent; text-align: left; display: flex; align-items: center; gap: 12px; padding: 11px 20px; border-radius: 0; cursor: pointer; }.peer-row:hover, .request-row:hover, .peer-row.selected, .request-row.selected { background: #f2f5ff; }.peer-copy, .request-row > div:last-child { display: flex; flex-direction: column; gap: 4px; min-width: 0; }.peer-copy strong, .request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.peer-copy span, .request-row span { font-size: 12px; color: #86909c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.empty-small { text-align: center; color: #86909c; padding: 90px 20px; }.empty-icon, .brand-mark { font-size: 42px; color: #4e7cff; }.conversation, .detail-pane, .blank-state { flex: 1; min-width: 0; display: flex; flex-direction: column; }.conversation-head { height: 76px; flex: 0 0 76px; background: #fff; border-bottom: 1px solid #e5e6eb; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; }.head-peer { display: flex; gap: 12px; align-items: center; }.head-peer > div:last-child { display: flex; flex-direction: column; gap: 4px; }.head-peer span { font-size: 12px; color: #86909c; }.onlineText { color: #00b42a !important; }.message-scroll { flex: 1; overflow: auto; padding: 28px 12%; }.message-line { display: flex; margin: 12px 0; }.message-line.mine { justify-content: flex-end; }.message-bubble { max-width: 65%; padding: 11px 15px; border-radius: 16px 16px 16px 4px; background: #fff; box-shadow: 0 4px 16px rgba(28, 49, 93, .05); white-space: pre-wrap; line-height: 1.55; }.message-line.mine .message-bubble { color: #fff; background: #3767e8; border-radius: 16px 16px 4px 16px; }.message-bubble small { display: block; opacity: .65; font-size: 10px; margin-top: 5px; }.conversation-empty, .blank-state { align-items: center; justify-content: center; color: #86909c; }.conversation-empty h3, .conversation-empty p { margin: 4px; }.blank-state h2, .blank-state p { margin: 7px; }.composer { padding: 12px 24px 18px; background: #fff; border-top: 1px solid #e5e6eb; }.composer-tools { height: 28px; display: flex; align-items: center; gap: 10px; }.composer-tools button { border: 0; background: transparent; color: #4e5969; font-size: 18px; cursor: pointer; }.picked-file { color: #4e7cff; font-size: 12px; }.composer textarea { display: block; width: 100%; min-height: 68px; border: 0; outline: none; resize: none; font-size: 14px; padding: 8px 0; box-sizing: border-box; }.composer-foot { display: flex; align-items: center; justify-content: space-between; color: #86909c; font-size: 12px; }.info-pane { width: 280px; flex: 0 0 280px; background: #fff; border-left: 1px solid #e5e6eb; padding: 24px 20px; }.info-head { display: flex; justify-content: space-between; }.info-profile { text-align: center; padding: 30px 0 24px; }.info-profile .avatar { margin: auto; }.info-profile h3 { margin: 12px 0 4px; }.info-profile span { color: #00b42a; font-size: 12px; }.info-fields, .basic-info, .device-fields { display: flex; flex-direction: column; gap: 18px; }.info-fields label, .basic-info label, .device-fields label { color: #86909c; font-size: 12px; display: flex; flex-direction: column; gap: 5px; }.info-fields strong, .basic-info strong, .device-fields strong { color: #1d2129; font-weight: 500; word-break: break-all; }.mono { font-family: monospace; font-size: 11px; }.discovery-pane { width: 320px; flex-basis: 320px; }.group-title { border: 0; background: transparent; display: flex; justify-content: space-between; width: 100%; padding: 14px 20px 7px; cursor: pointer; color: #4e5969; font-weight: 600; }.group-title b { background: #e8f3ff; color: #165dff; padding: 1px 7px; border-radius: 10px; }.request-row { padding: 12px 18px; }.detail-pane { overflow: auto; align-items: center; justify-content: center; padding: 40px; box-sizing: border-box; }.detail-card { width: min(440px, 100%); background: #fff; border-radius: 20px; padding: 42px; box-sizing: border-box; text-align: center; box-shadow: 0 16px 50px rgba(32, 56, 99, .08); }.detail-card .avatar { margin: auto; }.detail-card h2 { margin: 18px 0 8px; }.detail-card p { color: #4e5969; line-height: 1.6; }.detail-actions { display: flex; justify-content: center; gap: 12px; margin-top: 26px; }.subtle { color: #86909c; font-size: 12px; }.tags { display: flex; justify-content: center; gap: 8px; margin: 16px; }.basic-info { text-align: left; padding: 18px 0 25px; }.settings-shell { flex: 1; overflow: auto; }.settings-head { padding: 30px 52px 0; background: #fff; }.settings-head h2 { margin: 0 0 6px; font-size: 26px; }.settings-head p { color: #86909c; margin: 0 0 24px; }.settings-tabs { display: flex; gap: 25px; }.settings-tabs button { border: 0; background: transparent; padding: 12px 2px; color: #86909c; cursor: pointer; border-bottom: 2px solid transparent; }.settings-tabs button.active { color: #165dff; border-color: #165dff; }.settings-content { max-width: 900px; padding: 28px 52px 60px; }.setting-card { background: #fff; border-radius: 16px; padding: 24px 28px; margin-bottom: 16px; }.setting-card h3 { margin: 0 0 16px; }.profile-card, .device-card { display: flex; gap: 28px; align-items: center; }.profile-edit { flex: 1; }.profile-edit p { color: #86909c; font-size: 12px; }.setting-line { min-height: 58px; border-top: 1px solid #f2f3f5; display: flex; align-items: center; justify-content: space-between; gap: 20px; }.setting-line > div { display: flex; flex-direction: column; gap: 5px; }.setting-line span { color: #86909c; font-size: 12px; }.path { max-width: 550px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.network-summary { display: flex; align-items: center; gap: 14px; }.network-summary > div:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 5px; }.network-summary span { color: #86909c; font-size: 12px; }.network-dot { width: 12px; height: 12px; border-radius: 50%; background: #00b42a; }.network-dot.warning { background: #ff7d00; }.network-dot.error { background: #f53f3f; }.diagnostic-list { margin-top: 24px; border-top: 1px solid #f2f3f5; }.diagnostic-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid #f2f3f5; }.diagnostic-icon { width: 20px; height: 20px; border-radius: 50%; text-align: center; line-height: 20px; color: #fff; background: #00b42a; }.diagnostic-icon.error { background: #f53f3f; }.diagnostic-row div { display: flex; flex-direction: column; gap: 3px; }.diagnostic-row span:last-child { font-size: 12px; color: #86909c; }.about-card { text-align: center; padding: 60px; }.about-card .brand-mark { font-size: 60px; }.about-rows { max-width: 380px; margin: 25px auto; text-align: left; }.about-rows span { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f2f3f5; }.about-rows strong { color: #1d2129; font-weight: 500; }
 .message-scroll { display: flex; flex-direction: column; }
 .message-scroll { position: relative; }
+.conversation-file-drop-indicator {
+  position: absolute;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  animation: conversation-file-drop-fade-in .16s ease-out;
+}
+.conversation-file-drop-indicator::before {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border: 2px dashed color-mix(in srgb, var(--accent) 72%, transparent);
+  border-radius: 18px;
+  animation: conversation-file-drop-pulse 1.1s ease-in-out infinite;
+}
+.conversation-file-drop-card {
+  position: relative;
+  display: flex;
+  width: min(320px, calc(100% - 32px));
+  min-width: min(250px, calc(100% - 32px));
+  max-width: calc(100% - 32px);
+  padding: 24px 34px;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-1) 92%, var(--accent));
+  box-shadow: 0 14px 45px rgba(30, 71, 150, .18);
+  color: var(--text);
+}
+.conversation-file-drop-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  animation: conversation-file-drop-bounce 1s ease-in-out infinite;
+}
+.conversation-file-drop-card strong { font-size: 16px; }
+.conversation-file-drop-card small { color: var(--muted); font-size: 12px; }
+@keyframes conversation-file-drop-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes conversation-file-drop-pulse { 0%, 100% { opacity: .45; transform: scale(1); } 50% { opacity: 1; transform: scale(1.008); } }
+@keyframes conversation-file-drop-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 .message-line.is-selected .message-bubble { outline: 2px solid #3767e8; outline-offset: 3px; }
 .message-bubble.is-favorite::before { content: '★'; position: absolute; right: -18px; top: -8px; color: #ffb400; font-size: 13px; }
 .message-bubble { position: relative; }
@@ -1592,7 +1675,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .attachment-details-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-details-reason { margin: 0; padding: 7px 9px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-transfer-details-action { display: flex; justify-content: flex-end; margin-top: 5px; }
-.attachment-transfer-details-action button { padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; }
+.attachment-transfer-details-action button { flex: 0 0 auto; padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .forward-targets { display: flex; flex-direction: column; gap: 12px; }
 .conversation-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; padding: 18px 14px; }
 .info-danger { margin-top: auto; padding-top: 24px; display: flex; flex-direction: column; gap: 8px; }.info-danger span { color: #86909c; font-size: 11px; line-height: 1.5; }
@@ -1616,7 +1699,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .attachment-actions { display: flex; gap: 6px; margin-top: 8px; }
 .request-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 .attachment-pending { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 11px; }
-.attachment-pending-actions { display: inline-flex; align-items: center; gap: 8px; }
+.attachment-pending-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap; white-space: nowrap; }
+.attachment-pending-actions :deep(.arco-btn) { flex: 0 0 auto; white-space: nowrap; }
 .chat-app .message-line.mine .attachment-pending { color: var(--message-outgoing-text); font-weight: 600; }
 .chat-app .message-line.mine .attachment-pending span { text-shadow: 0 1px 2px rgba(20, 38, 84, .24); }
 
@@ -1744,15 +1828,11 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .chat-app .message-bubble { background: var(--message-incoming); color: var(--text); box-shadow: var(--shadow); }
 .chat-app .message-line.mine .message-bubble { background: var(--message-outgoing); color: var(--message-outgoing-text); }
 .chat-app .composer textarea { background: transparent; color: var(--text); }
-.chat-app .composer textarea::placeholder { color: var(--muted); }
-.chat-app .composer.composer-disabled { background: var(--surface-2); }
+.chat-app .composer textarea::placeholder { color: var(--muted); white-space: pre-line; }
 .chat-app .composer textarea:disabled {
-  background: var(--surface-3);
-  color: var(--muted);
+  background: transparent;
+  color: var(--text);
   cursor: not-allowed;
-  border-radius: 8px;
-  padding-left: 10px;
-  padding-right: 10px;
   opacity: 1;
 }
 .chat-app .composer.composer-disabled .composer-tools button { color: var(--muted); opacity: .45; cursor: not-allowed; }
@@ -2190,17 +2270,21 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .pending-image { width: 58px; height: 58px; position: relative; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
 .pending-image img { width: 100%; height: 100%; object-fit: cover; }
 .pending-image button { position: absolute; top: 2px; right: 2px; display: flex; border: 0; border-radius: 50%; padding: 2px; background: rgba(0, 0, 0, .64); color: #fff; cursor: pointer; }
-.image-message { position: relative; display: block; width: fit-content; max-width: min(270px, calc(100vw - 64px)); min-width: 0; min-height: 110px; padding: 0; border: 0; background: var(--surface-3); cursor: zoom-in; overflow: hidden; border-radius: 8px; color: inherit; }
+.image-message { position: relative; display: block; width: min(270px, calc(100vw - 64px)); max-width: 100%; min-width: 0; height: auto; aspect-ratio: 4 / 3; margin-inline: auto; padding: 0; border: 0; background: var(--surface-3); cursor: zoom-in; overflow: hidden; border-radius: 8px; color: inherit; }
 .image-message.is-transferring { cursor: progress; }
-.image-message:disabled { opacity: 1; }
-.image-pending-placeholder { display: flex; min-height: 110px; align-items: center; justify-content: center; padding: 0 18px; color: var(--muted); font-size: 12px; }
-.image-message img { display: block; width: auto; max-width: 100%; height: auto; max-height: 220px; object-fit: contain; margin: 0 auto; }
-.image-transfer-mask { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(9, 14, 24, .58); color: #fff; font-size: 12px; letter-spacing: .02em; pointer-events: auto; }
-.image-transfer-mask :deep(.image-transfer-cancel) { min-width: 58px; border: 1px solid rgba(255, 255, 255, .72); border-radius: 6px; background: #e5484d !important; color: #fff !important; box-shadow: 0 2px 8px rgba(0, 0, 0, .32); font-weight: 600; }
+.image-message:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.image-pending-placeholder { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; padding: 0 18px; box-sizing: border-box; color: var(--muted); font-size: 12px; }
+.image-message img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center top; margin: 0 auto; }
+.image-transfer-mask { position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 6px 8px; background: rgba(9, 14, 24, .58); color: #fff; font-size: 12px; letter-spacing: .02em; pointer-events: auto; }
+.image-transfer-status { display: block; width: 100%; min-height: 15px; overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; line-height: 15px; }
+.image-transfer-actions { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 24px; flex: 0 0 24px; }
+.image-transfer-details { height: 24px; min-width: 38px; padding: 0 8px; border: 1px solid rgba(255, 255, 255, .72); border-radius: 6px; background: rgba(20, 30, 48, .72); color: #fff; cursor: pointer; font-size: 11px; line-height: 22px; }
+.image-transfer-details:hover { background: rgba(65, 89, 130, .9); }
+.image-transfer-mask :deep(.image-transfer-cancel) { min-width: 54px; height: 24px; padding: 0 8px; border: 1px solid rgba(255, 255, 255, .72); border-radius: 6px; background: #e5484d !important; color: #fff !important; box-shadow: 0 2px 8px rgba(0, 0, 0, .32); font-weight: 600; }
 .image-transfer-mask :deep(.image-transfer-cancel:hover) { background: #f06a6f !important; }
-.image-progress-ring { position: relative; --progress: 0%; display: inline-flex; width: 62px; height: 62px; align-items: center; justify-content: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--progress), rgba(255, 255, 255, .28) var(--progress)); box-shadow: 0 4px 18px rgba(0, 0, 0, .22); }
-.image-progress-ring::after { content: ''; position: absolute; width: 50px; height: 50px; border-radius: 50%; background: rgba(13, 20, 34, .9); }
-.image-progress-ring strong { position: relative; z-index: 1; font-size: 13px; font-weight: 700; }
+.image-progress-ring { position: relative; --progress: 0%; display: inline-flex; width: 48px; height: 48px; align-items: center; justify-content: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--progress), rgba(255, 255, 255, .28) var(--progress)); box-shadow: 0 4px 18px rgba(0, 0, 0, .22); }
+.image-progress-ring::after { content: ''; position: absolute; width: 38px; height: 38px; border-radius: 50%; background: rgba(13, 20, 34, .9); }
+.image-progress-ring strong { position: relative; z-index: 1; font-size: 12px; font-weight: 700; }
 .new-message-button { position: absolute; right: 22px; top: -41px; z-index: 8; border: 0; border-radius: 5px; padding: 7px 10px; background: var(--accent); color: #fff; font-size: 12px; cursor: pointer; box-shadow: var(--shadow); }
 .info-overlay { position: absolute; z-index: 12; top: 52px; right: 12px; bottom: 12px; width: min(320px, calc(100% - 24px)); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .info-fields input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); }
@@ -2264,7 +2348,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .composer-tools { height: 24px; flex: 0 0 24px; }
 .composer-editor { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; }
 .composer textarea { flex: 1 1 auto; min-height: 36px; overflow: auto; padding: 5px 0; }
-.composer-foot { min-height: 28px; flex: 0 0 28px; gap: 12px; }
+.composer-foot { min-height: 28px; flex: 0 0 28px; justify-content: flex-end; gap: 12px; }
 .composer-foot > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-foot :deep(.arco-btn) { flex: 0 0 auto; min-width: 72px; }
 .emoji-panel { position: absolute; left: 18px; bottom: calc(100% - 2px); z-index: 15; box-sizing: border-box; display: grid; grid-template-columns: repeat(8, 1fr); align-content: start; gap: 4px; width: 360px; height: 272px; max-width: calc(100vw - 36px); padding: 10px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); box-shadow: var(--shadow); opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(18px); will-change: transform, opacity; transition: opacity .15s cubic-bezier(.22, .8, .28, 1), transform .15s cubic-bezier(.22, .8, .28, 1), visibility 0s linear .15s; }
