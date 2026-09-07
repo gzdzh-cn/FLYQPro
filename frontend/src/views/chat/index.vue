@@ -133,23 +133,24 @@
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
                 <p><span>已耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
+                <p><span>已接收容量</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }} / {{ formatMetricBytes(detailTotalBytes) }}</strong></p>
               </div>
             </div>
-            <div v-if="detailProgress" class="attachment-details-section">
+            <div class="attachment-details-section">
               <h4>网络调优</h4>
               <div class="attachment-details-grid">
-                <p><span>分块 / 窗口</span><strong>{{ detailProgress.chunkSize ? formatBytes(detailProgress.chunkSize) : '兼容模式' }} · {{ detailProgress.windowSize ? `${detailProgress.windowSize} 块` : '逐块确认' }}</strong></p>
-                <p><span>窗口数据量</span><strong>{{ detailProgress.windowBytes !== undefined ? formatMetricBytes(detailProgress.windowBytes) : '暂未提供' }}</strong></p>
-                <p><span>在途数据</span><strong>{{ detailProgress.inFlightBytes !== undefined ? formatMetricBytes(detailProgress.inFlightBytes) : (detailIsReceiver ? '接收端暂未提供' : '暂未提供') }}</strong></p>
-                <p><span>{{ detailIsReceiver ? '接收吞吐' : '累计确认速度' }}</span><strong class="attachment-details-rate"><span>{{ detailNetworkThroughput.primary }}</span><small v-if="detailNetworkThroughput.secondary">{{ detailNetworkThroughput.secondary }}</small></strong></p>
-                <p><span>确认批量</span><strong>{{ detailProgress.ackTargetBytes ? formatBytes(detailProgress.ackTargetBytes) : '逐窗口确认' }}</strong></p>
+                <p><span title="当前传输窗口使用的分块大小和窗口块数">分块 / 窗口</span><strong>{{ detailProgress?.chunkSize ? formatBytes(detailProgress.chunkSize) : detailProgress ? '兼容模式' : '暂未提供' }} · {{ detailProgress?.windowSize ? `${detailProgress.windowSize} 块` : detailProgress ? '逐块确认' : '暂未提供' }}</strong></p>
+                <p><span title="当前窗口内已经写入或发送的数据量">窗口数据量</span><strong>{{ detailProgress?.windowBytes !== undefined ? formatMetricBytes(detailProgress.windowBytes) : '暂未提供' }}</strong></p>
+                <p><span title="已处理但尚未纳入最新确认的数据量">在途数据</span><strong>{{ detailProgress?.inFlightBytes !== undefined ? formatMetricBytes(detailProgress.inFlightBytes) : (detailIsReceiver ? '接收端暂未提供' : '暂未提供') }}</strong></p>
+                <p><span title="接收设备实际写入文件的吞吐速度">{{ detailIsReceiver ? '接收吞吐' : '累计确认速度' }}</span><strong class="attachment-details-rate"><span>{{ detailNetworkThroughput.primary }}</span><small v-if="detailNetworkThroughput.secondary">{{ detailNetworkThroughput.secondary }}</small></strong></p>
+                <p><span title="接收端达到该字节数后发送一次确认">确认批量</span><strong>{{ detailProgress?.ackTargetBytes ? formatBytes(detailProgress.ackTargetBytes) : detailProgress ? '逐窗口确认' : '暂未提供' }}</strong></p>
                 <p><span>确认延迟</span><strong>{{ detailAckLatency }}</strong></p>
                 <p><span>调优状态</span><strong>{{ detailTuningState }}</strong></p>
-                <p><span>写盘耗时</span><strong>{{ detailProgress.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : '正在测量' }}</strong></p>
-                <p><span>通道 / 模式</span><strong>{{ detailProgress.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress.transferMode) }}</strong></p>
-                <p v-if="detailProgress.streamCount"><span>并行数据流</span><strong>{{ detailProgress.activeStreams || detailProgress.streamCount }} / {{ detailProgress.streamCount }} 路</strong></p>
+                <p><span>写盘耗时</span><strong>{{ detailProgress?.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : detailProgress ? '正在测量' : '暂未提供' }}</strong></p>
+                <p><span>通道 / 模式</span><strong>{{ detailProgress?.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress?.transferMode) }}</strong></p>
+                <p v-if="detailProgress?.streamCount"><span>并行数据流</span><strong>{{ detailProgress.activeStreams || detailProgress.streamCount }} / {{ detailProgress.streamCount }} 路</strong></p>
               </div>
-              <p v-if="detailProgress.tuningReason" class="attachment-details-reason" :title="detailProgress.tuningReason">{{ detailProgress.tuningReason }}</p>
+              <p v-if="detailProgress?.tuningReason" class="attachment-details-reason" :title="detailProgress.tuningReason">{{ detailProgress.tuningReason }}</p>
             </div>
             <div class="attachment-details-section attachment-details-file-section">
               <h4>文件与校验</h4>
@@ -1100,9 +1101,26 @@ const detailProgressPeakSpeed = computed(() => formatTransferRate(detailProgress
 const detailProgressEta = computed(() => detailProgress.value?.etaSeconds ? formatDuration(detailProgress.value.etaSeconds * 1000) : '暂不可估算')
 const detailProgressElapsed = computed(() => formatDuration(detailProgress.value?.elapsedMs))
 const detailIsReceiver = computed(() => detailProgress.value?.direction === 'receive')
-const detailNetworkThroughput = computed(() => detailIsReceiver.value ? detailProgressSpeed.value : formatTransferRate(detailProgress.value?.confirmedThroughput))
-const detailAckLatency = computed(() => detailIsReceiver.value ? '接收端不适用' : (detailProgress.value?.ackLatencyMs ? `${detailProgress.value.ackLatencyMs} ms` : '正在测量'))
-const detailTuningState = computed(() => detailIsReceiver.value ? '接收端监测' : tuningStateLabel(detailProgress.value?.tuningState))
+const detailReceivedBytes = computed<number | undefined>(() => {
+  const progress = detailProgress.value
+  if (!progress) return undefined
+  const value = detailIsReceiver.value ? (progress.transferred ?? progress.received) : progress.remoteReceived
+  if (value === undefined || value === null) return undefined
+  return Math.max(0, Number(value || 0))
+})
+const detailTotalBytes = computed(() => Math.max(0, Number(detailProgress.value?.total || attachmentDetails.value?.fileSize || attachmentDetailsMessage.value?.attachmentSize || 0)))
+const detailNetworkThroughput = computed(() => {
+  if (!detailProgress.value) return { primary: '暂未提供', secondary: '' }
+  return detailIsReceiver.value ? detailProgressSpeed.value : formatTransferRate(detailProgress.value.confirmedThroughput)
+})
+const detailAckLatency = computed(() => {
+  if (!detailProgress.value) return '暂未提供'
+  return detailIsReceiver.value ? '接收端不适用' : (detailProgress.value.ackLatencyMs ? `${detailProgress.value.ackLatencyMs} ms` : '正在测量')
+})
+const detailTuningState = computed(() => {
+  if (!detailProgress.value) return '暂未提供'
+  return detailIsReceiver.value ? '接收端监测' : tuningStateLabel(detailProgress.value.tuningState)
+})
 function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || phase || '未知' }
 function transferDirectionLabel(direction?: string) { return ({ send: '发送', receive: '接收', 'remote-receive': '对方接收' } as Record<string, string>)[direction || ''] || direction || '未知' }
 function tuningStateLabel(state?: string) { return ({ probing: '探测中', observing: '接收端监测', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }

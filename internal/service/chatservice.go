@@ -1680,11 +1680,32 @@ func (s *ChatService) GetAttachmentDetails(attachmentID string) (chat.Attachment
 	if err != nil {
 		return chat.AttachmentDetails{}, err
 	}
+	if attachment.SHA256 == "" && attachment.LocalPath != "" && attachment.Status != "receiving" {
+		if info, statErr := os.Stat(attachment.LocalPath); statErr == nil && info.Size() == attachment.FileSize {
+			if sum, hashErr := hashAttachmentFile(attachment.LocalPath); hashErr == nil {
+				attachment.SHA256 = sum
+				_ = chat.SaveAttachment(gctx.New(), attachment)
+			}
+		}
+	}
 	message, err := chat.GetMessage(gctx.New(), attachment.MessageID)
 	if err != nil {
 		return chat.AttachmentDetails{}, err
 	}
 	return chat.AttachmentDetails{AttachmentID: attachment.AttachmentID, FileName: attachment.FileName, MimeType: attachment.MimeType, FileSize: attachment.FileSize, SHA256: attachment.SHA256, Status: attachment.Status, CreatedAt: message.CreatedAt, LocalPath: attachment.LocalPath}, nil
+}
+
+func hashAttachmentFile(path string) (string, error) {
+	file, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (s *ChatService) MarkConversationRead(deviceID string) error {

@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -47,5 +50,31 @@ func TestGetAttachmentDetailsAllowsInProgressAttachments(t *testing.T) {
 		if details.FileName != "report.bin" || details.FileSize != 42 || details.Status != status {
 			t.Fatalf("status %s returned incomplete details: %+v", status, details)
 		}
+	}
+
+	senderPath := filepath.Join(root, "sender.bin")
+	senderData := []byte("sender attachment")
+	if err := os.WriteFile(senderPath, senderData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	senderMessageID := "details-message-sender"
+	senderAttachmentID := "details-attachment-sender"
+	if err := chat.SaveMessage(ctx, chat.Message{MessageID: senderMessageID, ConversationID: conversationID, SenderDeviceID: "local-device", Kind: "file", Content: "sender.bin", Status: "sent", CreatedAt: "2026-01-01T00:00:00Z", AttachmentID: senderAttachmentID, AttachmentName: "sender.bin", AttachmentSize: int64(len(senderData)), AttachmentMime: "application/octet-stream", AttachmentStatus: "sent", AttachmentPath: senderPath}); err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.SaveAttachment(ctx, chat.Attachment{AttachmentID: senderAttachmentID, MessageID: senderMessageID, FileName: "sender.bin", MimeType: "application/octet-stream", FileSize: int64(len(senderData)), LocalPath: senderPath, Status: "sent"}); err != nil {
+		t.Fatal(err)
+	}
+	wantSum := sha256.Sum256(senderData)
+	details, err := service.GetAttachmentDetails(senderAttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.SHA256 != hex.EncodeToString(wantSum[:]) {
+		t.Fatalf("sender SHA-256 = %q, want %q", details.SHA256, hex.EncodeToString(wantSum[:]))
+	}
+	stored, err := chat.GetAttachment(ctx, senderAttachmentID)
+	if err != nil || stored.SHA256 != hex.EncodeToString(wantSum[:]) {
+		t.Fatalf("sender SHA-256 was not persisted: %q, want %q (err: %v)", stored.SHA256, hex.EncodeToString(wantSum[:]), err)
 	}
 }
