@@ -959,6 +959,7 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 	pooled := fileChunkBufferPool.Get().([]byte)
 	defer fileChunkBufferPool.Put(pooled)
 	remaining := payloadLen
+	windowReceivedStart := transfer.received
 	var diskWriteDuration time.Duration
 	for remaining > 0 {
 		readSize := int64(len(pooled))
@@ -983,7 +984,7 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 		}
 		transfer.received += int64(len(data))
 		if transfer.received-transfer.lastProgress >= 4*1024*1024 || transfer.received >= transfer.expected {
-			e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)})
+			e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, inFlightBytes: transfer.binaryAckBytes + transfer.received - windowReceivedStart, ackTargetBytes: transfer.binaryAckTarget, diskWriteMs: diskWriteDuration.Milliseconds(), transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"})
 			transfer.lastProgress = transfer.received
 		}
 		remaining -= int64(len(data))
@@ -995,9 +996,6 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 	transfer.binaryAckBytes += payloadLen
 	transfer.binaryAckWindows++
 	diskWriteMs := diskWriteDuration.Milliseconds()
-	options := transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, ackTargetBytes: transfer.binaryAckTarget, diskWriteMs: diskWriteMs, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)}
-	e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", options)
-	transfer.lastProgress = transfer.received
 	ackDue := transfer.binaryAckTarget <= 0 || transfer.binaryAckBytes >= transfer.binaryAckTarget || transfer.received >= transfer.expected || time.Since(transfer.binaryLastAckAt) >= binaryAckInterval
 	if ackDue {
 		flushStarted := time.Now()
@@ -1016,6 +1014,9 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 		transfer.binaryAckWindows = 0
 		transfer.binaryLastAckAt = time.Now()
 	}
+	options := transferProgressOptions{chunkSize: chunkSize, windowSize: chunkCount, windowBytes: payloadLen, inFlightBytes: transfer.binaryAckBytes, ackTargetBytes: transfer.binaryAckTarget, diskWriteMs: diskWriteMs, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"}
+	e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", options)
+	transfer.lastProgress = transfer.received
 	transfer.windowChunks = 0
 	transfer.windowBytes = 0
 	return nil
@@ -1029,6 +1030,100 @@ func (e *Engine) parallelTransferForJoin(message wireMessage, senderID string) *
 		return nil
 	}
 	return transfer
+}
+
+// receiverInFlightBytesLocked reports bytes written by the receiver that have
+// not been included in its latest acknowledgement. Callers handling parallel
+// streams must hold transfer.parallelMu while reading the stream ranges.
+func receiverInFlightBytesLocked(transfer *incomingFile) int64 {
+	if transfer == nil {
+		return 0
+	}
+	if transfer.parallel {
+		var total int64
+		for _, stream := range transfer.parallelRanges {
+			if stream == nil || stream.received <= stream.acknowledged {
+				continue
+			}
+			total += stream.received - stream.acknowledged
+		}
+		if transfer.expected > 0 && total > transfer.expected {
+			return transfer.expected
+		}
+		return total
+	}
+	if transfer.binary {
+		if transfer.binaryAckBytes < 0 {
+			return 0
+		}
+		if transfer.expected > 0 && transfer.binaryAckBytes > transfer.expected {
+			return transfer.expected
+		}
+		return transfer.binaryAckBytes
+	}
+	if transfer.windowBytes < 0 {
+		return 0
+	}
+	if transfer.expected > 0 && transfer.windowBytes > transfer.expected {
+		return transfer.expected
+	}
+	return transfer.windowBytes
+}
+
+func parallelReceiverMetricsLocked(transfer *incomingFile) (inFlightBytes int64, activeStreams int) {
+	if transfer == nil {
+		return 0, 0
+	}
+	for _, stream := range transfer.parallelRanges {
+		if stream != nil && !stream.completed {
+			activeStreams++
+		}
+	}
+	return receiverInFlightBytesLocked(transfer), activeStreams
+}
+
+func receiverTransferMode(transfer *incomingFile) string {
+	if transfer == nil {
+		return ""
+	}
+	if transfer.parallel {
+		return parallelBinaryMode
+	}
+	if transfer.binary {
+		return binaryTransferMode
+	}
+	if transfer.windowed {
+		return jsonWindowTransferMode
+	}
+	return legacyTransferMode
+}
+
+func receiverProgressOptions(transfer *incomingFile, verified *bool) transferProgressOptions {
+	if transfer == nil {
+		return transferProgressOptions{verified: verified}
+	}
+	options := transferProgressOptions{
+		chunkSize:    transfer.chunkSize,
+		windowSize:   transfer.windowSize,
+		transferMode: receiverTransferMode(transfer),
+		tuningState:  "observing",
+		verified:     verified,
+	}
+	if transfer.parallel {
+		transfer.parallelMu.Lock()
+		options.windowBytes = 0
+		options.inFlightBytes, options.activeStreams = parallelReceiverMetricsLocked(transfer)
+		options.streamCount = transfer.parallelStreamCount
+		options.ackTargetBytes = parallelAckBytes
+		transfer.parallelMu.Unlock()
+	} else {
+		options.windowBytes = transfer.windowBytes
+		options.inFlightBytes = receiverInFlightBytesLocked(transfer)
+	}
+	if transfer.binary && !transfer.parallel {
+		options.ackTargetBytes = transfer.binaryAckTarget
+	}
+	return options
 }
 
 func (e *Engine) receiveParallelStream(reader *wireReader, conn net.Conn, hello wireMessage, join wireMessage) {
@@ -1123,6 +1218,7 @@ func (e *Engine) receiveParallelStream(reader *wireReader, conn net.Conn, hello 
 			state.completed = true
 		}
 		received := transfer.received
+		inFlightBytes, activeStreams := parallelReceiverMetricsLocked(transfer)
 		shouldEmit := time.Since(transfer.binaryLastAckAt) >= parallelProgressInterval || received == transfer.expected
 		if shouldEmit {
 			transfer.lastProgress = received
@@ -1130,7 +1226,7 @@ func (e *Engine) receiveParallelStream(reader *wireReader, conn net.Conn, hello 
 		}
 		transfer.parallelMu.Unlock()
 		if shouldEmit {
-			e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: join.ChunkSize, windowSize: join.StreamCount, windowBytes: int64(header.PayloadLen), diskWriteMs: diskWrite.Milliseconds(), transferMode: parallelBinaryMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)})
+			e.emitTransferProgress(transfer.messageID, transfer.attachmentID, transfer.senderID, received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: join.ChunkSize, windowSize: join.StreamCount, windowBytes: int64(header.PayloadLen), streamCount: join.StreamCount, activeStreams: activeStreams, streamID: join.StreamID, inFlightBytes: inFlightBytes, ackTargetBytes: parallelAckBytes, diskWriteMs: diskWrite.Milliseconds(), transferMode: parallelBinaryMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"})
 		}
 		if shouldAck || streamComplete {
 			status := "receiving"
@@ -1522,7 +1618,15 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		} else if hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode {
 			incomingMode = binaryTransferMode
 		}
-		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving", transferProgressOptions{chunkSize: message.ChunkSize, windowSize: message.WindowSize, windowBytes: message.WindowBytes, transferMode: incomingMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "probing"})
+		initialOptions := transferProgressOptions{chunkSize: message.ChunkSize, windowSize: message.WindowSize, windowBytes: message.WindowBytes, inFlightBytes: 0, transferMode: incomingMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"}
+		if parallelMode {
+			initialOptions.streamCount = message.StreamCount
+			if initialOptions.streamCount == 0 {
+				initialOptions.streamCount = parallelStreamCount(message.FileSize)
+			}
+			initialOptions.ackTargetBytes = parallelAckBytes
+		}
+		e.emitTransferProgress(messageRecord.MessageID, attachmentID, hello.DeviceID, 0, message.FileSize, "receive", "receiving", initialOptions)
 	case "file_thumbnail":
 		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
 		if thumbnailData == "" || message.AttachmentID == "" {
@@ -1594,11 +1698,13 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "FILE_SIZE_EXCEEDED"})
 			return
 		}
+		writeStarted := time.Now()
 		if _, err := transfer.writer.Write(data); err != nil {
 			e.failIncomingFile(message.AttachmentID, "INSUFFICIENT_STORAGE")
 			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
 			return
 		}
+		diskWriteDuration := time.Since(writeStarted)
 		if transfer.digest != nil {
 			_, _ = transfer.digest.Write(data)
 		}
@@ -1606,14 +1712,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		transfer.nextChunk++
 		transfer.windowChunks++
 		transfer.windowBytes += int64(len(data))
-		if transfer.received-transfer.lastProgress >= 256*1024 || (transfer.expected > 0 && transfer.received >= transfer.expected) {
-			mode := legacyTransferMode
-			if transfer.windowed {
-				mode = jsonWindowTransferMode
-			}
-			e.emitTransferProgress(transfer.messageID, message.AttachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: transfer.windowBytes, transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)})
-			transfer.lastProgress = transfer.received
-		}
+		shouldEmit := transfer.received-transfer.lastProgress >= 256*1024 || (transfer.expected > 0 && transfer.received >= transfer.expected)
+		progressWindowBytes := transfer.windowBytes
 		acknowledge := !transfer.windowed || transfer.windowChunks >= transfer.windowSize || (transfer.expected > 0 && transfer.received >= transfer.expected)
 		if acknowledge {
 			flushStarted := time.Now()
@@ -1622,7 +1722,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 				_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, Status: "failed", Reason: "INSUFFICIENT_STORAGE"})
 				return
 			}
-			diskWriteMs := time.Since(flushStarted).Milliseconds()
+			diskWriteDuration += time.Since(flushStarted)
+			diskWriteMs := diskWriteDuration.Milliseconds()
 			mode := legacyTransferMode
 			if transfer.windowed {
 				mode = jsonWindowTransferMode
@@ -1630,6 +1731,18 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			_ = sessionWrite(transfer.session, conn, wireMessage{Type: "file_progress", MessageID: transfer.messageID, AttachmentID: message.AttachmentID, FileSize: transfer.expected, Transferred: transfer.received, WindowID: transfer.windowID, WindowBytes: transfer.windowBytes, ChunkSize: transfer.chunkSize, WindowSize: transfer.windowSize, DiskWriteMs: diskWriteMs, TransferMode: mode, Status: "receiving"})
 			transfer.windowChunks = 0
 			transfer.windowBytes = 0
+		}
+		if shouldEmit {
+			mode := legacyTransferMode
+			if transfer.windowed {
+				mode = jsonWindowTransferMode
+			}
+			inFlightBytes := progressWindowBytes
+			if acknowledge {
+				inFlightBytes = 0
+			}
+			e.emitTransferProgress(transfer.messageID, message.AttachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "transferring", transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: progressWindowBytes, inFlightBytes: inFlightBytes, diskWriteMs: diskWriteDuration.Milliseconds(), transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"})
+			transfer.lastProgress = transfer.received
 		}
 	case "file_complete":
 		e.mu.RLock()
@@ -1836,7 +1949,7 @@ func (e *Engine) cancelIncomingFromRemote(attachmentID string, rejected bool) {
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, Status: status})
 		e.emitAttachmentStatus(transfer.messageID, status, "")
 		verified := false
-		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", status, transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: transfer.windowBytes, verified: &verified})
+		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", status, receiverProgressOptions(transfer, &verified))
 	}
 }
 
@@ -1864,7 +1977,7 @@ func (e *Engine) failIncomingFile(attachmentID, reason string) {
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "failed", transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": "failed", "reason": reason})
 	verified := false
-	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: transfer.windowBytes, verified: &verified})
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", receiverProgressOptions(transfer, &verified))
 }
 
 func closeParallelSessions(transfer *incomingFile) {
@@ -1969,7 +2082,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	}
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
-	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", map[bool]string{true: "completed", false: "failed"}[valid], transferProgressOptions{chunkSize: transfer.chunkSize, windowSize: transfer.windowSize, windowBytes: transfer.windowBytes, verified: &valid})
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", map[bool]string{true: "completed", false: "failed"}[valid], receiverProgressOptions(transfer, &valid))
 	if valid {
 		return "completed"
 	}
@@ -2062,7 +2175,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.windowSize > 0 {
 		value["windowSize"] = option.windowSize
 	}
-	if option.windowBytes > 0 {
+	if option.windowBytes > 0 || (direction == "receive" && option.transferMode != "") {
 		value["windowBytes"] = option.windowBytes
 	}
 	if option.streamCount > 0 {
@@ -2078,7 +2191,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.streamLength > 0 {
 		value["streamLength"] = option.streamLength
 	}
-	if option.inFlightBytes > 0 || option.transferMode == parallelBinaryMode {
+	if option.inFlightBytes > 0 || (direction == "receive" && option.transferMode != "") {
 		value["inFlightBytes"] = option.inFlightBytes
 	}
 	if option.ackTargetBytes > 0 {
@@ -2305,7 +2418,15 @@ func (e *Engine) AcceptIncomingAttachment(ctx context.Context, attachmentID, tar
 	} else if offer.binary {
 		mode = binaryTransferMode
 	}
-	e.emitTransferProgress(message.MessageID, attachmentID, offer.senderID, 0, attachment.FileSize, "receive", "receiving", transferProgressOptions{chunkSize: offer.chunkSize, windowSize: offer.windowSize, windowBytes: offer.windowBytes, transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "probing"})
+	initialOptions := transferProgressOptions{chunkSize: offer.chunkSize, windowSize: offer.windowSize, windowBytes: offer.windowBytes, inFlightBytes: 0, transferMode: mode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor), tuningState: "observing"}
+	if offer.parallel {
+		initialOptions.streamCount = offer.parallelStreamCount
+		if initialOptions.streamCount == 0 {
+			initialOptions.streamCount = parallelStreamCount(attachment.FileSize)
+		}
+		initialOptions.ackTargetBytes = parallelAckBytes
+	}
+	e.emitTransferProgress(message.MessageID, attachmentID, offer.senderID, 0, attachment.FileSize, "receive", "receiving", initialOptions)
 	return GetAttachment(ctx, attachmentID)
 }
 
@@ -2385,7 +2506,7 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 		_ = os.Remove(transfer.tempPath)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: transfer.attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, Status: "canceled"})
 		e.emitAttachmentStatus(transfer.messageID, "canceled", "")
-		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "canceled")
+		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "canceled", receiverProgressOptions(transfer, nil))
 		return nil
 	}
 	return fmt.Errorf("附件传输不存在")

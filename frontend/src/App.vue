@@ -61,6 +61,13 @@ onMounted(() => {
   document.getElementById('app-loading')?.remove();
   try {
     handlers = eventNames.map((name) => Events.On(name, (event: any) => chatStore.handleEvent(name, event?.data ?? event)));
+    handlers.push(Events.On('chat:file-drag-state', (event: any) => {
+      const payload = event?.data ?? event ?? {}
+      const active = Boolean(payload.active)
+      draggingFiles.value = active
+      dragDepth = active ? Math.max(dragDepth, 1) : 0
+      publishDragState(active)
+    }));
   } catch (error) {
     console.error('[FlyQPro] Wails 事件初始化失败', error);
   }

@@ -87,6 +87,28 @@ func main() {
 		CloseButtonState:    application.ButtonEnabled,
 		URL:                 "/",
 	})
+	removeFileDragHandlers := make([]func(), 0, 3)
+	if runtime.GOOS == "darwin" {
+		emitFileDragState := func(active bool) {
+			mainWindow.EmitEvent("chat:file-drag-state", map[string]any{"active": active})
+		}
+		removeFileDragHandlers = append(removeFileDragHandlers,
+			mainWindow.OnWindowEvent(events.Mac.WindowFileDraggingEntered, func(_ *application.WindowEvent) {
+				emitFileDragState(true)
+			}),
+			mainWindow.OnWindowEvent(events.Mac.WindowFileDraggingExited, func(_ *application.WindowEvent) {
+				emitFileDragState(false)
+			}),
+			mainWindow.OnWindowEvent(events.Mac.WindowFileDraggingPerformed, func(_ *application.WindowEvent) {
+				emitFileDragState(false)
+			}),
+		)
+	}
+	defer func() {
+		for _, remove := range removeFileDragHandlers {
+			remove()
+		}
+	}()
 	removeFileDropHandler := mainWindow.OnWindowEvent(events.Common.WindowFilesDropped, func(event *application.WindowEvent) {
 		paths := event.Context().DroppedFiles()
 		if len(paths) == 0 {

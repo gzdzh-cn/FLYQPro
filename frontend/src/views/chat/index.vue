@@ -57,13 +57,13 @@
         </div>
       </aside>
       <div class="vertical-resizer" @pointerdown="startResize('friends', $event)" title="调整列表宽度" />
-        <main class="conversation" v-if="activePeer" :style="{ '--composer-height': `${composerTotalHeight}px` }">
-          <header class="conversation-head">
+      <main class="conversation" v-if="activePeer" :style="{ '--composer-height': `${composerTotalHeight}px` }">
+        <header class="conversation-head">
           <div class="head-peer"><strong class="nickname-ellipsis">{{ activePeer.remark || activePeer.nickname }}</strong><span class="head-status" :class="{ onlineText: activePeer.online }"><i :class="{ online: activePeer.online }" />{{ activePeer.online ? '在线' : '离线' }} · {{ activePeer.platform }}</span></div>
           <a-button type="text" aria-label="好友资料" title="好友资料" @pointerdown.prevent.stop="togglePeerInfo" @keydown.enter.space.prevent="togglePeerInfo"><icon-more /></a-button>
         </header>
+        <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
-          <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
           <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
@@ -96,7 +96,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span class="attachment-pending-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !['awaiting_acceptance', 'completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
+                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance' }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
@@ -139,12 +139,13 @@
               <h4>网络调优</h4>
               <div class="attachment-details-grid">
                 <p><span>分块 / 窗口</span><strong>{{ detailProgress.chunkSize ? formatBytes(detailProgress.chunkSize) : '兼容模式' }} · {{ detailProgress.windowSize ? `${detailProgress.windowSize} 块` : '逐块确认' }}</strong></p>
-                <p><span>窗口数据量</span><strong>{{ detailProgress.windowBytes ? formatBytes(detailProgress.windowBytes) : '未提供' }}</strong></p>
-                <p><span>在途数据</span><strong>{{ detailProgress.inFlightBytes ? formatBytes(detailProgress.inFlightBytes) : '未提供' }}</strong></p>
-                <p><span>累计确认速度</span><strong>{{ detailProgress.confirmedThroughput ? `${formatSpeed(detailProgress.confirmedThroughput)}/S` : '正在测量' }}</strong></p>
+                <p><span>窗口数据量</span><strong>{{ detailProgress.windowBytes !== undefined ? formatMetricBytes(detailProgress.windowBytes) : '暂未提供' }}</strong></p>
+                <p><span>在途数据</span><strong>{{ detailProgress.inFlightBytes !== undefined ? formatMetricBytes(detailProgress.inFlightBytes) : (detailIsReceiver ? '接收端暂未提供' : '暂未提供') }}</strong></p>
+                <p><span>{{ detailIsReceiver ? '接收吞吐' : '累计确认速度' }}</span><strong class="attachment-details-rate"><span>{{ detailNetworkThroughput.primary }}</span><small v-if="detailNetworkThroughput.secondary">{{ detailNetworkThroughput.secondary }}</small></strong></p>
                 <p><span>确认批量</span><strong>{{ detailProgress.ackTargetBytes ? formatBytes(detailProgress.ackTargetBytes) : '逐窗口确认' }}</strong></p>
-                <p><span>确认延迟</span><strong>{{ detailProgress.ackLatencyMs ? `${detailProgress.ackLatencyMs} ms` : '正在测量' }}</strong></p>
-                <p><span>调优状态</span><strong>{{ tuningStateLabel(detailProgress.tuningState) }}</strong></p>
+                <p><span>确认延迟</span><strong>{{ detailAckLatency }}</strong></p>
+                <p><span>调优状态</span><strong>{{ detailTuningState }}</strong></p>
+                <p><span>写盘耗时</span><strong>{{ detailProgress.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : '正在测量' }}</strong></p>
                 <p><span>通道 / 模式</span><strong>{{ detailProgress.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress.transferMode) }}</strong></p>
                 <p v-if="detailProgress.streamCount"><span>并行数据流</span><strong>{{ detailProgress.activeStreams || detailProgress.streamCount }} / {{ detailProgress.streamCount }} 路</strong></p>
               </div>
@@ -1070,9 +1071,10 @@ function attachmentNeedsDecision(message: any): boolean { return message?.sender
 function attachmentAwaitingAcceptance(message: any): boolean {
   if (message?.senderDeviceId !== deviceInfo.value?.deviceId || !['pending', 'preparing_thumbnail'].includes(message?.attachmentStatus)) return false
   const progress = transferProgressFor(message)
-  return !progress || ['preparing_thumbnail', 'awaiting_acceptance'].includes(progress.phase)
+  return !progress || progress.phase === 'preparing_thumbnail'
 }
 function formatBytes(value: number) { if (!value) return '未知大小'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+function formatMetricBytes(value: number) { return value === 0 ? '0 B' : formatBytes(value) }
 function formatSpeed(value: number) {
   const bytes = Math.max(0, Number(value || 0))
   if (!bytes) return '0 B'
@@ -1097,9 +1099,13 @@ const detailProgressAverageSpeed = computed(() => formatTransferRate(detailProgr
 const detailProgressPeakSpeed = computed(() => formatTransferRate(detailProgress.value?.peakSpeed))
 const detailProgressEta = computed(() => detailProgress.value?.etaSeconds ? formatDuration(detailProgress.value.etaSeconds * 1000) : '暂不可估算')
 const detailProgressElapsed = computed(() => formatDuration(detailProgress.value?.elapsedMs))
+const detailIsReceiver = computed(() => detailProgress.value?.direction === 'receive')
+const detailNetworkThroughput = computed(() => detailIsReceiver.value ? detailProgressSpeed.value : formatTransferRate(detailProgress.value?.confirmedThroughput))
+const detailAckLatency = computed(() => detailIsReceiver.value ? '接收端不适用' : (detailProgress.value?.ackLatencyMs ? `${detailProgress.value.ackLatencyMs} ms` : '正在测量'))
+const detailTuningState = computed(() => detailIsReceiver.value ? '接收端监测' : tuningStateLabel(detailProgress.value?.tuningState))
 function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || phase || '未知' }
 function transferDirectionLabel(direction?: string) { return ({ send: '发送', receive: '接收', 'remote-receive': '对方接收' } as Record<string, string>)[direction || ''] || direction || '未知' }
-function tuningStateLabel(state?: string) { return ({ probing: '探测中', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
+function tuningStateLabel(state?: string) { return ({ probing: '探测中', observing: '接收端监测', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
 const terminalTransferPhases = new Set(['completed', 'canceled', 'rejected', 'failed'])
 function transferProgressFor(message: any): any {
@@ -1146,6 +1152,7 @@ function transferProgressPercent(message: any): number {
 }
 function transferSpeedLabel(message: any): string {
   const progress = transferProgressFor(message)
+  if (progress?.phase === 'awaiting_acceptance') return '等待对方接收'
   return progress?.speed ? `${formatSpeed(progress.speed)}/S` : '正在测量'
 }
 function transferProgressLabel(message: any): string {
@@ -1162,10 +1169,12 @@ function transferProgressLabel(message: any): string {
 }
 function transferElapsedLabel(message: any): string {
   const progress = transferProgressFor(message)
+  if (progress?.phase === 'awaiting_acceptance') return '等待接收'
   return progress?.elapsedMs ? formatDuration(progress.elapsedMs) : '正在测量'
 }
 function transferEtaLabel(message: any): string {
   const progress = transferProgressFor(message)
+  if (progress?.phase === 'awaiting_acceptance') return '接收后开始'
   return progress?.etaSeconds ? formatDuration(progress.etaSeconds * 1000) : '暂不可估算'
 }
 function imageTransferActive(message: any): boolean {
@@ -1178,7 +1187,7 @@ function transferDetailsActionVisible(message: any): boolean {
   if (isImageMessage(message)) {
     return !attachmentCompletedLocal(message) && !imageTransferActive(message) && !attachmentAwaitingAcceptance(message)
   }
-  return ['awaiting_acceptance', 'failed', 'canceled', 'rejected'].includes(progress.phase)
+  return ['failed', 'canceled', 'rejected'].includes(progress.phase)
 }
 function imageProgressRingStyle(message: any) {
   return { '--progress': `${transferProgressPercent(message)}%` }
@@ -1581,18 +1590,18 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .conversation-file-drop-indicator {
   position: absolute;
   z-index: 30;
-  inset: 0;
+  inset: 52px 0 0;
   display: grid;
   place-items: center;
   pointer-events: none;
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   animation: conversation-file-drop-fade-in .16s ease-out;
 }
 .conversation-file-drop-indicator::before {
   content: '';
   position: absolute;
   inset: 14px;
-  border: 2px dashed color-mix(in srgb, var(--accent) 72%, transparent);
+  border: 3px dashed color-mix(in srgb, var(--accent) 90%, transparent);
   border-radius: 18px;
   animation: conversation-file-drop-pulse 1.1s ease-in-out infinite;
 }
@@ -1607,10 +1616,10 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
   flex-direction: column;
   align-items: center;
   gap: 7px;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
   border-radius: 14px;
   background: color-mix(in srgb, var(--surface-1) 92%, var(--accent));
-  box-shadow: 0 14px 45px rgba(30, 71, 150, .18);
+  box-shadow: 0 18px 54px rgba(30, 71, 150, .28);
   color: var(--text);
 }
 .conversation-file-drop-icon {
@@ -1628,7 +1637,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .conversation-file-drop-card strong { font-size: 16px; }
 .conversation-file-drop-card small { color: var(--muted); font-size: 12px; }
 @keyframes conversation-file-drop-fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes conversation-file-drop-pulse { 0%, 100% { opacity: .45; transform: scale(1); } 50% { opacity: 1; transform: scale(1.008); } }
+@keyframes conversation-file-drop-pulse { 0%, 100% { opacity: .65; transform: scale(1); } 50% { opacity: 1; transform: scale(1.008); } }
 @keyframes conversation-file-drop-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 .message-line.is-selected .message-bubble { outline: 2px solid #3767e8; outline-offset: 3px; }
 .message-bubble.is-favorite::before { content: '★'; position: absolute; right: -18px; top: -8px; color: #ffb400; font-size: 13px; }

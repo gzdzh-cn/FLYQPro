@@ -229,6 +229,45 @@ func TestLastTransferBytesKeepsTerminalRemoteConfirmation(t *testing.T) {
 	}
 }
 
+func TestReceiverProgressMetricsClampAndAggregate(t *testing.T) {
+	binary := &incomingFile{binary: true, expected: 100, binaryAckBytes: 28}
+	if got := receiverInFlightBytesLocked(binary); got != 28 {
+		t.Fatalf("binary receiver in-flight bytes = %d, want 28", got)
+	}
+	binary.binaryAckBytes = -1
+	if got := receiverInFlightBytesLocked(binary); got != 0 {
+		t.Fatalf("negative binary receiver in-flight bytes = %d, want 0", got)
+	}
+	binary.binaryAckBytes = 200
+	if got := receiverInFlightBytesLocked(binary); got != 100 {
+		t.Fatalf("binary receiver in-flight bytes exceeded file size: %d", got)
+	}
+
+	window := &incomingFile{expected: 100, windowBytes: 24}
+	if got := receiverInFlightBytesLocked(window); got != 24 {
+		t.Fatalf("window receiver in-flight bytes = %d, want 24", got)
+	}
+	window.windowBytes = 200
+	if got := receiverInFlightBytesLocked(window); got != 100 {
+		t.Fatalf("window receiver in-flight bytes exceeded file size: %d", got)
+	}
+
+	parallel := &incomingFile{parallel: true, expected: 100, parallelRanges: map[int]*parallelRange{
+		0: {received: 40, acknowledged: 16, completed: false},
+		1: {received: 35, acknowledged: 35, completed: true},
+		2: {received: 30, acknowledged: 0, completed: false},
+	}}
+	inFlight, active := parallelReceiverMetricsLocked(parallel)
+	if inFlight != 54 || active != 2 {
+		t.Fatalf("parallel receiver metrics = (%d, %d), want (54, 2)", inFlight, active)
+	}
+	parallel.parallelRanges[2].received = 100
+	inFlight, _ = parallelReceiverMetricsLocked(parallel)
+	if inFlight != 100 {
+		t.Fatalf("parallel receiver in-flight bytes exceeded file size: %d", inFlight)
+	}
+}
+
 func TestSubnetHostTargetsIncludesPeerAndExcludesLocalAndBroadcast(t *testing.T) {
 	_, subnet, err := net.ParseCIDR("192.168.43.4/24")
 	if err != nil {
