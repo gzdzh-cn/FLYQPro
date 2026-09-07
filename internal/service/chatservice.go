@@ -1918,12 +1918,7 @@ func (s *ChatService) EnsureConversation(deviceID string) (string, error) {
 	return chat.EnsureConversation(gctx.New(), deviceID)
 }
 
-type conversationFileMove struct {
-	source string
-	target string
-}
-
-func (s *ChatService) ClearConversation(deviceID string) (chat.ClearConversationResult, error) {
+func (s *ChatService) ClearConversation(deviceID string, deleteLocalFiles bool) (chat.ClearConversationResult, error) {
 	var result chat.ClearConversationResult
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
@@ -1938,91 +1933,81 @@ func (s *ChatService) ClearConversation(deviceID string) (chat.ClearConversation
 
 	ctx := gctx.New()
 	s.engine.CancelIncomingForPeer(deviceID)
-	attachments, err := chat.ListConversationAttachments(ctx, deviceID)
-	if err != nil {
-		return result, err
-	}
-	profile, err := chat.GetProfile(ctx)
-	if err != nil {
-		return result, err
-	}
-	roots := []string{profile.FileSavePath, chat.DefaultAttachmentDir(), filepath.Join(chat.AppDataDir(), "temp")}
-	trashRoot := filepath.Join(chat.AppDataDir(), "temp", "chat-clear", fmt.Sprintf("%d", time.Now().UnixNano()))
-	moves := make([]conversationFileMove, 0, len(attachments))
-	seen := make(map[string]struct{}, len(attachments))
-	rollback := func() {
-		for index := len(moves) - 1; index >= 0; index-- {
-			move := moves[index]
-			if _, statErr := os.Stat(move.target); statErr == nil {
-				_ = os.MkdirAll(filepath.Dir(move.source), 0o700)
-				_ = os.Rename(move.target, move.source)
-			}
-		}
-		_ = os.RemoveAll(trashRoot)
-	}
-
-	for _, item := range attachments {
-		path := strings.TrimSpace(item.LocalPath)
-		if path == "" {
-			continue
-		}
-		// The sender's path is the user's original file, not an application
-		// copy. Never remove it as part of clearing local chat history.
-		if item.SenderDeviceID == s.engine.DeviceInfo().DeviceID {
-			result.SkippedExternalFiles++
-			continue
-		}
-		managed := false
-		for _, root := range roots {
-			if chat.IsPathWithin(path, root) {
-				managed = true
-				break
-			}
-		}
-		if !managed {
-			result.SkippedExternalFiles++
-			continue
-		}
-		cleanPath, absErr := filepath.Abs(path)
-		if absErr != nil {
-			rollback()
-			return result, absErr
-		}
-		if _, already := seen[cleanPath]; already {
-			continue
-		}
-		seen[cleanPath] = struct{}{}
-		if _, statErr := os.Stat(cleanPath); os.IsNotExist(statErr) {
-			continue
-		} else if statErr != nil {
-			rollback()
-			return result, statErr
-		}
-		if err := os.MkdirAll(trashRoot, 0o700); err != nil {
-			rollback()
+	var attachments []chat.ConversationAttachment
+	var roots []string
+	if deleteLocalFiles {
+		var err error
+		attachments, err = chat.ListConversationAttachments(ctx, deviceID)
+		if err != nil {
 			return result, err
 		}
-		target := filepath.Join(trashRoot, fmt.Sprintf("%04d-%s", len(moves), filepath.Base(cleanPath)))
-		if err := os.Rename(cleanPath, target); err != nil {
-			rollback()
-			return result, fmt.Errorf("暂存附件失败: %w", err)
+		profile, err := chat.GetProfile(ctx)
+		if err != nil {
+			return result, err
 		}
-		moves = append(moves, conversationFileMove{source: cleanPath, target: target})
-		result.DeletedFiles++
+		roots = []string{profile.FileSavePath, chat.DefaultAttachmentDir(), filepath.Join(chat.AppDataDir(), "temp")}
 	}
 
 	deletedMessages, deletedAttachments, err := chat.DeleteConversationRecords(ctx, deviceID)
 	if err != nil {
-		rollback()
-		return chat.ClearConversationResult{}, err
+		return result, err
 	}
 	result.DeletedMessages = deletedMessages
 	result.DeletedAttachments = deletedAttachments
-	_ = os.RemoveAll(trashRoot)
+	if deleteLocalFiles {
+		seen := make(map[string]struct{}, len(attachments))
+		localDeviceID := s.engine.DeviceInfo().DeviceID
+		for _, item := range attachments {
+			path := strings.TrimSpace(item.LocalPath)
+			if path == "" {
+				continue
+			}
+			// A sender's path points to the user's original file. It is never an
+			// application-managed receive copy and must remain untouched.
+			if item.SenderDeviceID == localDeviceID || item.Status == "sent" {
+				result.SkippedExternalFiles++
+				continue
+			}
+			managed := false
+			for _, root := range roots {
+				if chat.IsPathWithin(path, root) {
+					managed = true
+					break
+				}
+			}
+			if !managed {
+				result.SkippedExternalFiles++
+				continue
+			}
+			cleanPath, absErr := filepath.Abs(path)
+			if absErr != nil {
+				result.SkippedLocalFiles++
+				continue
+			}
+			if _, already := seen[cleanPath]; already {
+				continue
+			}
+			seen[cleanPath] = struct{}{}
+			info, statErr := os.Lstat(cleanPath)
+			if os.IsNotExist(statErr) {
+				result.SkippedLocalFiles++
+				continue
+			}
+			if statErr != nil || info.IsDir() {
+				result.SkippedLocalFiles++
+				continue
+			}
+			if removeErr := os.Remove(cleanPath); removeErr != nil {
+				result.SkippedLocalFiles++
+				continue
+			}
+			result.DeletedFiles++
+		}
+	}
 	return result, nil
 }
 
-func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
+func (s *ChatService) HideFriendAndClearLocalData(deviceID string, deleteLocalFiles bool) error {
 	deviceID = strings.TrimSpace(deviceID)
 	if err := s.requireFriend(deviceID); err != nil {
 		return err
@@ -2037,7 +2022,7 @@ func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
 	}
 	for _, peer := range peers {
 		if peer.DeviceID == deviceID && peer.FriendshipState == "removed" {
-			_, clearErr := s.ClearConversation(deviceID)
+			_, clearErr := s.ClearConversation(deviceID, deleteLocalFiles)
 			if clearErr != nil {
 				return clearErr
 			}
@@ -2055,7 +2040,7 @@ func (s *ChatService) HideFriendAndClearLocalData(deviceID string) error {
 			break
 		}
 	}
-	if _, err := s.ClearConversation(deviceID); err != nil {
+	if _, err := s.ClearConversation(deviceID, deleteLocalFiles); err != nil {
 		return err
 	}
 	conversationID, err := chat.EnsureConversation(gctx.New(), deviceID)

@@ -41,6 +41,11 @@ func TestClearConversationRemovesManagedFilesAndKeepsOtherPeers(t *testing.T) {
 	if err := chat.SaveMessage(ctx, chat.Message{MessageID: "clear-a-file", ConversationID: conversationA, SenderDeviceID: "peer-a", Kind: "file", Content: "photo.png", Status: "sent", CreatedAt: "2026-01-01T00:00:01Z"}); err != nil {
 		t.Fatal(err)
 	}
+	engine := chat.NewEngine()
+	localDeviceID := engine.DeviceInfo().DeviceID
+	if err := chat.SaveMessage(ctx, chat.Message{MessageID: "clear-a-source", ConversationID: conversationA, SenderDeviceID: localDeviceID, Kind: "file", Content: "source.bin", Status: "sent", CreatedAt: "2026-01-01T00:00:01Z"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := chat.SaveMessage(ctx, chat.Message{MessageID: "keep-b-text", ConversationID: conversationB, SenderDeviceID: "peer-b", Kind: "text", Content: "keep", Status: "sent", CreatedAt: "2026-01-01T00:00:02Z"}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +57,11 @@ func TestClearConversationRemovesManagedFilesAndKeepsOtherPeers(t *testing.T) {
 	if err := os.WriteFile(managedPath, []byte("received"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	sourcePath := filepath.Join(attachmentRoot, "peer-a", "source.bin")
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(attachmentRoot, "peer-a", "missing.bin")
 	externalPath := filepath.Join(root, "original.png")
 	if err := os.WriteFile(externalPath, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
@@ -62,11 +72,20 @@ func TestClearConversationRemovesManagedFilesAndKeepsOtherPeers(t *testing.T) {
 	if err := chat.SaveAttachment(ctx, chat.Attachment{AttachmentID: "clear-external", MessageID: "clear-a-file", FileName: "original.png", FileSize: 8, LocalPath: externalPath, Status: "sent"}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (&ChatService{engine: chat.NewEngine()}).ClearConversation("peer-a")
+	if err := chat.SaveAttachment(ctx, chat.Attachment{AttachmentID: "clear-source", MessageID: "clear-a-source", FileName: "source.bin", FileSize: 6, LocalPath: sourcePath, Status: "sent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.SaveMessage(ctx, chat.Message{MessageID: "clear-a-missing", ConversationID: conversationA, SenderDeviceID: "peer-a", Kind: "file", Content: "missing.bin", Status: "sent", CreatedAt: "2026-01-01T00:00:02Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.SaveAttachment(ctx, chat.Attachment{AttachmentID: "clear-missing", MessageID: "clear-a-missing", FileName: "missing.bin", FileSize: 7, LocalPath: missingPath, Status: "saved"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&ChatService{engine: engine}).ClearConversation("peer-a", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeletedMessages != 2 || result.DeletedAttachments != 2 || result.DeletedFiles != 1 || result.SkippedExternalFiles != 1 {
+	if result.DeletedMessages != 4 || result.DeletedAttachments != 4 || result.DeletedFiles != 1 || result.SkippedExternalFiles != 2 || result.SkippedLocalFiles != 1 {
 		t.Fatalf("unexpected clear result: %+v", result)
 	}
 	if _, err := os.Stat(managedPath); !os.IsNotExist(err) {
@@ -75,11 +94,64 @@ func TestClearConversationRemovesManagedFilesAndKeepsOtherPeers(t *testing.T) {
 	if _, err := os.Stat(externalPath); err != nil {
 		t.Fatalf("external original was removed: %v", err)
 	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("sender source was removed: %v", err)
+	}
 	if messages, err := chat.ListMessages(ctx, conversationA); err != nil || len(messages) != 0 {
 		t.Fatalf("cleared conversation still has messages: %d, %v", len(messages), err)
 	}
 	if messages, err := chat.ListMessages(ctx, conversationB); err != nil || len(messages) != 1 {
 		t.Fatalf("other conversation changed: %d, %v", len(messages), err)
+	}
+}
+
+func TestClearConversationCanKeepReceivedFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
+	t.Setenv("FLYQPRO_DATA_DIR", filepath.Join(root, "data"))
+	if err := db.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	ctx := context.Background()
+	if err := chat.EnsureDataDirs(); err != nil {
+		t.Fatal(err)
+	}
+	attachmentRoot := filepath.Join(root, "attachments")
+	if err := chat.EnsureDefaults(ctx, attachmentRoot); err != nil {
+		t.Fatal(err)
+	}
+	conversationID, err := chat.EnsureConversation(ctx, "peer-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := "keep-received-message"
+	attachmentID := "keep-received-attachment"
+	if err := chat.SaveMessage(ctx, chat.Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: "peer-keep", Kind: "file", Content: "received.bin", Status: "saved", CreatedAt: "2026-01-01T00:00:00Z", AttachmentID: attachmentID, AttachmentName: "received.bin", AttachmentSize: 8, AttachmentStatus: "saved"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(attachmentRoot, "peer-keep", "received.bin")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("received"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.SaveAttachment(ctx, chat.Attachment{AttachmentID: attachmentID, MessageID: messageID, FileName: "received.bin", FileSize: 8, LocalPath: path, Status: "saved"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&ChatService{engine: chat.NewEngine()}).ClearConversation("peer-keep", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedMessages != 1 || result.DeletedAttachments != 1 || result.DeletedFiles != 0 {
+		t.Fatalf("unexpected clear result: %+v", result)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("received file was removed despite keeping local files: %v", err)
+	}
+	if messages, err := chat.ListMessages(ctx, conversationID); err != nil || len(messages) != 0 {
+		t.Fatalf("chat records were not cleared: %d, %v", len(messages), err)
 	}
 }
 
@@ -112,7 +184,7 @@ func TestHideFriendAndClearLocalDataKeepsFriendshipAndConversation(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if err := (&ChatService{engine: chat.NewEngine()}).HideFriendAndClearLocalData("peer-hide"); err != nil {
+	if err := (&ChatService{engine: chat.NewEngine()}).HideFriendAndClearLocalData("peer-hide", false); err != nil {
 		t.Fatal(err)
 	}
 	peers, err := chat.ListPeers(ctx, chat.PeerRelation)

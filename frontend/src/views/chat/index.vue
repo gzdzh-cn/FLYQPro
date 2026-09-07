@@ -23,7 +23,7 @@
         <div class="info-head"><strong>好友资料</strong></div>
         <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3 class="nickname-ellipsis">{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
         <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>通讯协议<strong>{{ activePeer.protocolName || '未知' }}<template v-if="activePeer.protocolMajor">/{{ activePeer.protocolMajor }}.0</template></strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
-        <div class="info-danger"><a-button status="danger" long :loading="clearingConversation" @click="clearCurrentConversation">清除聊天记录</a-button><span>只清除本机消息和接收的附件，不会删除好友关系。</span></div>
+        <div class="info-danger"><a-button status="danger" long :loading="clearingConversation" @click="clearCurrentConversation">清除聊天记录</a-button><span>只清除本机消息，可选择删除接收的附件，不会删除发送源文件和好友关系。</span></div>
       </aside>
     </Transition>
     <a-modal v-model:visible="selfAvatarPreviewVisible" title="我的资料" :footer="false" modal-class="avatar-preview-modal">
@@ -163,6 +163,17 @@
             </div>
           </div>
         </a-modal>
+        <a-modal v-model:visible="clearConversationVisible" title="清除聊天记录" :footer="false" :mask-closable="false" modal-class="clear-conversation-modal" @cancel="closeClearConversation">
+          <div v-if="clearConversationPeer" class="clear-conversation-content">
+            <p>确定清除与“{{ clearConversationPeer.remark || clearConversationPeer.nickname }}”的全部本地聊天记录吗？</p>
+            <p class="clear-conversation-hint">发送方发送文件时使用的本地源文件始终保留。</p>
+            <div class="clear-conversation-actions">
+              <a-button :disabled="clearingConversation" @click="closeClearConversation">取消</a-button>
+              <a-button :disabled="clearingConversation" @click="confirmClearConversation(false)">仅删除记录</a-button>
+              <a-button status="danger" :loading="clearingConversation" @click="confirmClearConversation(true)">删除记录和接收文件</a-button>
+            </div>
+          </div>
+        </a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :class="{ 'composer-disabled': !activePeerCanSend }" :style="{ height: `${composerTotalHeight}px` }">
           <div class="composer-tools"><button class="emoji-toggle" title="表情" :disabled="!activePeerCanSend" @mousedown.prevent.stop="emojiOpen = !emojiOpen" @keydown.enter.space.prevent="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" :disabled="!activePeerCanSend" @mousedown.prevent.stop="pickFile" @keydown.enter.space.prevent="pickFile"><icon-folder /></button><button title="打开好友共享盘" :disabled="!activePeerCanSend" @mousedown.prevent.stop="openFriendSharedDrive" @keydown.enter.space.prevent="openFriendSharedDrive"><icon-cloud /></button></div>
@@ -184,6 +195,7 @@
       <div v-if="deleteConfirm.visible && deleteConfirm.kind === 'hide' && deleteConfirm.peer" class="delete-confirm-popover" :style="deleteConfirmStyle" @click.stop @pointerdown.stop>
         <strong>隐藏“<span class="nickname-ellipsis-inline">{{ deleteConfirm.peer.remark || deleteConfirm.peer.nickname }}</span>”</strong>
         <p>仅隐藏本机好友列表并清除本机聊天记录，不会删除好友关系。对方再次发送文字消息时，会重新显示在列表中。</p>
+        <a-checkbox v-model="deleteConfirm.deleteLocalFiles" class="delete-local-files-option">同时删除接收方保存的本地文件</a-checkbox>
         <div class="delete-confirm-actions"><button @click="closeDeleteConfirm">取消</button><button class="danger" @click="confirmPendingDelete">确认删除</button></div>
       </div>
     </section>
@@ -331,6 +343,8 @@ const retryingMessages = reactive<Record<string, boolean>>({})
 const attachmentActions = reactive<Record<string, boolean>>({})
 const peerRemark = ref('')
 const clearingConversation = ref(false)
+const clearConversationVisible = ref(false)
+const clearConversationPeer = ref<Peer>()
 const messageScroll = ref<HTMLElement>()
 const newMessageCount = ref(0)
 const userNearBottom = ref(true)
@@ -339,7 +353,7 @@ const scanning = ref(false)
 const messageMenu = reactive<{ visible: boolean; x: number; y: number; message?: ChatMessage }>({ visible: false, x: 0, y: 0 })
 const peerMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
 const contactMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
-const deleteConfirm = reactive<{ visible: boolean; kind: 'hide' | 'remove'; x: number; y: number; peer?: Peer }>({ visible: false, kind: 'hide', x: 0, y: 0 })
+const deleteConfirm = reactive<{ visible: boolean; kind: 'hide' | 'remove'; x: number; y: number; peer?: Peer; deleteLocalFiles: boolean }>({ visible: false, kind: 'hide', x: 0, y: 0, deleteLocalFiles: false })
 const selectionMode = ref(false)
 const selectedMessageIds = reactive(new Set<string>())
 const attachmentDetailsVisible = ref(false)
@@ -595,37 +609,41 @@ async function restoreChatScrollPosition(deviceId: string) {
 function clearCurrentConversation() {
   const peer = activePeer.value
   if (!peer || clearingConversation.value) return
-  Modal.confirm({
-    title: '清除聊天记录',
-    content: `确定清除与“${peer.remark || peer.nickname}”的全部本地聊天记录、图片和文件吗？此操作不可恢复，但不会删除好友关系。`,
-    okText: '清除记录',
-    cancelText: '取消',
-    okButtonProps: { status: 'danger' },
-    onOk: async () => {
-      if (clearingConversation.value) return
-      clearingConversation.value = true
-      const peerDeviceId = peer.deviceId
-      try {
-        const result = await ChatService.ClearConversation(peerDeviceId)
-        const removedMessages = store.clearConversationLocal(peerDeviceId)
-        removedMessages.forEach((message: any) => {
-          delete messagePreviews[message.messageId]
-          if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId]; delete store.transferProgressByDirection[message.attachmentId]; delete store.transferHistoryByDirection[message.attachmentId] }
-        })
-        newMessageCount.value = 0
-        userNearBottom.value = true
-        localStorage.removeItem(chatScrollKey(peerDeviceId))
-        showPeerInfo.value = false
-        const skipped = result?.skippedExternalFiles ? `，保留 ${result.skippedExternalFiles} 个本机原始文件` : ''
-        Message.success(`聊天记录已清除${skipped}`)
-      } catch (error: any) {
-        Message.error(error?.message || '清除聊天记录失败')
-        throw error
-      } finally {
-        clearingConversation.value = false
-      }
-    },
-  })
+  clearConversationPeer.value = peer
+  clearConversationVisible.value = true
+}
+function closeClearConversation() {
+  if (clearingConversation.value) return
+  clearConversationVisible.value = false
+  clearConversationPeer.value = undefined
+}
+async function confirmClearConversation(deleteLocalFiles: boolean) {
+  const peer = clearConversationPeer.value
+  if (!peer || clearingConversation.value) return
+  clearConversationVisible.value = false
+  clearingConversation.value = true
+  const peerDeviceId = peer.deviceId
+  try {
+    const result = await ChatService.ClearConversation(peerDeviceId, deleteLocalFiles)
+    const removedMessages = store.clearConversationLocal(peerDeviceId)
+    removedMessages.forEach((message: any) => {
+      delete messagePreviews[message.messageId]
+      if (message.attachmentId) { delete store.transferProgress[message.attachmentId]; delete store.transferHistory[message.attachmentId]; delete store.transferProgressByDirection[message.attachmentId]; delete store.transferHistoryByDirection[message.attachmentId] }
+    })
+    newMessageCount.value = 0
+    userNearBottom.value = true
+    localStorage.removeItem(chatScrollKey(peerDeviceId))
+    showPeerInfo.value = false
+    clearConversationPeer.value = undefined
+    const notices = []
+    if (result?.skippedExternalFiles) notices.push(`保留 ${result.skippedExternalFiles} 个发送源文件或外部文件`)
+    if (result?.skippedLocalFiles) notices.push(`跳过 ${result.skippedLocalFiles} 个本地文件`)
+    Message.success(`聊天记录已清除${notices.length ? `，${notices.join('，')}` : ''}`)
+  } catch (error: any) {
+    Message.error(error?.message || '清除聊天记录失败')
+  } finally {
+    clearingConversation.value = false
+  }
 }
 async function settleChatBottom(deviceId: string) {
   const token = ++bottomSettleToken
@@ -1217,7 +1235,7 @@ const deleteConfirmStyle = computed(() => ({ left: `${deleteConfirm.x}px`, top: 
 function closeMessageMenu() { messageMenu.visible = false; messageMenu.message = undefined }
 function closePeerMenu() { peerMenu.visible = false; peerMenu.peer = undefined }
 function closeContactMenu() { contactMenu.visible = false; contactMenu.peer = undefined }
-function closeDeleteConfirm() { deleteConfirm.visible = false; deleteConfirm.peer = undefined }
+function closeDeleteConfirm() { deleteConfirm.visible = false; deleteConfirm.peer = undefined; deleteConfirm.deleteLocalFiles = false }
 function closeAllContextMenus() {
   closeMessageMenu()
   closePeerMenu()
@@ -1279,6 +1297,7 @@ function requestHidePeerDelete(peer: Peer) {
   closePeerMenu()
   deleteConfirm.kind = 'hide'
   deleteConfirm.peer = peer
+  deleteConfirm.deleteLocalFiles = false
   deleteConfirm.x = Math.min(x, Math.max(8, window.innerWidth - 330))
   deleteConfirm.y = Math.min(y, Math.max(8, window.innerHeight - 190))
   deleteConfirm.visible = true
@@ -1289,6 +1308,7 @@ function requestRemoveContact(peer: Peer) {
   closeContactMenu()
   deleteConfirm.kind = 'remove'
   deleteConfirm.peer = peer
+  deleteConfirm.deleteLocalFiles = false
   deleteConfirm.x = Math.min(x, Math.max(8, window.innerWidth - 330))
   deleteConfirm.y = Math.min(y, Math.max(8, window.innerHeight - 190))
   deleteConfirm.visible = true
@@ -1328,10 +1348,11 @@ function hidePeerAndClear(peer: Peer) { requestHidePeerDelete(peer) }
 async function confirmPendingDelete() {
   const peer = deleteConfirm.peer
   const kind = deleteConfirm.kind
+  const deleteLocalFiles = deleteConfirm.deleteLocalFiles
   closeDeleteConfirm()
   if (!peer) return
   try {
-    if (kind === 'hide') await ChatService.HideFriendAndClearLocalData(peer.deviceId)
+    if (kind === 'hide') await ChatService.HideFriendAndClearLocalData(peer.deviceId, deleteLocalFiles)
     else await ChatService.RemoveFriendAndClearLocalData(peer.deviceId)
     if (kind === 'hide') {
       for (const message of store.messages[`conv-${peer.deviceId}`] || []) {
@@ -2417,12 +2438,17 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .delete-confirm-popover { position: fixed; z-index: 10000; width: min(310px, calc(100vw - 24px)); box-sizing: border-box; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); color: var(--text); box-shadow: 0 14px 34px rgba(20, 30, 60, .25); }
 .delete-confirm-popover strong { display: block; font-size: 13px; }
 .delete-confirm-popover p { margin: 9px 0 13px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.delete-local-files-option { display: flex; margin: 0 0 13px; color: var(--text); font-size: 12px; }
 .delete-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .delete-confirm-actions button { border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 12px; }
 .delete-confirm-actions button:hover { background: var(--hover); }
 .delete-confirm-actions button.danger { border-color: color-mix(in srgb, #f53f3f 40%, var(--line)); background: #f53f3f; color: #fff; }
 .chat-app.theme-dark .contact-context-menu,
 .chat-app.theme-dark .delete-confirm-popover { background: #253249; color: #e5e7eb; border-color: #465875; box-shadow: 0 16px 38px rgba(0, 0, 0, .48); }
+.clear-conversation-content p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.55; }
+.clear-conversation-content .clear-conversation-hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.clear-conversation-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+.clear-conversation-actions :deep(.arco-btn) { margin: 0; }
 
 @keyframes message-enter {
   from { opacity: 0; transform: translateY(5px) scale(.99); }

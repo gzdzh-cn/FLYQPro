@@ -173,6 +173,7 @@ type ClearConversationResult struct {
 	DeletedAttachments   int `json:"deletedAttachments"`
 	DeletedFiles         int `json:"deletedFiles"`
 	SkippedExternalFiles int `json:"skippedExternalFiles"`
+	SkippedLocalFiles    int `json:"skippedLocalFiles"`
 }
 
 type AttachmentMigrationResult struct {
