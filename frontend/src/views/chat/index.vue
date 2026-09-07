@@ -21,8 +21,10 @@
     <Transition name="peer-info">
       <aside v-if="showPeerInfo && activePeer" class="info-pane info-overlay" @click.stop>
         <div class="info-head"><strong>好友资料</strong></div>
-        <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3 class="nickname-ellipsis">{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
-        <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>通讯协议<strong>{{ activePeer.protocolName || '未知' }}<template v-if="activePeer.protocolMajor">/{{ activePeer.protocolMajor }}.0</template></strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
+        <div class="info-scroll">
+          <div class="info-profile"><div class="avatar huge" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</div><h3 class="nickname-ellipsis">{{ activePeer.remark || activePeer.nickname }}</h3><span>{{ activePeer.online ? '在线' : '离线' }}</span></div>
+          <div class="info-fields"><label>设备类型<strong>{{ activePeer.platform }} · {{ activePeer.osVersion }}</strong></label><label>通讯协议<strong>{{ activePeer.protocolName || '未知' }}<template v-if="activePeer.protocolMajor">/{{ activePeer.protocolMajor }}.0</template></strong></label><label>备注<input v-model="peerRemark" @keyup.enter="savePeerRemark" @blur="savePeerRemark" /></label><label>IP 地址<strong>{{ activePeer.ip || '未知' }}:{{ activePeer.port || '-' }}</strong></label><label>设备 ID<strong class="mono">{{ activePeer.deviceId }}</strong></label><label>证书指纹<strong class="mono">{{ activePeer.certificateFingerprint || '未知' }}</strong></label><label>最近在线<strong>{{ formatLastSeen(activePeer.lastSeen) }}</strong></label></div>
+        </div>
         <div class="info-danger"><a-button status="danger" long :loading="clearingConversation" @click="clearCurrentConversation">清除聊天记录</a-button><span>只清除本机消息，可选择删除接收的附件，不会删除发送源文件和好友关系。</span></div>
       </aside>
     </Transition>
@@ -2449,6 +2451,33 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .clear-conversation-content .clear-conversation-hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .clear-conversation-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
 .clear-conversation-actions :deep(.arco-btn) { margin: 0; }
+
+/* Keep the destructive action visible while the profile details scroll in a
+   short window. */
+.info-overlay { overflow: hidden; }
+.info-head { flex: 0 0 auto; }
+.info-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) var(--scroll-track); }
+.info-scroll::-webkit-scrollbar { width: 7px; }
+.info-scroll::-webkit-scrollbar-track { background: var(--scroll-track); }
+.info-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 999px; }
+.info-profile { padding: 12px 0 10px; }
+.info-profile .avatar.huge { width: 68px; height: 68px; border-radius: 21px; font-size: 23px; }
+.info-profile h3 { margin: 8px 0 2px; }
+.info-fields { gap: 10px; }
+.info-fields label { gap: 3px; }
+.info-fields input { padding: 6px 8px; }
+.info-danger { flex: 0 0 auto; margin-top: 0; padding-top: 10px; background: var(--surface-1); box-shadow: 0 -1px 0 var(--line); }
+.info-danger span { line-height: 1.35; }
+.chat-app.theme-dark .info-danger { background: transparent; box-shadow: 0 -1px 0 var(--line); }
+
+@media (max-height: 540px) {
+  .info-overlay { padding: 10px 12px; }
+  .info-profile { padding: 8px 0 7px; }
+  .info-profile .avatar.huge { width: 54px; height: 54px; border-radius: 17px; font-size: 19px; }
+  .info-profile h3 { margin: 5px 0 1px; }
+  .info-fields { gap: 8px; }
+  .info-danger { padding-top: 8px; }
+}
 
 @keyframes message-enter {
   from { opacity: 0; transform: translateY(5px) scale(.99); }
