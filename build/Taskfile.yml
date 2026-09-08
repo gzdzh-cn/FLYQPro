@@ -53,14 +53,17 @@ tasks:
       - wails3 generate bindings -ts -f '{{.BUILD_FLAGS}}' -clean=true 
 
   generate:icons:
-    summary: Generates Windows `.ico` and Mac `.icns` files from an image
+    summary: Generates the padded app icon and Windows/macOS icon files
     dir: build
     sources:
-      - "appicon.png"
+      - "icon-source.png"
+      - "icongen/**/*.go"
     generates:
-      - "icons.icns"
-      - "icons.ico"
+      - "appicon.png"
+      - "darwin/icons.icns"
+      - "windows/icons.ico"
     cmds:
+      - go run ./icongen -input icon-source.png -output appicon.png
       - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icons.ico
 
   dev:frontend:
