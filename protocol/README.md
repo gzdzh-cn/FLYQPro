@@ -1,11 +1,11 @@
-# dzhgo protocol v2
+# dzhgo protocol v3
 
 FlyQPro uses a language-neutral JSON protocol. The application brand remains
 FlyQPro; `dzhgo` is the canonical communication protocol name.
 
 ## Protocol identity
 
-`dzhgo` is the only supported protocol dialect. The protocol major version is `2`, and discovery uses `DZHGO_DISCOVERY_V1`.
+`dzhgo` is the only supported protocol dialect. The protocol major version is `3`, and discovery uses `DZHGO_DISCOVERY_V1`.
 
 Every discovery request, announcement, TLS hello, and response must use the exact tuple `dzhgo` / `DZHGO_DISCOVERY_V1` / `2`. An unknown protocol name, magic value, major version, or unmet `minMajor` is rejected. There is no protocol-name fallback.
 
@@ -44,7 +44,8 @@ Example announcement:
 
 ## Chat connection
 
-- Transport: TCP with TLS 1.2 or newer.
+- Control transport: TLS 1.3 or newer.
+- File data transport: QUIC (`dzhgo/3`) with binary streams; JSON/base64 file chunks are not supported.
 - Control frames: newline-delimited UTF-8 JSON.
 - Files: base64 encoded 32 KiB JSON chunks.
 - Device identity: ECDSA P-256 public key SHA-256.
