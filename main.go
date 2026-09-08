@@ -129,6 +129,8 @@ func main() {
 	defer removeCloseHook()
 	removeWindowsTaskbar := configureWindowsTaskbar(app, mainWindow)
 	defer removeWindowsTaskbar()
+	removeWindowsSystemTray := configureWindowsSystemTray(app, mainWindow)
+	defer removeWindowsSystemTray()
 	removeFileDragHandlers := make([]func(), 0, 3)
 	if runtime.GOOS == "darwin" {
 		emitFileDragState := func(active bool) {

@@ -78,6 +78,31 @@ func configureWindowsTaskbar(_ *application.App, _ *application.WebviewWindow) f
 	return func() {}
 }
 
+func configureWindowsSystemTray(app *application.App, mainWindow *application.WebviewWindow) func() {
+	tray := app.SystemTray.New()
+	showMainWindow := func() {
+		mainWindow.UnMinimise()
+		mainWindow.Show()
+		mainWindow.Focus()
+	}
+
+	menu := app.NewMenu()
+	menu.Add("打开飞秋Pro").OnClick(func(_ *application.Context) {
+		showMainWindow()
+	})
+	menu.AddSeparator()
+	menu.Add("退出飞秋Pro").OnClick(func(_ *application.Context) {
+		app.Quit()
+	})
+
+	tray.SetIcon(appIcon).SetMenu(menu).OnClick(showMainWindow).OnDoubleClick(showMainWindow).OnRightClick(tray.ShowMenu)
+	tray.SetTooltip("飞秋Pro")
+
+	return func() {
+		tray.Destroy()
+	}
+}
+
 func windowsTaskbarWndProcInterceptor() func(hwnd uintptr, msg uint32, wParam, lParam uintptr) (uintptr, bool) {
 	return func(_ uintptr, msg uint32, _, _ uintptr) (uintptr, bool) {
 		if msg != taskbarCreatedMessage || taskbarReloadPending.Swap(true) {
