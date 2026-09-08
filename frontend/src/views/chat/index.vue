@@ -135,7 +135,10 @@
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
                 <p><span>已耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
-                <p><span>已接收容量</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }} / {{ formatMetricBytes(detailTotalBytes) }}</strong></p>
+                <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailProgress?.phase) }}</strong></p>
+                <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
+                <p><span>{{ detailIsReceiver ? '已落盘容量' : '对方已确认' }}</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }}</strong></p>
+                <p><span>总容量</span><strong>{{ formatMetricBytes(detailTotalBytes) }}</strong></p>
               </div>
             </div>
             <div class="attachment-details-section">
@@ -493,7 +496,7 @@ function messageStatusText(status: string, kind = 'text', attachmentStatus = '',
     if (fileStatus === 'rejected') return sentByMe ? '对方已拒绝' : '我已拒绝'
     if (fileStatus === 'pending') return sentByMe ? '发送中' : '等待接收'
     if (sentByMe && (fileStatus === 'sending' || fileStatus === 'receiving')) return '发送中'
-    return ({ preparing_thumbnail: '图片处理中', sending: '发送中', receiving: '接收中', canceled: '已取消', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
+    return ({ preparing_thumbnail: '图片处理中', queued: '排队中', retrying: '重试中', resuming: '恢复传输', paused: '等待恢复', verifying: '校验中', sending: '发送中', receiving: '接收中', canceled: '已取消', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[fileStatus] || ''
   }
   if (status === 'sent') return '已发送'
   return ({ sending: '发送中', delivered: '发送成功', read: '已读', queued: '发送失败', not_friend: '不是好友', failed: '发送失败' } as Record<string, string>)[status] || status
@@ -1083,6 +1086,7 @@ function notifyAttachmentResult(message: any) {
     case 'sent': Message.success('文件已发送'); break
     case 'rejected': Message.warning('对方已拒绝接收文件'); break
     case 'canceled': Message.info('文件传输已取消'); break
+    case 'paused': Message.info('网络已断开，文件将在设备上线后继续'); break
     case 'not_friend': Message.warning('不是好友'); break
     case 'failed': Message.error('文件发送失败'); break
     default: Message.info('文件正在等待对方接收')
@@ -1124,10 +1128,11 @@ const detailIsReceiver = computed(() => detailProgress.value?.direction === 'rec
 const detailReceivedBytes = computed<number | undefined>(() => {
   const progress = detailProgress.value
   if (!progress) return undefined
-  const value = detailIsReceiver.value ? (progress.transferred ?? progress.received) : progress.remoteReceived
+  const value = detailIsReceiver.value ? (progress.durableBytes ?? progress.transferred ?? progress.received) : progress.remoteReceived
   if (value === undefined || value === null) return undefined
   return Math.max(0, Number(value || 0))
 })
+const detailSentBytes = computed(() => Math.max(0, Number(detailProgress.value?.sent ?? detailProgress.value?.transferred ?? 0)))
 const detailTotalBytes = computed(() => Math.max(0, Number(detailProgress.value?.total || attachmentDetails.value?.fileSize || attachmentDetailsMessage.value?.attachmentSize || 0)))
 const detailNetworkThroughput = computed(() => {
   if (!detailProgress.value) return { primary: '暂未提供', secondary: '' }
@@ -1141,7 +1146,7 @@ const detailTuningState = computed(() => {
   if (!detailProgress.value) return '暂未提供'
   return detailIsReceiver.value ? '接收端监测' : tuningStateLabel(detailProgress.value.tuningState)
 })
-function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || phase || '未知' }
+function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', queued: '排队中', retrying: '重试中', resuming: '恢复传输', paused: '等待恢复', verifying: '校验中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || phase || '未知' }
 function transferDirectionLabel(direction?: string) { return ({ send: '发送', receive: '接收', 'remote-receive': '对方接收' } as Record<string, string>)[direction || ''] || direction || '未知' }
 function tuningStateLabel(state?: string) { return ({ probing: '探测中', observing: '接收端监测', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
@@ -1167,6 +1172,7 @@ function transferProgressFor(message: any): any {
     merged.transferred = preferred.transferred ?? merged.remoteReceived
     merged.total = preferred.total || diagnostics?.total || message.attachmentSize || 0
   }
+  if (diagnostics && ['queued', 'retrying', 'resuming', 'paused', 'verifying'].includes(diagnostics.phase)) merged.phase = diagnostics.phase
   const terminal = [diagnostics, preferred].find((item) => item && terminalTransferPhases.has(item.phase))
   if (terminal) {
     merged.phase = terminal.phase
@@ -1191,6 +1197,11 @@ function transferProgressPercent(message: any): number {
 function transferSpeedLabel(message: any): string {
   const progress = transferProgressFor(message)
   if (progress?.phase === 'awaiting_acceptance') return '等待对方接收'
+  if (progress?.phase === 'queued') return '等待其他文件完成'
+  if (progress?.phase === 'retrying') return '网络中断，正在重试'
+  if (progress?.phase === 'resuming') return '正在恢复传输'
+  if (progress?.phase === 'paused') return '等待设备上线'
+  if (progress?.phase === 'verifying') return '正在校验 SHA-256'
   return progress?.speed ? `${formatSpeed(progress.speed)}/S` : '正在测量'
 }
 function transferProgressLabel(message: any): string {
@@ -1201,6 +1212,11 @@ function transferProgressLabel(message: any): string {
   if (progress.phase === 'canceled') return '已取消'
   if (progress.phase === 'rejected') return '已拒绝'
   if (progress.phase === 'awaiting_acceptance') return '等待对方接收'
+  if (progress.phase === 'queued') return '排队中'
+  if (progress.phase === 'retrying') return '重试中'
+  if (progress.phase === 'resuming') return '恢复传输'
+  if (progress.phase === 'paused') return '等待恢复'
+  if (progress.phase === 'verifying') return '校验中'
   if (progress.phase === 'completed') return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方已接收' : '接收完成'
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return '发送中'
   return '接收中'
@@ -1208,16 +1224,21 @@ function transferProgressLabel(message: any): string {
 function transferElapsedLabel(message: any): string {
   const progress = transferProgressFor(message)
   if (progress?.phase === 'awaiting_acceptance') return '等待接收'
+  if (progress?.phase === 'queued') return '等待传输槽位'
+  if (progress?.phase === 'retrying') return '自动重连'
+  if (progress?.phase === 'paused') return '等待上线'
   return progress?.elapsedMs ? formatDuration(progress.elapsedMs) : '正在测量'
 }
 function transferEtaLabel(message: any): string {
   const progress = transferProgressFor(message)
   if (progress?.phase === 'awaiting_acceptance') return '接收后开始'
+  if (progress?.phase === 'queued') return '前序完成后开始'
+  if (progress?.phase === 'retrying' || progress?.phase === 'paused') return '网络恢复后继续'
   return progress?.etaSeconds ? formatDuration(progress.etaSeconds * 1000) : '暂不可估算'
 }
 function imageTransferActive(message: any): boolean {
   const progress = transferProgressFor(message)
-  return Boolean(progress && ['transferring', 'receiving', 'remote-receive'].includes(progress.phase))
+  return Boolean(progress && ['queued', 'retrying', 'resuming', 'paused', 'verifying', 'transferring', 'receiving', 'remote-receive'].includes(progress.phase))
 }
 function transferDetailsActionVisible(message: any): boolean {
   const progress = transferProgressFor(message)

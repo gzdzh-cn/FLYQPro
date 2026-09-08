@@ -179,7 +179,7 @@ func runParallelTLS(t *testing.T, size int, delay time.Duration) {
 	control := newWireSession(controlConn)
 	sender.outgoing[message.AttachmentID] = &outgoingTransfer{session: control}
 	started := time.Now()
-	if err := sender.transferParallelFile(ctx, peer, message, source, control, controlReader, protocolDialects[0], "token", 4, "dzhgo/2"); err != nil {
+	if err := sender.transferParallelFile(ctx, peer, message, source, control, controlReader, protocolDialects[0], "token", 4, "dzhgo/3"); err != nil {
 		t.Fatal(err)
 	}
 	transfer.parallelMu.Lock()

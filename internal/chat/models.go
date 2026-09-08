@@ -20,7 +20,7 @@ func NormalizeNickname(value string) string {
 
 const (
 	ProtocolName         = "dzhgo"
-	ProtocolMajor        = 2
+	ProtocolMajor        = 3
 	ProtocolMinor        = 0
 	DiscoveryPort        = 39190
 	DiscoveryMagic       = "DZHGO_DISCOVERY_V1"
@@ -394,6 +394,8 @@ type wireMessage struct {
 	StreamLength        int64                    `json:"streamLength,omitempty"`
 	StreamBytes         int64                    `json:"streamBytes,omitempty"`
 	Offset              int64                    `json:"offset,omitempty"`
+	CompletedRanges     []TransferRange          `json:"completedRanges,omitempty"`
+	Resume              bool                     `json:"resume,omitempty"`
 	Entries             []SharedEntry            `json:"entries,omitempty"`
 	SharedFolders       []SharedFolder           `json:"sharedFolders,omitempty"`
 	ListOffset          int                      `json:"listOffset,omitempty"`
@@ -403,6 +405,12 @@ type wireMessage struct {
 	HasMore             bool                     `json:"hasMore,omitempty"`
 	ThumbnailRequests   []SharedThumbnailRequest `json:"thumbnailRequests,omitempty"`
 	ThumbnailResults    []SharedThumbnailResult  `json:"thumbnailResults,omitempty"`
+}
+
+// TransferRange is a byte range that has been durably written by the receiver.
+type TransferRange struct {
+	Offset int64 `json:"offset"`
+	Length int64 `json:"length"`
 }
 
 func protocolDialectForMessage(message wireMessage) (ProtocolDialect, bool) {

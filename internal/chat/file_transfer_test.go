@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -33,7 +34,7 @@ func TestBinaryPipelineKeepsMultipleWindowsInFlight(t *testing.T) {
 	engine := NewEngine()
 	result := make(chan error, 1)
 	go func() {
-		_, transferErr := engine.transferBinaryFilePipelined(context.Background(), "peer", message, file, newWireSession(sender), newWireReader(sender), transferTuning{chunkSize: minTransferChunkSize, windowSize: initialTransferWindow}, "dzhgo/2")
+		_, transferErr := engine.transferBinaryFilePipelined(context.Background(), "peer", message, file, newWireSession(sender), newWireReader(sender), transferTuning{chunkSize: minTransferChunkSize, windowSize: initialTransferWindow}, "dzhgo/3")
 		result <- transferErr
 	}()
 
@@ -63,7 +64,7 @@ func TestBinaryPipelineKeepsMultipleWindowsInFlight(t *testing.T) {
 			t.Fatal(err)
 		}
 		windowPayload := make([]byte, header.PayloadLen)
-		if _, err := io.ReadFull(reader.reader, windowPayload); err != nil {
+		if err := readBinaryFramePayload(reader.reader, windowPayload); err != nil {
 			t.Fatal(err)
 		}
 		received.Write(windowPayload)
@@ -95,6 +96,69 @@ func TestBinaryPipelineKeepsMultipleWindowsInFlight(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("pipelined transfer did not finish")
+	}
+}
+
+func TestBinaryPipelineResumesAtCurrentFileOffset(t *testing.T) {
+	payload := bytes.Repeat([]byte("resume-payload"), 240000)
+	resumeOffset := int64(700123)
+	path := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(resumeOffset, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	sender, receiver := net.Pipe()
+	defer sender.Close()
+	defer receiver.Close()
+	message := Message{MessageID: "message-resume", AttachmentID: "attachment-resume", AttachmentSize: int64(len(payload))}
+	done := make(chan error, 1)
+	go func() {
+		_, transferErr := NewEngine().transferBinaryFilePipelined(context.Background(), "peer", message, file, newWireSession(sender), newWireReader(sender), transferTuning{chunkSize: minTransferChunkSize, windowSize: initialTransferWindow}, "dzhgo/3")
+		done <- transferErr
+	}()
+	reader := newWireReader(receiver)
+	var received bytes.Buffer
+	confirmed := resumeOffset
+	for {
+		var control wireMessage
+		if err := reader.Decode(&control); err != nil {
+			t.Fatal(err)
+		}
+		if control.Type == "file_complete" {
+			if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, Transferred: message.AttachmentSize, Status: "completed"}); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		header, err := readBinaryFileFrameHeader(reader.reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int64(header.Offset) != resumeOffset+int64(received.Len()) || header.TransferID != binaryTransferID(message.AttachmentID) {
+			t.Fatalf("unexpected resumed frame header: %+v", header)
+		}
+		window := make([]byte, header.PayloadLen)
+		if err := readBinaryFramePayload(reader.reader, window); err != nil {
+			t.Fatal(err)
+		}
+		received.Write(window)
+		confirmed += int64(len(window))
+		if err := writeWire(receiver, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, Transferred: confirmed, WindowID: control.WindowID, WindowBytes: int64(len(window)), ChunkSize: control.ChunkSize, WindowSize: control.WindowSize, Status: "receiving", TransferMode: binaryTransferMode}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(received.Bytes(), payload[resumeOffset:]) {
+		t.Fatal("resumed sender retransmitted or skipped bytes")
 	}
 }
 
@@ -214,7 +278,7 @@ func TestBinaryFileWindowStreamsRawPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := make([]byte, header.PayloadLen)
-	if _, err := io.ReadFull(reader.reader, got); err != nil {
+	if err := readBinaryFramePayload(reader.reader, got); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-result; err != nil {
@@ -236,12 +300,14 @@ func TestReceiveBinaryFileWindowWritesAndAcknowledges(t *testing.T) {
 	defer local.Close()
 	defer remote.Close()
 
-	header := binaryFileFrameHeader{WindowID: 2, StartChunk: 7, ChunkCount: uint32((len(payload) + minTransferChunkSize - 1) / minTransferChunkSize), ChunkSize: minTransferChunkSize, PayloadLen: uint64(len(payload))}
+	header := binaryFileFrameHeader{TransferID: binaryTransferID("attachment"), Sequence: 2, WindowID: 2, StartChunk: 7, ChunkCount: uint32((len(payload) + minTransferChunkSize - 1) / minTransferChunkSize), ChunkSize: minTransferChunkSize, PayloadLen: uint64(len(payload))}
 	var stream bytes.Buffer
 	if err := writeBinaryFileFrameHeader(&stream, header); err != nil {
 		t.Fatal(err)
 	}
-	stream.Write(payload)
+	if err := writeBinaryFramePayload(&stream, payload); err != nil {
+		t.Fatal(err)
+	}
 	digest := sha256.New()
 	transfer := &incomingFile{file: file, writer: bufio.NewWriterSize(file, 1024*1024), attachmentID: "attachment", messageID: "message", senderID: "peer", expected: int64(len(payload)), digest: digest, session: newWireSession(local), windowed: true, binary: true, binaryPending: true, windowID: int(header.WindowID), nextWindowID: int(header.WindowID) + 1, windowSize: int(header.ChunkCount), nextChunk: int(header.StartChunk), chunkSize: int(header.ChunkSize), expectedWindowBytes: int64(len(payload))}
 
@@ -410,7 +476,8 @@ func benchmarkBinaryFileWindow(b *testing.B, path string, payloadSize int64) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	if _, err := io.CopyN(io.Discard, reader.reader, int64(header.PayloadLen)); err != nil {
+	payload := make([]byte, header.PayloadLen)
+	if err := readBinaryFramePayload(reader.reader, payload); err != nil {
 		b.Fatal(err)
 	}
 	if err := <-result; err != nil {

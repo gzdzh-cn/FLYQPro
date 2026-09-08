@@ -49,7 +49,7 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "file-stream-v3", "file-stream-v4", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "file-stream-v3", "file-stream-v4", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}
@@ -178,6 +178,13 @@ func TestBinaryAckTargetTracksInFlightBudget(t *testing.T) {
 	}
 	if got := binaryAckTargetForBudget(minInFlightBytes); got != minInFlightBytes {
 		t.Fatalf("minimum ACK target = %d, want %d", got, minInFlightBytes)
+	}
+}
+
+func TestTransferInFlightBudgetsStayWithinGlobalLimit(t *testing.T) {
+	const globalLimit = int64(64 * 1024 * 1024)
+	if int64(maxInFlightBytes)*2 > globalLimit || int64(parallelMaxInFlight)*2 > globalLimit {
+		t.Fatalf("two active peers can exceed global in-flight limit: binary=%d parallel=%d", maxInFlightBytes, parallelMaxInFlight)
 	}
 }
 

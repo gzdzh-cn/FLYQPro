@@ -201,7 +201,7 @@ func TestConversationUnreadPersistence(t *testing.T) {
 	}
 }
 
-func TestRecoverSendingMessagesMarksOnlyLocalTransfersFailed(t *testing.T) {
+func TestRecoverSendingMessagesPausesLocalFilesAndFailsLocalText(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GOFLY_DB_PATH", filepath.Join(root, "chat.db"))
 	if err := db.Open(context.Background()); err != nil {
@@ -236,8 +236,12 @@ func TestRecoverSendingMessagesMarksOnlyLocalTransfersFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, err := GetMessage(ctx, "local-sending")
-	if err != nil || local.Status != "failed" || local.AttachmentStatus != "failed" {
-		t.Fatalf("本机发送中的消息未恢复为失败: %v, %+v", err, local)
+	if err != nil || local.Status != "paused" || local.AttachmentStatus != "paused" {
+		t.Fatalf("本机发送中的文件未恢复为等待续传: %v, %+v", err, local)
+	}
+	paused, err := ListPausedOutgoingFileMessageIDs(ctx, "local-device")
+	if err != nil || len(paused) != 1 || paused[0] != "local-sending" {
+		t.Fatalf("待恢复文件查询错误: %v, %+v", err, paused)
 	}
 	localText, err := GetMessage(ctx, "local-text-sending")
 	if err != nil || localText.Status != "failed" {

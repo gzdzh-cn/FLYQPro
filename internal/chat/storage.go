@@ -1016,12 +1016,34 @@ func UpdateMessageStatus(ctx context.Context, messageID, status string) error {
 }
 
 func RecoverSendingMessages(ctx context.Context, senderDeviceID string) error {
-	// There is no automatic retry path. Keep interrupted local sends visible as
-	// failed so the user can explicitly retry them from the conversation.
-	if err := exec(ctx, `UPDATE messages SET status='failed' WHERE sender_device_id=? AND status='sending'`, senderDeviceID); err != nil {
+	if err := exec(ctx, `UPDATE messages SET status=CASE WHEN kind='file' THEN 'paused' ELSE 'failed' END WHERE sender_device_id=? AND status IN ('sending','queued','retrying','resuming')`, senderDeviceID); err != nil {
 		return err
 	}
-	return exec(ctx, `UPDATE attachments SET status='failed' WHERE status='sending' AND message_id IN (SELECT message_id FROM messages WHERE sender_device_id=?)`, senderDeviceID)
+	if err := exec(ctx, `UPDATE attachments SET status='paused' WHERE status IN ('sending','queued','retrying','resuming') AND message_id IN (SELECT message_id FROM messages WHERE sender_device_id=? AND kind='file')`, senderDeviceID); err != nil {
+		return err
+	}
+	if err := exec(ctx, `UPDATE messages SET status='paused' WHERE sender_device_id<>? AND kind='file' AND status='receiving'`, senderDeviceID); err != nil {
+		return err
+	}
+	return exec(ctx, `UPDATE attachments SET status='paused' WHERE status='receiving' AND message_id IN (SELECT message_id FROM messages WHERE sender_device_id<>? AND kind='file')`, senderDeviceID)
+}
+
+func ListPausedOutgoingFileMessageIDs(ctx context.Context, senderDeviceID string) ([]string, error) {
+	var rows []struct {
+		MessageID string `orm:"message_id"`
+	}
+	result, err := query(ctx, `SELECT m.message_id FROM messages m JOIN attachments a ON a.message_id=m.message_id WHERE m.sender_device_id=? AND m.kind='file' AND m.status='paused' AND a.status='paused' AND m.deleted_at='' ORDER BY m.created_at`, senderDeviceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.MessageID)
+	}
+	return ids, nil
 }
 
 func MessageExists(ctx context.Context, messageID string) (bool, error) {
