@@ -17,6 +17,12 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// appIcon is shared by the native window and the Windows taskbar identity.
+// The generated ICO remains the installer/executable icon.
+//
+//go:embed build/appicon.png
+var appIcon []byte
+
 func main() {
 	if err := db.Open(gctx.New()); err != nil {
 		log.Fatal(err)
@@ -37,9 +43,26 @@ func main() {
 		// when the user switches to the light theme.
 		backgroundType = application.BackgroundTypeTransparent
 	}
-	app := application.New(application.Options{
+	var app *application.App
+	var mainWindow *application.WebviewWindow
+	app = application.New(application.Options{
 		Name:        "飞秋Pro",
 		Description: "版本：v" + version.AppVersion + "\n技术栈：Go、Wails v3、Vue 3、TypeScript、Arco Design、SQLite\n技术支持：广州大智汇信息科技有限公司",
+		Icon:        appIcon,
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: "DZH.FlyQPro",
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				if hasLaunchArgument(data.Args, "--flyqpro-task=quit") {
+					app.Quit()
+					return
+				}
+				if mainWindow != nil {
+					mainWindow.UnMinimise()
+					mainWindow.Show()
+					mainWindow.Focus()
+				}
+			},
+		},
 		Services: []application.Service{
 			application.NewService(chatService),
 			application.NewService(dockService),
@@ -51,7 +74,11 @@ func main() {
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
+		Windows: application.WindowsOptions{
+			WndProcInterceptor: windowsTaskbarWndProcInterceptor(),
+		},
 	})
+	configureWindowsAppIdentity()
 	app.RegisterService(application.NewService(service.NewImageViewerService(app, chatService)))
 	app.RegisterService(application.NewService(service.NewSharedDriveWindowService(app, chatService)))
 	// PreviewStreamService serves media through its loopback HTTP listener.
@@ -61,7 +88,7 @@ func main() {
 	configureApplicationMenu(app)
 	configureNativeApplicationName(app)
 
-	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	mainWindow = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "flyqpro-main",
 		Title:            "飞秋Pro",
 		Frameless:        runtime.GOOS == "darwin",
@@ -75,6 +102,7 @@ func main() {
 		Windows: application.WindowsWindow{
 			Theme:                  0,
 			NonClientRegionSupport: true,
+			HiddenOnTaskbar:        false,
 		},
 		Mac: application.MacWindow{
 			Backdrop:     application.MacBackdropTransparent,
@@ -87,6 +115,20 @@ func main() {
 		CloseButtonState:    application.ButtonEnabled,
 		URL:                 "/",
 	})
+	removeCloseHook := mainWindow.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		select {
+		case <-app.Context().Done():
+			// App.Quit() cancels the context before closing windows. Let Wails
+			// finish its normal teardown in that case.
+			return
+		default:
+			mainWindow.Minimise()
+			event.Cancel()
+		}
+	})
+	defer removeCloseHook()
+	removeWindowsTaskbar := configureWindowsTaskbar(app, mainWindow)
+	defer removeWindowsTaskbar()
 	removeFileDragHandlers := make([]func(), 0, 3)
 	if runtime.GOOS == "darwin" {
 		emitFileDragState := func(active bool) {
@@ -126,6 +168,15 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func hasLaunchArgument(args []string, expected string) bool {
+	for _, arg := range args {
+		if arg == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // configureApplicationMenu replaces Wails' English About role on macOS with

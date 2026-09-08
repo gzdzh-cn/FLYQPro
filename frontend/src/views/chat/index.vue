@@ -2,7 +2,7 @@
   <div class="chat-app" :class="{ 'theme-dark': isDark, 'is-mac': isMac, 'is-windows': !isMac }" @contextmenu="handleAppContextMenu">
     <div v-if="isMac" class="window-drag-region" aria-hidden="true"></div>
     <div v-if="isMac" class="mac-window-controls" aria-label="macOS 窗口控制">
-      <button type="button" class="mac-control close" title="关闭" @click.stop="closeWindow"></button>
+      <button type="button" class="mac-control close" title="最小化" aria-label="最小化" @click.stop="closeWindow"></button>
       <button type="button" class="mac-control minimise" title="最小化" @click.stop="minimiseWindow"></button>
       <button type="button" class="mac-control maximise" title="最大化" @click.stop="toggleMaximise"></button>
     </div>
@@ -1542,7 +1542,7 @@ async function openFriendSharedDrive() {
 }
 function minimiseWindow() { Window.Minimise() }
 async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
-function closeWindow() { Window.Close() }
+function closeWindow() { Window.Minimise() }
 watch(() => store.profile, (value) => Object.assign(editProfile, { ...value, nickname: normalizeNickname(value.nickname) }), { deep: true })
 watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
 watch(activePeerCanSend, (canSend) => { if (!canSend) emojiOpen.value = false })
