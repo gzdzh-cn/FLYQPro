@@ -36,7 +36,10 @@ type Engine struct {
 	identity                Identity
 	listener                net.Listener
 	discoveryTCP            net.Listener
+	dataListener            net.Listener
+	dataPort                int
 	udp                     *net.UDPConn
+	udp6                    *net.UDPConn
 	stop                    chan struct{}
 	done                    chan struct{}
 	peers                   map[string]Peer
@@ -61,6 +64,7 @@ type Engine struct {
 	transferLastBytes       map[string]int64
 	transferTuning          map[string]transferTuning
 	transferScheduler       *transferScheduler
+	peerPools               map[string]*PeerPool
 	fileControls            map[string]*fileControlConnection
 	presenceMu              sync.Mutex
 	discoveryScanMu         sync.Mutex
@@ -365,11 +369,25 @@ type incomingFile struct {
 	parallelWritten     int64
 	parallelAcked       int64
 	parallelStopped     bool
+	v3Mu                sync.Mutex
+	v3Ranges            []ByteRange
+	v3Streams           map[uint16]*v3StreamState
+	v3SessionID         [16]byte
+	v3Generation        uint64
+	v3Finalizing        bool
 	resumeState         transferResumeState
 	resumeOffset        int64
 	resumeCommitted     int64
 	durableBytes        int64
 	resumeMu            sync.Mutex
+}
+
+// v3StreamState tracks one dedicated binary data connection. File completion
+// is owned by the transfer, so an individual stream's EndFile never completes
+// the file early when other streams still have ranges in flight.
+type v3StreamState struct {
+	ended   bool
+	lastSeq uint64
 }
 
 type parallelRange struct {
@@ -574,7 +592,7 @@ func binaryTransferID(value string) [16]byte {
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), fileControls: make(map[string]*fileControlConnection)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), fileControls: make(map[string]*fileControlConnection)}
 }
 
 func configureTCPConnection(conn net.Conn) {
@@ -747,26 +765,35 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	listener, err := tls.Listen("tcp", ":0", &tls.Config{Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS12})
+	listener, err := tls.Listen("tcp", ":0", &tls.Config{Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13})
 	if err != nil {
 		return fmt.Errorf("启动聊天端口失败: %w", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	identity.Port = port
+	dataEndpoint, dataErr := ListenV3Data(":0", &tls.Config{Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAnyClientCert})
+	if dataErr != nil {
+		_ = listener.Close()
+		return fmt.Errorf("启动文件数据端口失败: %w", dataErr)
+	}
+	dataPort := dataEndpoint.Listener.Addr().(*net.TCPAddr).Port
 	udp, udpErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: DiscoveryPort})
 	if udpErr != nil {
+		_ = dataEndpoint.Listener.Close()
 		_ = listener.Close()
 		return fmt.Errorf("启动局域网发现失败: %w", udpErr)
 	}
 	discoveryTCP, tcpErr := net.Listen("tcp4", fmt.Sprintf(":%d", DiscoveryPort))
 	if tcpErr != nil {
+		_ = dataEndpoint.Listener.Close()
 		_ = udp.Close()
 		_ = listener.Close()
 		return fmt.Errorf("启动 TCP 发现失败: %w", tcpErr)
 	}
+	udp6, _ := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: DiscoveryPort})
 
 	e.mu.Lock()
-	e.profile, e.identity, e.listener, e.discoveryTCP, e.udp = profile, identity, listener, discoveryTCP, udp
+	e.profile, e.identity, e.listener, e.discoveryTCP, e.udp, e.udp6, e.dataListener, e.dataPort = profile, identity, listener, discoveryTCP, udp, udp6, dataEndpoint.Listener, dataPort
 	e.serviceStopped = false
 	if peers, peerErr := ListPeers(ctx, ""); peerErr == nil {
 		for _, peer := range peers {
@@ -776,8 +803,13 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.stop, e.done, e.started = make(chan struct{}), make(chan struct{}), true
 	e.mu.Unlock()
 	go e.acceptLoop()
+	go e.dataAcceptLoop()
+	go e.peerPoolWatchdogLoop()
 	go e.discoveryTCPLoop()
 	go e.discoveryLoop()
+	if udp6 != nil {
+		go e.discoveryIPv6Loop()
+	}
 	go e.scanLoop()
 	go e.livenessLoop()
 	go e.probeKnownPeers()
@@ -785,6 +817,44 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.resumeInterruptedOutgoing()
 	e.emit("chat:network-status", e.NetworkStatus())
 	return nil
+}
+
+func (e *Engine) peerPoolWatchdogLoop() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			e.mu.RLock()
+			pools := make([]*PeerPool, 0, len(e.peerPools))
+			for _, pool := range e.peerPools {
+				pools = append(pools, pool)
+			}
+			stop := e.stop
+			e.mu.RUnlock()
+			for _, pool := range pools {
+				now := time.Now()
+				if pool.Watchdog(now) > 0 {
+					pool.ReplaceDead()
+				}
+				// Keep slots reusable between files, but release connections that
+				// have been idle long enough to avoid retaining stale NAT/firewall
+				// state indefinitely.
+				pool.CloseIdle(now, 2*time.Minute)
+			}
+			if stop == nil {
+				return
+			}
+		case <-e.stopSignal():
+			return
+		}
+	}
+}
+
+func (e *Engine) stopSignal() <-chan struct{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.stop
 }
 
 func (e *Engine) resumeInterruptedOutgoing() {
@@ -815,7 +885,7 @@ func (e *Engine) Stop() {
 		e.mu.Unlock()
 		return
 	}
-	stop, listener, discoveryTCP, udp := e.stop, e.listener, e.discoveryTCP, e.udp
+	stop, listener, discoveryTCP, udp, udp6, dataListener := e.stop, e.listener, e.discoveryTCP, e.udp, e.udp6, e.dataListener
 	e.started = false
 	e.serviceStopped = true
 	e.mu.Unlock()
@@ -828,6 +898,12 @@ func (e *Engine) Stop() {
 	_ = listener.Close()
 	_ = discoveryTCP.Close()
 	_ = udp.Close()
+	if udp6 != nil {
+		_ = udp6.Close()
+	}
+	if dataListener != nil {
+		_ = dataListener.Close()
+	}
 
 	e.mu.RLock()
 	incomingSessions := make([]*wireSession, 0, len(e.incoming))
@@ -1662,6 +1738,32 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 				e.emit("chat:message-status", map[string]any{"messageId": messageID, "status": "read"})
 			}
 		}
+	case "file_manifest":
+		root := e.Profile().FileSavePath
+		if root == "" {
+			root = filepath.Join(AppDataDir(), "attachments", hello.DeviceID)
+		}
+		if err := ValidateManifest(message.Manifest, root, 100000, 1<<50); err != nil {
+			_ = sessionWrite(session, conn, wireMessage{Type: "manifest_rejected", Status: "rejected", Reason: err.Error()})
+			return
+		}
+		for _, entry := range message.Manifest {
+			target, err := ValidateManifestPath(root, entry.RelativePath)
+			if err != nil {
+				_ = sessionWrite(session, conn, wireMessage{Type: "manifest_rejected", Status: "rejected", Reason: err.Error()})
+				return
+			}
+			if entry.IsDirectory {
+				err = os.MkdirAll(target, 0o700)
+			} else {
+				err = os.MkdirAll(filepath.Dir(target), 0o700)
+			}
+			if err != nil {
+				_ = sessionWrite(session, conn, wireMessage{Type: "manifest_rejected", Status: "rejected", Reason: "STORAGE_UNAVAILABLE"})
+				return
+			}
+		}
+		_ = sessionWrite(session, conn, wireMessage{Type: "manifest_applied", Status: "accepted", TransferID: message.TransferID})
 	case "file_offer":
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
@@ -1764,7 +1866,18 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		targetPath := resumeState.TargetPath
 		var targetErr error
 		if targetPath == "" {
-			targetPath, targetErr = AttachmentTargetPath(e.Profile().FileSavePath, hello.DeviceID, message.FileName)
+			if message.RelativePath != "" {
+				root := e.Profile().FileSavePath
+				if root == "" {
+					root = filepath.Join(AppDataDir(), "attachments", hello.DeviceID)
+				}
+				targetPath, targetErr = ValidateManifestPath(root, message.RelativePath)
+				if targetErr == nil {
+					targetErr = os.MkdirAll(filepath.Dir(targetPath), 0o700)
+				}
+			} else {
+				targetPath, targetErr = AttachmentTargetPath(e.Profile().FileSavePath, hello.DeviceID, message.FileName)
+			}
 		}
 		if targetErr != nil {
 			_ = sessionWrite(session, conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "rejected", Reason: "STORAGE_UNAVAILABLE"})
@@ -1793,7 +1906,11 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		if resumeOffset > 0 {
 			acceptedMode = binaryTransferMode
 		}
-		if err := sessionWrite(session, conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted", Offset: resumeOffset, Resume: resumeOffset > 0, TransferMode: acceptedMode}); err != nil {
+		completedRanges := append([]TransferRange(nil), resumeState.CompletedRanges...)
+		if !resumeAllowed {
+			completedRanges = nil
+		}
+		if err := sessionWrite(session, conn, wireMessage{Type: "file_offer_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted", Offset: resumeOffset, Resume: resumeOffset > 0 || len(completedRanges) > 0, CompletedRanges: completedRanges, TransferMode: acceptedMode}); err != nil {
 			e.failIncomingFile(attachmentID, "STORAGE_UNAVAILABLE")
 			return
 		}
@@ -2024,7 +2141,9 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 	}
 	resumeState, resumeErr := loadTransferResumeState(attachment.AttachmentID)
 	resumeOffset := int64(0)
-	if resumeErr == nil && transferResumeMatches(resumeState, message.MessageID, senderID, attachment.FileSize, attachment.SHA256) {
+	resumeMatches := resumeErr == nil && transferResumeMatches(resumeState, message.MessageID, senderID, attachment.FileSize, attachment.SHA256)
+	resumeHasRanges := resumeMatches && len(resumeState.CompletedRanges) > 0
+	if resumeMatches {
 		resumeOffset = contiguousTransferOffset(resumeState.CompletedRanges, attachment.FileSize)
 		if resumeState.TargetPath != "" {
 			targetPath = resumeState.TargetPath
@@ -2037,10 +2156,10 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 		removeTransferResumeState(attachment.AttachmentID, true)
 	}
 	flags := os.O_CREATE | os.O_RDWR
-	if resumeOffset == 0 {
+	if resumeOffset == 0 && !resumeHasRanges {
 		flags |= os.O_TRUNC
 	}
-	if parallel {
+	if parallel && !resumeHasRanges {
 		flags = os.O_CREATE | os.O_TRUNC | os.O_RDWR
 	}
 	file, err := os.OpenFile(tempPath, flags, 0o600)
@@ -2075,6 +2194,18 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 	}
 	transfer := &incomingFile{file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
 	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
+	if resumeMatches && len(resumeState.CompletedRanges) > 0 {
+		transfer.v3Ranges = make([]ByteRange, 0, len(resumeState.CompletedRanges))
+		for _, item := range resumeState.CompletedRanges {
+			if item.Offset >= 0 && item.Length > 0 && item.Offset+item.Length <= attachment.FileSize {
+				transfer.v3Ranges = append(transfer.v3Ranges, ByteRange{Start: item.Offset, End: item.Offset + item.Length})
+			}
+		}
+		transfer.v3Ranges = MergeRanges(transfer.v3Ranges)
+		for _, item := range transfer.v3Ranges {
+			transfer.received += item.End - item.Start
+		}
+	}
 	if parallel {
 		transfer.parallelRanges = make(map[int]*parallelRange)
 		transfer.parallelSessions = make(map[int]*wireSession)
@@ -2123,7 +2254,22 @@ func persistIncomingResume(transfer *incomingFile) error {
 	if state.AttachmentID == "" {
 		return nil
 	}
-	if transfer.parallel {
+	if transfer.v3Streams != nil {
+		transfer.v3Mu.Lock()
+		ranges := make([]TransferRange, 0, len(transfer.v3Ranges))
+		for _, item := range transfer.v3Ranges {
+			if item.End > item.Start {
+				ranges = append(ranges, TransferRange{Offset: item.Start, Length: item.End - item.Start})
+			}
+		}
+		transfer.v3Mu.Unlock()
+		state.CompletedRanges = ranges
+		state.TransferMode = binaryTransferMode
+		transfer.durableBytes = 0
+		for _, item := range ranges {
+			transfer.durableBytes += item.Length
+		}
+	} else if transfer.parallel {
 		transfer.parallelMu.Lock()
 		ranges := make([]TransferRange, 0, len(transfer.parallelRanges))
 		for _, stream := range transfer.parallelRanges {
@@ -2326,6 +2472,29 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	}
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "verifying", receiverProgressOptions(transfer, nil))
 	parallelValid := true
+	v3Valid := true
+	transfer.v3Mu.Lock()
+	if transfer.v3Streams != nil {
+		v3Valid = transfer.expected == 0 || (len(transfer.v3Ranges) == 1 && transfer.v3Ranges[0].Start == 0 && transfer.v3Ranges[0].End == transfer.expected && transfer.received == transfer.expected)
+	}
+	transfer.v3Mu.Unlock()
+	if v3Valid && transfer.v3Streams != nil {
+		if transfer.file.Sync() != nil {
+			v3Valid = false
+		} else {
+			digest := sha256.New()
+			hashFile, err := os.Open(transfer.tempPath)
+			if err == nil {
+				_, err = io.Copy(digest, hashFile)
+				_ = hashFile.Close()
+			}
+			if err != nil {
+				v3Valid = false
+			} else {
+				transfer.digest = digest
+			}
+		}
+	}
 	if transfer.parallel {
 		transfer.parallelMu.Lock()
 		covered := int64(0)
@@ -2359,7 +2528,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		flushErr = transfer.writer.Flush()
 	}
 	closeErr := transfer.file.Close()
-	valid := flushErr == nil && closeErr == nil && parallelValid && transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
+	valid := flushErr == nil && closeErr == nil && parallelValid && v3Valid && transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
 	status := "pending"
 	localPath := transfer.tempPath
 	if valid && transfer.targetPath != "" && !e.IsAttachmentMigrationActive() {
@@ -2897,6 +3066,66 @@ func (e *Engine) discoveryLoop() {
 	}
 }
 
+func (e *Engine) discoveryIPv6Loop() {
+	buffer := make([]byte, 16*1024)
+	for {
+		e.mu.RLock()
+		conn := e.udp6
+		stop := e.stop
+		e.mu.RUnlock()
+		if conn == nil {
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, addr, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			select {
+			case <-stop:
+				return
+			default:
+				continue
+			}
+		}
+		var message wireMessage
+		if json.Unmarshal(buffer[:n], &message) != nil || message.DeviceID == e.identity.DeviceID {
+			continue
+		}
+		dialect, compatible := protocolDialectForMessage(message)
+		if !compatible {
+			continue
+		}
+		zoneIP := addr.IP.String()
+		if addr.Zone != "" {
+			zoneIP += "%" + addr.Zone
+		}
+		switch message.Type {
+		case "discover":
+			if scope := e.discoveryResponseScope(message.DeviceID); scope != "" {
+				response := e.helloMessageForDialect("announce", dialect)
+				response.RequestID, response.DiscoveryScope = message.RequestID, scope
+				_ = e.sendDiscovery(&net.UDPAddr{IP: addr.IP, Port: DiscoveryPort, Zone: addr.Zone}, response)
+			}
+		case "announce":
+			message.DiscoveryScope = e.compatibilityDiscoveryScope(message)
+			if isDiscoveryPresence(message.RequestID) {
+				if message.DiscoveryScope == DiscoveryScopePublic {
+					_ = e.handleAnnounce(message)
+				}
+				continue
+			}
+			if !e.acceptDiscoveryResponse(message.RequestID, message.DeviceID, message.DiscoveryScope) {
+				continue
+			}
+			message.IP = zoneIP
+			_ = e.handleAnnounce(message)
+		case "withdraw":
+			e.handleWithdraw(message.DeviceID, message.RequestID)
+		case "offline":
+			e.handleOffline(message.DeviceID, message.RequestID)
+		}
+	}
+}
+
 func (e *Engine) scanLoop() {
 	ticker := time.NewTicker(6 * time.Second)
 	defer ticker.Stop()
@@ -2985,6 +3214,9 @@ func (e *Engine) scanNetwork(includeUnicastProbe bool) {
 		for index := len(targets) - len(subnetTargets); index < len(targets); index++ {
 			// Individual hosts can be offline; a failed unicast probe is expected.
 			_ = e.sendDiscovery(&targets[index], message)
+		}
+		for _, target := range ipv6MulticastAddresses() {
+			_ = e.sendDiscovery(&target, message)
 		}
 		if includeUnicastProbe {
 			if probeErr := e.probeTCPSubnets(message, subnetTargets); probeErr != nil && firstErr == nil {
@@ -3175,7 +3407,12 @@ func (e *Engine) sendDiscovery(addr *net.UDPAddr, message wireMessage) error {
 	}
 	e.mu.RLock()
 	udp := e.udp
+	udp6 := e.udp6
 	e.mu.RUnlock()
+	if addr != nil && addr.IP.To4() == nil && udp6 != nil {
+		_, err = udp6.WriteToUDP(data, addr)
+		return err
+	}
 	if udp == nil {
 		return errors.New("discovery_not_started")
 	}
@@ -3194,11 +3431,15 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
 	if dialect.Major >= 2 {
-		capabilities = append(capabilities, "file-progress-v1", fileWindowCapability, fileStreamCapability, fileParallelCapability, fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1")
+		capabilities = append(capabilities, "file-progress-v1", fileWindowCapability, fileStreamCapability, fileParallelCapability, fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "range-resume-v2")
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)
-	message := wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
+	e.mu.RLock()
+	dataPort := e.dataPort
+	e.mu.RUnlock()
+	linkProfile, localAddresses := DetectLocalLinkProfile(identity.IP)
+	message := wireMessage{Magic: dialect.Magic, Type: kind, Protocol: dialect.Name, Major: dialect.Major, Minor: ProtocolMinor, MinMajor: dialect.Major, MinMinor: 0, DeviceID: identity.DeviceID, Nickname: profile.Nickname, AvatarHash: profile.AvatarHash, AvatarVersion: profile.AvatarVersion, Platform: identity.Platform, OSVersion: identity.OSVersion, IP: identity.IP, Port: identity.Port, DataPort: dataPort, LinkType: linkProfile.Type, LinkSpeedMbps: linkProfile.SpeedMbps, InterfaceName: linkProfile.InterfaceName, LocalAddresses: localAddresses, PublicKey: identity.PublicKeyPEM, CertFP: identity.CertificateFingerprint, Capabilities: capabilities}
 	if kind == "announce" {
 		if data, mimeType, hash := e.avatarPreviewPayloadForWire(); data != "" {
 			message.AvatarPreviewData = data
@@ -3221,7 +3462,7 @@ func (e *Engine) upsertWirePeerWithOptions(message wireMessage, discoveryVisible
 		return fmt.Errorf("设备身份为空")
 	}
 	avatarChanged := false
-	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, DiscoveryVisible: discoveryVisible, Relation: DiscoveredState, LastSeen: nowString()}
+	peer := Peer{DeviceID: message.DeviceID, Nickname: message.Nickname, AvatarHash: message.AvatarHash, AvatarVersion: message.AvatarVersion, Platform: message.Platform, OSVersion: message.OSVersion, IP: message.IP, Port: message.Port, DataPort: message.DataPort, LinkType: message.LinkType, LinkSpeedMbps: message.LinkSpeedMbps, InterfaceName: message.InterfaceName, LocalAddresses: append([]string(nil), message.LocalAddresses...), PublicKeyPEM: message.PublicKey, CertificateFingerprint: message.CertFP, ProtocolName: message.Protocol, ProtocolMajor: message.Major, DiscoveryMagic: message.Magic, Capabilities: message.Capabilities, DiscoveryVisible: discoveryVisible, Relation: DiscoveredState, LastSeen: nowString()}
 	if existing, existingErr := e.peer(message.DeviceID); existingErr == nil {
 		if existing.PublicKeyPEM != "" && message.PublicKey != "" && !strings.EqualFold(existing.PublicKeyPEM, message.PublicKey) {
 			return fmt.Errorf("DEVICE_KEY_CHANGED")
@@ -3954,6 +4195,73 @@ func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) erro
 }
 
 func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, error) {
+	return e.sendFile(ctx, deviceID, path, "")
+}
+
+// SendFolder sends a validated manifest first, then schedules each file with
+// its relative path so the receiver can place it under the manifest root.
+func (e *Engine) SendFolder(ctx context.Context, deviceID, path string) ([]Message, error) {
+	if e.IsAttachmentMigrationActive() {
+		return nil, fmt.Errorf("附件迁移正在进行")
+	}
+	if !e.isFriend(deviceID) {
+		return nil, fmt.Errorf("不是好友")
+	}
+	root, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+	entries, err := BuildManifestV3(root)
+	if err != nil {
+		return nil, err
+	}
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.sendFolderManifest(ctx, peer, entries); err != nil {
+		return nil, err
+	}
+	results := make([]Message, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDirectory {
+			continue
+		}
+		filePath := filepath.Join(root, filepath.FromSlash(entry.RelativePath))
+		message, err := e.sendFile(ctx, deviceID, filePath, entry.RelativePath)
+		if err != nil {
+			return results, err
+		}
+		results = append(results, message)
+	}
+	return results, nil
+}
+
+func (e *Engine) sendFolderManifest(ctx context.Context, peer Peer, entries []ManifestEntryV3) error {
+	dialects := protocolDialectsForPeer(peer)
+	if len(dialects) == 0 {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	control, err := e.fileControlForPeer(peer, dialects[0])
+	if err != nil {
+		return err
+	}
+	transferID := newID()
+	if err := control.session.write(wireMessage{Type: "file_manifest", TransferID: transferID, Manifest: entries}); err != nil {
+		e.discardFileControl(peer.DeviceID, control.session)
+		return err
+	}
+	var response wireMessage
+	if err := control.reader.Decode(&response); err != nil {
+		return err
+	}
+	if response.Type != "manifest_applied" || response.Status != "accepted" || (response.TransferID != "" && response.TransferID != transferID) {
+		return fmt.Errorf("文件夹 manifest 未被接受: %s", response.Reason)
+	}
+	return nil
+}
+
+func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath string) (Message, error) {
 	if e.IsAttachmentMigrationActive() {
 		return Message{}, fmt.Errorf("附件迁移正在进行")
 	}
@@ -3980,7 +4288,7 @@ func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, 
 	if isImage {
 		initialStatus = "preparing_thumbnail"
 	}
-	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: initialStatus, CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: attachmentMime, AttachmentStatus: initialStatus, AttachmentPath: path}
+	message := Message{MessageID: messageID, ConversationID: conversationID, SenderDeviceID: e.identity.DeviceID, Kind: "file", Content: fileName, Status: initialStatus, CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: fileName, AttachmentSize: info.Size(), AttachmentMime: attachmentMime, AttachmentStatus: initialStatus, AttachmentPath: path, RelativePath: relativePath}
 	if err := SaveMessage(ctx, message); err != nil {
 		return Message{}, err
 	}
@@ -4441,6 +4749,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	supportsBinary := supportsWindowed && hasCapability(response.Capabilities, fileStreamCapability)
 	supportsParallel := supportsProgress && hasCapability(response.Capabilities, fileParallelCapability) && responseDialect.Major >= 2
 	supportsPreflight := hasCapability(response.Capabilities, "storage-preflight-v1") && responseDialect.Major >= 2
+	var completedRanges []ByteRange
 	transferMode := legacyTransferMode
 	if supportsWindowed {
 		transferMode = jsonWindowTransferMode
@@ -4481,7 +4790,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if e.isPreparingCanceled(message.AttachmentID) {
 		return errAttachmentCanceled
 	}
-	offer := wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum, ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime}
+	offer := wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, RelativePath: message.RelativePath, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum, ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime}
 	if supportsWindowed {
 		offer.ChunkSize, offer.WindowSize = tuning.chunkSize, tuning.windowSize
 		offer.WindowID, offer.WindowBytes = 0, int64(tuning.chunkSize*tuning.windowSize)
@@ -4535,6 +4844,11 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			return fmt.Errorf("对方返回的断点位置无效")
 		}
 		resumeOffset = offerResponse.Offset
+		for _, item := range offerResponse.CompletedRanges {
+			if item.Length > 0 {
+				completedRanges = append(completedRanges, ByteRange{Start: item.Offset, End: item.Offset + item.Length})
+			}
+		}
 	}
 	if session.isCanceled() {
 		return errAttachmentCanceled
@@ -4550,6 +4864,50 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		supportsParallel = false
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, resumeOffset, message.AttachmentSize, "send", "resuming", transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"})
 	}
+	if response.DataPort > 0 && hasCapability(response.Capabilities, "binary-frame-v3") {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		e.mu.RLock()
+		localIP := e.identity.IP
+		e.mu.RUnlock()
+		v3Profile, _ := DetectLocalLinkProfile(localIP)
+		if v3Profile.Type == LinkUnknown {
+			v3Profile.Type = peer.LinkType
+		}
+		if peer.LinkSpeedMbps > 0 {
+			v3Profile.SpeedMbps = peer.LinkSpeedMbps
+		}
+		v3Profile.RemoteIP = peer.IP
+		v3Streams := v3Profile.SlotLimit(message.AttachmentSize)
+		if v3Streams > 1 {
+			if err := e.sendV3FileDataParallel(ctx, peer, message, file, sum, v3Streams, resumeOffset, completedRanges); err == nil {
+				verified := true
+				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), windowSize: v3Streams, streamCount: v3Streams, activeStreams: v3Streams, transferMode: binaryTransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
+				return nil
+			} else {
+				if ctx.Err() != nil || session.isCanceled() {
+					return errAttachmentCanceled
+				}
+				return fmt.Errorf("v3 数据传输失败: %w", err)
+			}
+		} else if assignments := partitionV3Ranges(message.AttachmentSize, append(completedRanges, ByteRange{Start: 0, End: resumeOffset}), 1); len(assignments) == 0 {
+			return nil
+		} else if err := e.sendV3FileDataRanges(ctx, peer, message, file, sum, assignments[0]); err == nil {
+			verified := true
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), windowSize: 1, transferMode: binaryTransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
+			return nil
+		} else {
+			if ctx.Err() != nil || session.isCanceled() {
+				return errAttachmentCanceled
+			}
+			return fmt.Errorf("v3 数据传输失败: %w", err)
+		}
+	}
+	// File payloads are v3-only. Keeping a legacy branch here would allow a
+	// v3 control session to silently fall back to JSON/base64 after a data-port
+	// failure, defeating range resume and the binary integrity contract.
+	return fmt.Errorf("v3 对端未提供可用的二进制数据端口")
 	if supportsParallel {
 		return e.transferParallelFile(ctx, peer, message, file, session, reader, dialect, offer.TransferToken, offer.StreamCount, protocolLabel)
 	}
@@ -5107,6 +5465,16 @@ func parallelLaunchTarget(launched, completed, total int, confirmed, diskWriteMs
 }
 
 func (e *Engine) transferParallelFile(ctx context.Context, peer Peer, message Message, file *os.File, control *wireSession, controlReader *wireReader, dialect ProtocolDialect, token string, streamCount int, protocolLabel string) error {
+	e.mu.Lock()
+	if e.peerPools == nil {
+		e.peerPools = make(map[string]*PeerPool)
+	}
+	pool := e.peerPools[peer.DeviceID]
+	if pool == nil {
+		pool = NewPeerPool(peer.DeviceID, streamCount)
+		e.peerPools[peer.DeviceID] = pool
+	}
+	e.mu.Unlock()
 	if streamCount < parallelInitialStreams || streamCount > parallelMaxStreams {
 		streamCount = parallelStreamCount(message.AttachmentSize)
 	}
@@ -5126,14 +5494,21 @@ func (e *Engine) transferParallelFile(ctx context.Context, peer Peer, message Me
 		workers.Wait()
 	}()
 	launched := 0
+	activeSlots := make([]*PoolSlot, streamCount)
 	launchStream := func(streamID int) error {
 		offset, length, ok := parallelRangeFor(message.AttachmentSize, streamID, streamCount)
 		if !ok {
 			return fmt.Errorf("并行数据范围无效")
 		}
+		slot, err := pool.Acquire(parallelCtx, message.AttachmentID)
+		if err != nil {
+			return err
+		}
+		activeSlots[streamID] = slot
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			defer pool.Release(slot)
 			e.sendParallelStream(parallelCtx, peer, dialect, message, file, token, streamCount, streamID, offset, length, parallelChunkSize, updates)
 		}()
 		launched++
@@ -5194,10 +5569,15 @@ func (e *Engine) transferParallelFile(ctx context.Context, peer Peer, message Me
 			if update.streamID < 0 || update.streamID >= streamCount {
 				return fmt.Errorf("并行数据流编号无效")
 			}
-			sent += update.sent - sentByStream[update.streamID]
-			confirmed += update.confirmed - confirmedByStream[update.streamID]
+			sentDelta := update.sent - sentByStream[update.streamID]
+			confirmedDelta := update.confirmed - confirmedByStream[update.streamID]
+			sent += sentDelta
+			confirmed += confirmedDelta
 			sentByStream[update.streamID] = update.sent
 			confirmedByStream[update.streamID] = update.confirmed
+			if activeSlots[update.streamID] != nil {
+				activeSlots[update.streamID].Progress(sentDelta, confirmedDelta)
+			}
 			if update.done {
 				completed++
 			}
@@ -6259,7 +6639,7 @@ func (e *Engine) clientTLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, nil
+	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, nil
 }
 
 func cachedAvatarMatches(peer Peer) bool {
@@ -6718,6 +7098,9 @@ func (e *Engine) broadcastPresence(kind string) {
 		for index := range targets {
 			_ = e.sendDiscovery(&targets[index], message)
 		}
+		for _, target := range ipv6MulticastAddresses() {
+			_ = e.sendDiscovery(&target, message)
+		}
 	}
 }
 
@@ -6955,6 +7338,18 @@ func broadcastAddresses() []net.UDPAddr {
 				result = append(result, net.UDPAddr{IP: broadcast, Port: DiscoveryPort})
 			}
 		}
+	}
+	return result
+}
+
+func ipv6MulticastAddresses() []net.UDPAddr {
+	interfaces, _ := net.Interfaces()
+	result := make([]net.UDPAddr, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		result = append(result, net.UDPAddr{IP: net.ParseIP("ff02::1"), Port: DiscoveryPort, Zone: iface.Name})
 	}
 	return result
 }

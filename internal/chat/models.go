@@ -59,17 +59,21 @@ type Profile struct {
 }
 
 type DeviceInfo struct {
-	Platform               string `json:"platform"`
-	OSVersion              string `json:"osVersion"`
-	DeviceID               string `json:"deviceId"`
-	FeiqID                 string `json:"feiqId,omitempty"`
-	PublicKeyPEM           string `json:"publicKeyPem"`
-	CertificateFingerprint string `json:"certificateFingerprint"`
-	IP                     string `json:"ip"`
-	Port                   int    `json:"port"`
-	IdentityStatus         string `json:"identityStatus,omitempty"`
-	ProtocolName           string `json:"protocolName"`
-	ProtocolMajor          int    `json:"protocolMajor"`
+	Platform               string   `json:"platform"`
+	OSVersion              string   `json:"osVersion"`
+	DeviceID               string   `json:"deviceId"`
+	FeiqID                 string   `json:"feiqId,omitempty"`
+	PublicKeyPEM           string   `json:"publicKeyPem"`
+	CertificateFingerprint string   `json:"certificateFingerprint"`
+	IP                     string   `json:"ip"`
+	Port                   int      `json:"port"`
+	LinkType               LinkType `json:"linkType,omitempty"`
+	LinkSpeedMbps          int      `json:"linkSpeedMbps,omitempty"`
+	InterfaceName          string   `json:"interfaceName,omitempty"`
+	LocalAddresses         []string `json:"localAddresses,omitempty"`
+	IdentityStatus         string   `json:"identityStatus,omitempty"`
+	ProtocolName           string   `json:"protocolName"`
+	ProtocolMajor          int      `json:"protocolMajor"`
 }
 
 type Peer struct {
@@ -83,6 +87,11 @@ type Peer struct {
 	OSVersion              string    `json:"osVersion"`
 	IP                     string    `json:"ip"`
 	Port                   int       `json:"port"`
+	DataPort               int       `json:"dataPort"`
+	LinkType               LinkType  `json:"linkType,omitempty"`
+	LinkSpeedMbps          int       `json:"linkSpeedMbps,omitempty"`
+	InterfaceName          string    `json:"interfaceName,omitempty"`
+	LocalAddresses         []string  `json:"localAddresses,omitempty"`
 	PublicKeyPEM           string    `json:"publicKeyPem"`
 	CertificateFingerprint string    `json:"certificateFingerprint"`
 	Relation               string    `json:"relation"`
@@ -137,6 +146,7 @@ type Message struct {
 	AttachmentThumbnailMime string `json:"attachmentThumbnailMime,omitempty"`
 	AttachmentStatus        string `json:"attachmentStatus,omitempty"`
 	AttachmentPath          string `json:"attachmentPath,omitempty"`
+	RelativePath            string `json:"relativePath,omitempty"`
 	IsFavorite              bool   `json:"isFavorite,omitempty"`
 	DeletedAt               string `json:"deletedAt,omitempty"`
 	QuoteMessageID          string `json:"quoteMessageId,omitempty"`
@@ -338,6 +348,11 @@ type wireMessage struct {
 	OSVersion           string                   `json:"osVersion,omitempty"`
 	IP                  string                   `json:"ip,omitempty"`
 	Port                int                      `json:"port,omitempty"`
+	DataPort            int                      `json:"dataPort,omitempty"`
+	LinkType            LinkType                 `json:"linkType,omitempty"`
+	LinkSpeedMbps       int                      `json:"linkSpeedMbps,omitempty"`
+	InterfaceName       string                   `json:"interfaceName,omitempty"`
+	LocalAddresses      []string                 `json:"localAddresses,omitempty"`
 	PublicKey           string                   `json:"publicKey,omitempty"`
 	CertFP              string                   `json:"certificateFingerprint,omitempty"`
 	Content             string                   `json:"content,omitempty"`
@@ -397,6 +412,7 @@ type wireMessage struct {
 	CompletedRanges     []TransferRange          `json:"completedRanges,omitempty"`
 	Resume              bool                     `json:"resume,omitempty"`
 	Entries             []SharedEntry            `json:"entries,omitempty"`
+	Manifest            []ManifestEntryV3        `json:"manifest,omitempty"`
 	SharedFolders       []SharedFolder           `json:"sharedFolders,omitempty"`
 	ListOffset          int                      `json:"listOffset,omitempty"`
 	ListLimit           int                      `json:"listLimit,omitempty"`

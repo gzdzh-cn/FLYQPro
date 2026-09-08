@@ -72,6 +72,34 @@ func (f V3Frame) MarshalBinary() []byte {
 
 type QUICTransport struct{ conn *quic.Conn }
 
+type V3TransportKind string
+
+const (
+	TransportTLSTCP V3TransportKind = "tls-tcp"
+	TransportQUIC   V3TransportKind = "quic"
+)
+
+type TransportABResult struct {
+	Kind           V3TransportKind
+	TotalTime      time.Duration
+	FirstByte      time.Duration
+	Recovered      bool
+	SHA256Verified bool
+}
+
+// SelectV3Transport keeps TCP/TLS as the conservative default. QUIC becomes
+// eligible only when the same scheduler run proves a 5% total-time gain
+// without increasing first-byte latency or weakening recovery/integrity.
+func SelectV3Transport(tcp, quic TransportABResult) V3TransportKind {
+	if !tcp.SHA256Verified || !quic.SHA256Verified || !tcp.Recovered || !quic.Recovered || tcp.TotalTime <= 0 || quic.TotalTime <= 0 {
+		return TransportTLSTCP
+	}
+	if quic.FirstByte > tcp.FirstByte || quic.TotalTime > tcp.TotalTime*95/100 {
+		return TransportTLSTCP
+	}
+	return TransportQUIC
+}
+
 func ListenQUIC(addr string, config *tls.Config) (net.PacketConn, *quic.Listener, error) {
 	if config == nil {
 		return nil, nil, errors.New("nil TLS config")
