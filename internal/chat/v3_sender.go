@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -30,6 +32,7 @@ func (e *Engine) dialV3PeerData(ctx context.Context, peer Peer) (net.Conn, error
 	if err != nil {
 		return nil, err
 	}
+	config.VerifyConnection = func(state tls.ConnectionState) error { return verifyPeerCertificateState(state, peer) }
 	conn, err := DialV3DataCandidates(ctx, append([]string{peer.IP}, peer.LocalAddresses...), peer.DataPort, config)
 	if err != nil {
 		return nil, err
@@ -76,94 +79,58 @@ func (e *Engine) v3Pool(peerID string, limit int) *PeerPool {
 }
 
 func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message Message, file *os.File, fullSHA string, streams int, startOffset int64, completed []ByteRange) error {
+	if startOffset < 0 || startOffset > message.AttachmentSize {
+		return os.ErrInvalid
+	}
 	if startOffset > 0 {
 		completed = append(completed, ByteRange{Start: 0, End: startOffset})
 	}
-	assignments := partitionV3Ranges(message.AttachmentSize, completed, streams)
-	if len(assignments) == 0 {
-		return nil
-	}
-	streams = len(assignments)
-	if streams < 2 {
-		first := assignments[0]
-		return e.sendV3FileDataRanges(ctx, peer, message, file, fullSHA, first)
+	if streams < 1 {
+		streams = 1
 	}
 	if streams > 8 {
 		streams = 8
 	}
-	pool := e.v3Pool(peer.DeviceID, streams)
+	if message.RelativePath != "" && streams > 4 {
+		streams = 4
+	}
+	for _, r := range completed {
+		if r.Start < 0 || r.End < r.Start || r.End > message.AttachmentSize {
+			return os.ErrInvalid
+		}
+	}
+	assignments := partitionV3Ranges(message.AttachmentSize, completed, streams)
+	// Even empty and fully resumed files must complete the receiver's hash/rename handshake.
+	if len(assignments) == 0 {
+		assignments = [][]ByteRange{{}}
+	}
+	digest, err := v3FileDigest(file, fullSHA)
+	if err != nil {
+		return err
+	}
+	pool := e.v3Pool(peer.DeviceID, len(assignments))
+	var progressMu sync.Mutex
+	completedBytes := message.AttachmentSize
+	for _, ranges := range assignments {
+		for _, r := range ranges {
+			completedBytes -= r.End - r.Start
+		}
+	}
+	progress := func(n int64, latency time.Duration) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		completedBytes += n
+		profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency})
+	}
 	var wg sync.WaitGroup
-	errs := make(chan error, streams)
-	for i := 0; i < streams; i++ {
-		ranges := assignments[i]
+	errs := make(chan error, len(assignments))
+	for _, ranges := range assignments {
 		wg.Add(1)
-		go func(worker int, ranges []ByteRange) {
+		go func(ranges []ByteRange) {
 			defer wg.Done()
-			slot, err := pool.Acquire(ctx, message.AttachmentID)
-			if err != nil {
-				errs <- err
-				return
-			}
-			defer pool.Release(slot)
-			conn, err := e.pooledV3DataConn(ctx, peer, slot)
-			if err != nil {
-				errs <- err
-				return
-			}
-			id := binaryTransferID(message.AttachmentID)
-			sessionID := pool.SessionID()
-			generation := slot.Generation
-			begin := BinaryFrameV3{Type: FrameBeginFile, TransferID: id, StreamID: uint16(worker), SessionID: sessionID, Generation: generation}
-			raw, _ := begin.MarshalBinary()
-			if _, err = conn.Write(raw); err != nil {
-				slot.Kill()
-				errs <- err
-				return
-			}
-			buf := make([]byte, 1<<20)
-			var seq uint64
-			for _, r := range ranges {
-				for off := r.Start; off < r.End; {
-					n := int64(len(buf))
-					if n > r.End-off {
-						n = r.End - off
-					}
-					if _, err = file.ReadAt(buf[:n], off); err != nil && err != io.EOF {
-						errs <- err
-						return
-					}
-					frame := NewChunkFrame(id, uint16(worker), seq, uint64(off), buf[:n])
-					frame.SessionID, frame.Generation = sessionID, generation
-					raw, _ = frame.MarshalBinary()
-					acked := false
-					for attempt := 0; attempt < 3 && !acked; attempt++ {
-						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-						if _, err = conn.Write(raw); err != nil {
-							slot.Kill()
-							break
-						}
-						ack, readErr := ReadBinaryFrameV3(conn, 1024)
-						acked = readErr == nil && ack.Type == FrameChunkAck && ack.Sequence == seq
-					}
-					if !acked {
-						slot.Kill()
-						errs <- os.ErrInvalid
-						return
-					}
-					slot.Progress(n, n)
-					off += n
-					seq++
-				}
-			}
-			endOffset := uint64(ranges[len(ranges)-1].End)
-			endFrame := BinaryFrameV3{Type: FrameEndFile, TransferID: id, StreamID: uint16(worker), Offset: endOffset, SessionID: sessionID, Generation: generation}
-			raw, _ = endFrame.MarshalBinary()
-			_, err = conn.Write(raw)
-			if err != nil {
-				slot.Kill()
-				errs <- err
-			}
-		}(i, ranges)
+			errs <- e.sendV3Worker(ctx, peer, message, file, digest, pool, ranges, progress)
+		}(ranges)
 	}
 	wg.Wait()
 	close(errs)
@@ -172,6 +139,189 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			return err
 		}
 	}
+	return nil
+}
+
+// ACKs are scoped to the exact chunk and authenticated session, not just a
+// sequence number that can be reused by a different file or replacement slot.
+func matchesV3Reply(reply, request BinaryFrameV3, typ V3FrameType) bool {
+	return reply.Type == typ && reply.TransferID == request.TransferID &&
+		reply.SessionID == request.SessionID && reply.Generation == request.Generation &&
+		reply.StreamID == request.StreamID && reply.Sequence == request.Sequence &&
+		reply.Offset == request.Offset && reply.Length == 0 && len(reply.Payload) == 0
+}
+
+func v3FileDigest(file *os.File, fullSHA string) ([32]byte, error) {
+	var digest [32]byte
+	if fullSHA != "" {
+		b, err := hex.DecodeString(fullSHA)
+		if err != nil || len(b) != len(digest) {
+			return digest, fmt.Errorf("invalid file SHA-256")
+		}
+		copy(digest[:], b)
+	} else {
+		info, err := file.Stat()
+		if err != nil {
+			return digest, err
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, io.NewSectionReader(file, 0, info.Size())); err != nil {
+			return digest, err
+		}
+		copy(digest[:], h.Sum(nil))
+	}
+	return digest, nil
+}
+
+func writeV3Frame(conn net.Conn, frame BinaryFrameV3) error {
+	raw, err := frame.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	for len(raw) > 0 {
+		n, err := conn.Write(raw)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		raw = raw[n:]
+	}
+	return nil
+}
+
+func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, file *os.File, digest [32]byte, pool *PeerPool, ranges []ByteRange, progress ...func(int64, time.Duration)) (result error) {
+	slot, err := pool.Acquire(ctx, message.AttachmentID)
+	if err != nil {
+		return err
+	}
+	defer pool.Release(slot)
+	defer func() {
+		if result != nil {
+			slot.Kill()
+			pool.ReplaceDead()
+		}
+	}()
+	conn, err := e.pooledV3DataConn(ctx, peer, slot)
+	if err != nil {
+		return err
+	}
+	// Interrupt blocking IO when the transfer is canceled. Stop this callback
+	// before returning the connection to the pool.
+	canceled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { slot.Kill(); close(canceled) })
+	defer func() {
+		if !stop() {
+			<-canceled
+		}
+	}()
+	id, sessionID := binaryTransferID(message.AttachmentID), pool.SessionID()
+	streamID, generation := uint16(slot.ID), slot.Generation
+	begin := BinaryFrameV3{Type: FrameBeginFile, TransferID: id, StreamID: streamID, SessionID: sessionID, Generation: generation}
+	open := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var err error
+		conn, err = e.pooledV3DataConn(ctx, peer, slot)
+		if err != nil {
+			return err
+		}
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		return writeV3Frame(conn, begin)
+	}
+	if err := open(); err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() != message.AttachmentSize {
+		return fmt.Errorf("SOURCE_CHANGED")
+	}
+	profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
+	buf := make([]byte, profile.ChunkBytes(message.AttachmentSize))
+	var seq uint64
+	for _, r := range ranges {
+		if r.Start < 0 || r.End < r.Start || r.End > message.AttachmentSize {
+			return os.ErrInvalid
+		}
+		for off := r.Start; off < r.End; {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			n := min(int64(len(buf)), r.End-off)
+			if _, err := io.ReadFull(io.NewSectionReader(file, off, n), buf[:n]); err != nil {
+				return err
+			}
+			frame := NewChunkFrame(id, streamID, seq, uint64(off), buf[:n])
+			frame.SessionID, frame.Generation = sessionID, generation
+			ackStarted := time.Now()
+			acknowledged := false
+			for attempt := 0; attempt < 3; attempt++ {
+				if conn == nil {
+					if err = open(); err != nil {
+						continue
+					}
+				}
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				err = writeV3Frame(conn, frame)
+				var ack BinaryFrameV3
+				if err == nil {
+					ack, err = ReadBinaryFrameV3(conn, 1024)
+				}
+				if err == nil && matchesV3Reply(ack, frame, FrameChunkAck) {
+					acknowledged = true
+					break
+				}
+				if err == nil && !matchesV3Reply(ack, frame, FrameChunkNack) {
+					return fmt.Errorf("v3 stale or invalid acknowledgement")
+				}
+				if attempt == 2 {
+					break
+				}
+				// A timed-out read may have consumed half a frame. Never reuse that byte
+				// stream: reconnect and resend only this unconfirmed, idempotent chunk.
+				slot.CloseConnection()
+				if err = open(); err != nil {
+					continue
+				}
+			}
+			if !acknowledged {
+				return fmt.Errorf("v3 chunk %d unconfirmed: %w", seq, errors.Join(err, io.ErrUnexpectedEOF))
+			}
+			slot.Progress(n, n)
+			if len(progress) > 0 {
+				progress[0](n, time.Since(ackStarted))
+			}
+			off += n
+			seq++
+		}
+	}
+	current, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if current.Size() != info.Size() || !current.ModTime().Equal(info.ModTime()) {
+		return fmt.Errorf("SOURCE_CHANGED")
+	}
+	end := BinaryFrameV3{Type: FrameEndFile, TransferID: id, StreamID: streamID, Sequence: seq, Offset: uint64(message.AttachmentSize), ChunkHash: digest, SessionID: sessionID, Generation: generation}
+	// Hashing a multi-gigabyte file on slow storage can take minutes.
+	slot.Drain()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
+	if err := writeV3Frame(conn, end); err != nil {
+		return err
+	}
+	reply, err := ReadBinaryFrameV3(conn, 1024)
+	if err != nil {
+		return err
+	}
+	if !matchesV3Reply(reply, end, FrameEndFile) || reply.ChunkHash != digest {
+		return fmt.Errorf("v3 receiver did not confirm file verification")
+	}
+	_ = conn.SetDeadline(time.Time{})
 	return nil
 }
 
@@ -224,122 +374,9 @@ func (e *Engine) sendV3FileData(ctx context.Context, peer Peer, message Message,
 }
 
 func (e *Engine) sendV3FileDataRanges(ctx context.Context, peer Peer, message Message, file *os.File, fullSHA string, ranges []ByteRange) error {
-	if peer.DataPort <= 0 || peer.IP == "" {
-		return os.ErrInvalid
-	}
-	if len(ranges) == 0 {
-		return nil
-	}
-	startOffset := ranges[0].Start
-	if startOffset < 0 || startOffset > message.AttachmentSize {
-		return os.ErrInvalid
-	}
-	if _, err := file.Seek(startOffset, io.SeekStart); err != nil {
-		return err
-	}
-	pool := e.v3Pool(peer.DeviceID, 1)
-	slot, err := pool.Acquire(ctx, message.AttachmentID)
+	digest, err := v3FileDigest(file, fullSHA)
 	if err != nil {
 		return err
 	}
-	defer pool.Release(slot)
-	conn, err := e.pooledV3DataConn(ctx, peer, slot)
-	if err != nil {
-		return err
-	}
-	id := binaryTransferID(message.AttachmentID)
-	sessionID := pool.SessionID()
-	generation := slot.Generation
-	begin := BinaryFrameV3{Type: FrameBeginFile, TransferID: id, SessionID: sessionID, Generation: generation}
-	raw, _ := begin.MarshalBinary()
-	if _, err = conn.Write(raw); err != nil {
-		return err
-	}
-	buf := make([]byte, 1<<20)
-	var offset, seq uint64 = uint64(startOffset), 0
-	for _, current := range ranges {
-		if _, err := file.Seek(current.Start, io.SeekStart); err != nil {
-			return err
-		}
-		offset = uint64(current.Start)
-		for offset < uint64(current.End) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			readSize := int64(len(buf))
-			if remaining := int64(current.End) - int64(offset); readSize > remaining {
-				readSize = remaining
-			}
-			n, readErr := file.Read(buf[:readSize])
-			if n > 0 {
-				frame := NewChunkFrame(id, 0, seq, offset, buf[:n])
-				frame.SessionID, frame.Generation = sessionID, generation
-				raw, err = frame.MarshalBinary()
-				if err != nil {
-					return err
-				}
-				acked := false
-				for attempt := 0; attempt < 3; attempt++ {
-					_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-					if _, err = conn.Write(raw); err != nil {
-						slot.Kill()
-						return err
-					}
-					ack, readErr := ReadBinaryFrameV3(conn, 1024)
-					if readErr == nil && ack.Type == FrameChunkAck && ack.Sequence == seq {
-						acked = true
-						break
-					}
-					if readErr != nil && !isTemporaryNetError(readErr) && attempt == 2 {
-						slot.Kill()
-						return readErr
-					}
-					if readErr == nil && ack.Type == FrameChunkNack {
-						continue
-					}
-				}
-				_ = conn.SetReadDeadline(time.Time{})
-				if !acked {
-					slot.Kill()
-					return os.ErrInvalid
-				}
-				offset += uint64(n)
-				seq++
-			}
-			if readErr == io.EOF {
-				break
-			}
-			if readErr != nil {
-				return readErr
-			}
-		}
-	}
-	var digest []byte
-	if fullSHA != "" {
-		digest, err = hex.DecodeString(fullSHA)
-		if err != nil {
-			return err
-		}
-	} else {
-		_, _ = file.Seek(0, io.SeekStart)
-		h := sha256.New()
-		if _, err = io.Copy(h, file); err != nil {
-			return err
-		}
-		digest = h.Sum(nil)
-	}
-	var finalHash [32]byte
-	copy(finalHash[:], digest)
-	end := BinaryFrameV3{Type: FrameEndFile, TransferID: id, Offset: offset, ChunkHash: finalHash, SessionID: sessionID, Generation: generation}
-	raw, err = end.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	_, err = conn.Write(raw)
-	if err != nil {
-		slot.Kill()
-	}
-	return err
+	return e.sendV3Worker(ctx, peer, message, file, digest, e.v3Pool(peer.DeviceID, 1), ranges)
 }

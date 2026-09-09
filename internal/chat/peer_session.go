@@ -20,6 +20,9 @@ type PeerPool struct {
 }
 
 func NewPeerPool(peerID string, limit int) *PeerPool {
+	if limit > 8 {
+		limit = 8
+	}
 	if limit < 1 {
 		limit = 1
 	}
@@ -63,6 +66,9 @@ func (p *PeerPool) Release(s *PoolSlot) {
 // EnsureLimit grows a peer's reusable slot set when a later transfer needs a
 // larger pipeline. Existing slots and their generation are preserved.
 func (p *PeerPool) EnsureLimit(limit int) {
+	if limit > 8 {
+		limit = 8
+	}
 	if limit < 1 {
 		limit = 1
 	}
@@ -76,8 +82,9 @@ func (p *PeerPool) ReplaceDead() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, s := range p.slots {
-		if s.State == SlotDead {
-			p.generation++
+		if state, _ := s.Snapshot(); state == SlotDead {
+			// Slot repair does not create a new peer session. Other active
+			// slots must keep the same generation as their replacement.
 			p.slots[i] = &PoolSlot{ID: s.ID, Generation: p.generation, State: SlotIdle, LastProgress: time.Now()}
 		}
 	}
@@ -87,7 +94,7 @@ func (p *PeerPool) CloseIdle(now time.Time, idle time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, slot := range p.slots {
-		if slot.State == SlotIdle && now.Sub(slot.LastProgress) >= idle {
+		if state, last := slot.Snapshot(); state == SlotIdle && now.Sub(last) >= idle {
 			slot.CloseConnection()
 		}
 	}
@@ -97,7 +104,7 @@ func (p *PeerPool) Active() int {
 	defer p.mu.Unlock()
 	n := 0
 	for _, s := range p.slots {
-		if s.State == SlotTransferring || s.State == SlotReserved {
+		if state, _ := s.Snapshot(); state == SlotTransferring || state == SlotReserved || state == SlotDraining {
 			n++
 		}
 	}

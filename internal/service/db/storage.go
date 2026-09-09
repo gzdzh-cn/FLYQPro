@@ -13,7 +13,6 @@ import (
 	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/errors/gcode"
 	"github.com/gogf/gf/v2/errors/gerror"
-	"github.com/gogf/gf/v2/frame/g"
 )
 
 const (
@@ -47,18 +46,15 @@ func Open(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return gerror.WrapCode(gcode.CodeInternalError, err, "创建 SQLite 目录失败")
 	}
-	if err := gdb.SetDefaultConfigGroup(gdb.ConfigGroup{{
-		Type:             "sqlite",
-		Name:             path,
-		Extra:            "busy_timeout=5000",
-		MaxOpenConnCount: 1,
-		MaxIdleConnCount: 1,
-		Debug:            !productionBuild,
-	}}); err != nil {
-		return gerror.WrapCode(gcode.CodeInternalError, err, "配置 GoFrame SQLite 连接失败")
+	// A new instance is required after Close: g.DB caches its original
+	// configuration and can reopen the previous path after an environment change.
+	database, err = gdb.New(gdb.ConfigNode{
+		Type: "sqlite", Name: path, Extra: "busy_timeout=5000",
+		MaxOpenConnCount: 1, MaxIdleConnCount: 1, Debug: !productionBuild,
+	})
+	if err != nil {
+		return gerror.WrapCode(gcode.CodeInternalError, err, "创建 SQLite 连接失败")
 	}
-
-	database = g.DB()
 	dbPath = path
 	for _, statement := range schemaStatements {
 		if _, err := database.Exec(ctx, statement); err != nil {

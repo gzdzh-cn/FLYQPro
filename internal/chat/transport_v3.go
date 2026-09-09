@@ -3,9 +3,7 @@ package chat
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 	"time"
 
@@ -44,30 +42,6 @@ func TuneV3(p LinkProfile, size int64) TransferTuningV3 {
 		return TransferTuningV3{256 << 10, 4 << 20, 2}
 	}
 	return TransferTuningV3{512 << 10, 16 << 20, 2}
-}
-
-type V3Frame struct {
-	TransferID string
-	StreamID   uint32
-	Offset     uint64
-	Length     uint32
-	Hash       [32]byte
-}
-
-func (f V3Frame) MarshalBinary() []byte {
-	b := make([]byte, 4+len(f.TransferID)+4+8+4+32)
-	binary.BigEndian.PutUint32(b, uint32(len(f.TransferID)))
-	n := 4
-	copy(b[n:], f.TransferID)
-	n += len(f.TransferID)
-	binary.BigEndian.PutUint32(b[n:], f.StreamID)
-	n += 4
-	binary.BigEndian.PutUint64(b[n:], f.Offset)
-	n += 8
-	binary.BigEndian.PutUint32(b[n:], f.Length)
-	n += 4
-	copy(b[n:], f.Hash[:])
-	return b
 }
 
 type QUICTransport struct{ conn *quic.Conn }
@@ -150,18 +124,4 @@ func (t *QUICTransport) CloseWithError(code quic.ApplicationErrorCode, msg strin
 		return nil
 	}
 	return t.conn.CloseWithError(code, msg)
-}
-
-func WriteFrame(w io.Writer, f V3Frame, payload []byte) error {
-	h := f.MarshalBinary()
-	var n [4]byte
-	binary.BigEndian.PutUint32(n[:], uint32(len(h)+len(payload)))
-	if _, e := w.Write(n[:]); e != nil {
-		return e
-	}
-	if _, e := w.Write(h); e != nil {
-		return e
-	}
-	_, e := w.Write(payload)
-	return e
 }

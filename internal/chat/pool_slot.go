@@ -63,6 +63,7 @@ func (s *PoolSlot) Release() {
 		s.State = SlotIdle
 	}
 	s.CurrentTask = ""
+	s.LastProgress = time.Now()
 }
 func (s *PoolSlot) Connection() net.Conn {
 	s.mu.Lock()
@@ -98,4 +99,17 @@ func (s *PoolSlot) Stalled(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return (s.State == SlotTransferring || s.State == SlotReserved) && now.Sub(s.LastProgress) >= 2*time.Second
+}
+
+func (s *PoolSlot) Snapshot() (PoolSlotState, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.State, s.LastProgress
+}
+func (s *PoolSlot) Drain() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State == SlotTransferring {
+		s.State = SlotDraining
+	}
 }

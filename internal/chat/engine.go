@@ -375,6 +375,14 @@ type incomingFile struct {
 	v3SessionID         [16]byte
 	v3Generation        uint64
 	v3Finalizing        bool
+	v3Done              chan string
+	v3CheckpointMu      sync.Mutex
+	v3Checkpoint        *v3Checkpoint
+	v3WrittenVersion    uint64
+	v3DurableVersion    uint64
+	v3Sink              func([]byte) error
+	v3StartOffset       int64
+	v3IOMu              sync.RWMutex
 	resumeState         transferResumeState
 	resumeOffset        int64
 	resumeCommitted     int64
@@ -450,6 +458,7 @@ const (
 	fileParallelCapability   = "file-stream-v4"
 	fileResumeCapability     = "file-resume-v1"
 	binaryTransferMode       = "binary-window"
+	v3TransferMode           = "binary-v3"
 	parallelBinaryMode       = "parallel-binary"
 	jsonWindowTransferMode   = "json-window"
 	legacyTransferMode       = "legacy-chunk"
@@ -1116,8 +1125,12 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		if err := decoder.Decode(&message); err != nil {
 			return
 		}
-		if message.Type == "file_stream_join" {
-			e.receiveParallelStream(decoder, conn, hello, message)
+		if message.Type == "file_offer" && message.TransferMode != v3TransferMode {
+			_ = session.write(wireMessage{Type: "file_offer_response", AttachmentID: message.AttachmentID, Status: "rejected", Reason: "V3_BINARY_DATA_REQUIRED"})
+			continue
+		}
+		if isLegacyFileData(message.Type) {
+			_ = session.write(wireMessage{Type: "error", Status: "V3_BINARY_DATA_REQUIRED", Reason: message.Type})
 			return
 		}
 		e.handleWire(conn, hello, message, session)
@@ -1798,7 +1811,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			return
 		}
 		resumeState, resumeErr := loadTransferResumeState(attachmentID)
-		resumeAllowed := hasCapability(hello.Capabilities, fileResumeCapability) && resumeErr == nil && transferResumeMatches(resumeState, message.MessageID, hello.DeviceID, message.FileSize, message.SHA256)
+		resumeAllowed := (hasCapability(hello.Capabilities, "binary-frame-v3") || hasCapability(hello.Capabilities, fileResumeCapability)) && resumeErr == nil && transferResumeMatches(resumeState, message.MessageID, hello.DeviceID, message.FileSize, message.SHA256)
 		resumeOffset := int64(0)
 		if resumeAllowed {
 			resumeOffset = contiguousTransferOffset(resumeState.CompletedRanges, message.FileSize)
@@ -1821,7 +1834,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		attachment := Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, Status: "pending"}
 		parallelMode := hasCapability(hello.Capabilities, fileParallelCapability) && message.TransferMode == parallelBinaryMode && message.TransferToken != ""
 		windowed := hasCapability(hello.Capabilities, fileWindowCapability) || parallelMode
-		binaryMode := windowed && hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode
+		binaryMode := message.TransferMode == v3TransferMode || (windowed && hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode)
 		if resumeOffset > 0 {
 			parallelMode = false
 			windowed = true
@@ -2192,7 +2205,7 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 		_ = os.Remove(tempPath)
 		return err
 	}
-	transfer := &incomingFile{file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
+	transfer := &incomingFile{v3Done: make(chan string, 1), file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
 	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
 	if resumeMatches && len(resumeState.CompletedRanges) > 0 {
 		transfer.v3Ranges = make([]ByteRange, 0, len(resumeState.CompletedRanges))
@@ -2202,6 +2215,8 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 			}
 		}
 		transfer.v3Ranges = MergeRanges(transfer.v3Ranges)
+		transfer.received = 0
+		transfer.resumeState.CompletedRanges = append([]TransferRange(nil), resumeState.CompletedRanges...)
 		for _, item := range transfer.v3Ranges {
 			transfer.received += item.End - item.Start
 		}
@@ -2242,6 +2257,35 @@ func persistIncomingResume(transfer *incomingFile) error {
 	}
 	transfer.resumeMu.Lock()
 	defer transfer.resumeMu.Unlock()
+	transfer.v3Mu.Lock()
+	if transfer.v3Streams != nil || len(transfer.v3Ranges) > 0 {
+		defer transfer.v3Mu.Unlock()
+		// Hold the range lock across fsync and the snapshot: ranges added
+		// afterwards belong to the next checkpoint, never this ACK batch.
+		if err := transfer.file.Sync(); err != nil {
+			return err
+		}
+		state := transfer.resumeState
+		state.CompletedRanges = nil
+		var covered int64
+		for _, r := range transfer.v3Ranges {
+			if r.End > r.Start {
+				state.CompletedRanges = append(state.CompletedRanges, TransferRange{Offset: r.Start, Length: r.End - r.Start})
+				covered += r.End - r.Start
+			}
+		}
+		state.TransferMode = v3TransferMode
+		if state.AttachmentID != "" {
+			if err := saveTransferResumeState(state); err != nil {
+				return err
+			}
+		}
+		transfer.resumeState = state
+		transfer.durableBytes = covered
+		transfer.v3DurableVersion = transfer.v3WrittenVersion
+		return nil
+	}
+	transfer.v3Mu.Unlock()
 	if transfer.writer != nil {
 		if err := transfer.writer.Flush(); err != nil {
 			return err
@@ -2254,22 +2298,7 @@ func persistIncomingResume(transfer *incomingFile) error {
 	if state.AttachmentID == "" {
 		return nil
 	}
-	if transfer.v3Streams != nil {
-		transfer.v3Mu.Lock()
-		ranges := make([]TransferRange, 0, len(transfer.v3Ranges))
-		for _, item := range transfer.v3Ranges {
-			if item.End > item.Start {
-				ranges = append(ranges, TransferRange{Offset: item.Start, Length: item.End - item.Start})
-			}
-		}
-		transfer.v3Mu.Unlock()
-		state.CompletedRanges = ranges
-		state.TransferMode = binaryTransferMode
-		transfer.durableBytes = 0
-		for _, item := range ranges {
-			transfer.durableBytes += item.Length
-		}
-	} else if transfer.parallel {
+	if transfer.parallel {
 		transfer.parallelMu.Lock()
 		ranges := make([]TransferRange, 0, len(transfer.parallelRanges))
 		for _, stream := range transfer.parallelRanges {
@@ -2303,6 +2332,11 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 	if transfer == nil {
 		return
 	}
+	transfer.v3IOMu.Lock()
+	defer transfer.v3IOMu.Unlock()
+	if transfer.file == nil {
+		return
+	}
 	if transfer.parallel {
 		transfer.parallelMu.Lock()
 		transfer.parallelStopped = true
@@ -2319,7 +2353,7 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 		_ = saveTransferResumeState(transfer.resumeState)
 		transfer.resumeMu.Unlock()
 		transfer.received = offset
-	} else if transfer.received > transfer.resumeCommitted {
+	} else if transfer.v3Streams == nil && len(transfer.v3Ranges) == 0 && transfer.received > transfer.resumeCommitted {
 		_ = transfer.file.Truncate(transfer.resumeCommitted)
 		transfer.received = transfer.resumeCommitted
 	}
@@ -2359,6 +2393,7 @@ func (e *Engine) cleanupAttachmentSession(session *wireSession) {
 		e.emitAttachmentStatus(offer.attachment.MessageID, "canceled", "")
 	}
 	for _, transfer := range incoming {
+		transfer.v3IOMu.Lock()
 		if transfer.parallel {
 			transfer.parallelMu.Lock()
 			transfer.parallelStopped = true
@@ -2366,7 +2401,10 @@ func (e *Engine) cleanupAttachmentSession(session *wireSession) {
 		}
 		closeParallelSessions(transfer)
 		_ = persistIncomingResume(transfer)
-		_ = transfer.file.Close()
+		if transfer.file != nil {
+			_ = transfer.file.Close()
+		}
+		transfer.v3IOMu.Unlock()
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: transfer.attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, LocalPath: transfer.tempPath, Status: "paused"})
 		e.emitAttachmentStatus(transfer.messageID, "paused", transfer.tempPath)
 	}
@@ -2399,6 +2437,8 @@ func (e *Engine) cancelIncomingFromRemote(attachmentID string, rejected bool) {
 		e.emitAttachmentStatus(pending.message.MessageID, status, "")
 	}
 	if transfer != nil {
+		transfer.v3IOMu.Lock()
+		defer transfer.v3IOMu.Unlock()
 		received := transfer.received
 		if transfer.parallel {
 			transfer.parallelMu.Lock()
@@ -2424,6 +2464,8 @@ func (e *Engine) failIncomingFile(attachmentID, reason string) {
 	if transfer == nil {
 		return
 	}
+	transfer.v3IOMu.Lock()
+	defer transfer.v3IOMu.Unlock()
 	received := transfer.received
 	if transfer.parallel {
 		transfer.parallelMu.Lock()
@@ -2533,24 +2575,21 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	localPath := transfer.tempPath
 	if valid && transfer.targetPath != "" && !e.IsAttachmentMigrationActive() {
 		localPath = transfer.targetPath
-		if os.MkdirAll(filepath.Dir(localPath), 0o700) == nil && os.Rename(transfer.tempPath, localPath) == nil {
+		if commitVerifiedV3File(transfer.tempPath, localPath, transfer.expected, transfer.sha256) == nil {
 			status = "saved"
 		} else {
 			status = "failed"
 			localPath = ""
-			_ = os.Remove(transfer.tempPath)
+			valid = false
 		}
 	}
 	if !valid {
 		status = "failed"
 		localPath = ""
-		_ = os.Remove(transfer.tempPath)
 	}
-	if valid {
-		removeTransferResumeState(attachmentID, false)
-	} else {
-		removeTransferResumeState(attachmentID, true)
-	}
+	// Keep the .part for recovery/diagnostics on verification or commit errors,
+	// but invalidate completed ranges so corrupt content is never skipped.
+	removeTransferResumeState(attachmentID, false)
 	attachmentMime := transfer.mimeType
 	if attachmentMime == "" {
 		attachmentMime = mime.TypeByExtension(filepath.Ext(transfer.fileName))
@@ -2576,6 +2615,9 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", map[bool]string{true: "completed", false: "failed"}[valid], receiverProgressOptions(transfer, &valid))
+	if transfer.v3Done != nil {
+		transfer.v3Done <- map[bool]string{true: "completed", false: "failed"}[valid]
+	}
 	if valid {
 		return "completed"
 	}
@@ -3431,7 +3473,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
 	if dialect.Major >= 2 {
-		capabilities = append(capabilities, "file-progress-v1", fileWindowCapability, fileStreamCapability, fileParallelCapability, fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "range-resume-v2")
+		capabilities = append(capabilities, "file-progress-v1", fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "range-resume-v2")
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)
@@ -4744,46 +4786,12 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		e.mu.Unlock()
 	}()
 	responseDialect := control.dialect
-	supportsProgress := hasCapability(response.Capabilities, "file-progress-v1") && responseDialect.Major >= 2
-	supportsWindowed := supportsProgress && hasCapability(response.Capabilities, fileWindowCapability) && responseDialect.Major >= 2
-	supportsBinary := supportsWindowed && hasCapability(response.Capabilities, fileStreamCapability)
-	supportsParallel := supportsProgress && hasCapability(response.Capabilities, fileParallelCapability) && responseDialect.Major >= 2
-	supportsPreflight := hasCapability(response.Capabilities, "storage-preflight-v1") && responseDialect.Major >= 2
+	if response.DataPort <= 0 || !hasCapability(response.Capabilities, "binary-frame-v3") {
+		return fmt.Errorf("v3 对端未提供可用的二进制数据端口")
+	}
+	peer.DataPort = response.DataPort
 	var completedRanges []ByteRange
-	transferMode := legacyTransferMode
-	if supportsWindowed {
-		transferMode = jsonWindowTransferMode
-	}
-	if supportsBinary {
-		transferMode = binaryTransferMode
-	}
-	if supportsParallel {
-		transferMode = parallelBinaryMode
-	}
-	hasSavedTuning := e.hasTransferTuningForPeer(peer.DeviceID)
 	tuning := e.transferTuningForPeer(peer.DeviceID)
-	if !supportsWindowed {
-		tuning = transferTuning{chunkSize: defaultTransferChunkSize, windowSize: 1}
-	} else if supportsBinary && (!hasSavedTuning || !tuning.binary) {
-		tuning = transferTuning{chunkSize: defaultBinaryChunkSize, windowSize: binaryInitialWindow, binary: true}
-	} else if supportsBinary {
-		// A previous run may have backed off while the peer was temporarily
-		// busy. Do not let that transient state become the permanent starting
-		// point for every large transfer; binary mode always probes with the
-		// current high-throughput baseline and can back off again if needed.
-		tuning.binary = true
-		if tuning.chunkSize < defaultBinaryChunkSize {
-			tuning.chunkSize = defaultBinaryChunkSize
-		}
-		if tuning.windowSize < binaryInitialWindow {
-			tuning.windowSize = binaryInitialWindow
-		}
-	} else if !supportsBinary {
-		tuning.binary = false
-		if tuning.chunkSize == mediumTransferChunkSize {
-			tuning.chunkSize = minTransferChunkSize
-		}
-	}
 	if !peer.Online {
 		e.emit("chat:peer-updated", e.Peers())
 	}
@@ -4791,24 +4799,13 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		return errAttachmentCanceled
 	}
 	offer := wireMessage{Type: "file_offer", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, RelativePath: message.RelativePath, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: sum, ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime}
-	if supportsWindowed {
-		offer.ChunkSize, offer.WindowSize = tuning.chunkSize, tuning.windowSize
-		offer.WindowID, offer.WindowBytes = 0, int64(tuning.chunkSize*tuning.windowSize)
-		offer.TransferMode = transferMode
-	}
-	if supportsParallel {
-		offer.TransferToken = newID()
-		offer.StreamCount = parallelStreamCount(message.AttachmentSize)
-		offer.ChunkSize = parallelChunkSize
-		offer.WindowBytes = parallelAckBytes
-		offer.TransferMode = parallelBinaryMode
-	}
+	offer.TransferMode = v3TransferMode
 	if err := session.write(offer); err != nil {
 		return err
 	}
 	supportsDemand := hasCapability(response.Capabilities, "attachment-demand-v1") && responseDialect.Major >= 2
 	resumeOffset := int64(0)
-	if supportsDemand || supportsPreflight {
+	if supportsDemand || responseDialect.Major >= ProtocolMajor {
 		offerResponse, err := readFileOfferResponse(reader, message.AttachmentID)
 		if err != nil {
 			if session.isCanceled() {
@@ -4855,13 +4852,12 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	}
 	protocolLabel := fmt.Sprintf("%s/%d", responseDialect.Name, responseDialect.Major)
 	if resumeOffset > 0 {
-		if !hasCapability(response.Capabilities, fileResumeCapability) || !supportsBinary {
+		if !hasCapability(response.Capabilities, "binary-frame-v3") {
 			return fmt.Errorf("对方返回了不受支持的断点续传")
 		}
 		if _, err := file.Seek(resumeOffset, io.SeekStart); err != nil {
 			return err
 		}
-		supportsParallel = false
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, resumeOffset, message.AttachmentSize, "send", "resuming", transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"})
 	}
 	if response.DataPort > 0 && hasCapability(response.Capabilities, "binary-frame-v3") {
@@ -4880,207 +4876,20 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		}
 		v3Profile.RemoteIP = peer.IP
 		v3Streams := v3Profile.SlotLimit(message.AttachmentSize)
-		if v3Streams > 1 {
-			if err := e.sendV3FileDataParallel(ctx, peer, message, file, sum, v3Streams, resumeOffset, completedRanges); err == nil {
-				verified := true
-				e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), windowSize: v3Streams, streamCount: v3Streams, activeStreams: v3Streams, transferMode: binaryTransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
-				return nil
-			} else {
-				if ctx.Err() != nil || session.isCanceled() {
-					return errAttachmentCanceled
-				}
-				return fmt.Errorf("v3 数据传输失败: %w", err)
-			}
-		} else if assignments := partitionV3Ranges(message.AttachmentSize, append(completedRanges, ByteRange{Start: 0, End: resumeOffset}), 1); len(assignments) == 0 {
-			return nil
-		} else if err := e.sendV3FileDataRanges(ctx, peer, message, file, sum, assignments[0]); err == nil {
-			verified := true
-			e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), windowSize: 1, transferMode: binaryTransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
-			return nil
-		} else {
+		if err := e.sendV3FileDataParallel(ctx, peer, message, file, sum, v3Streams, resumeOffset, completedRanges); err != nil {
 			if ctx.Err() != nil || session.isCanceled() {
 				return errAttachmentCanceled
 			}
 			return fmt.Errorf("v3 数据传输失败: %w", err)
 		}
+		verified := true
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), streamCount: v3Streams, transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
+		return nil
 	}
 	// File payloads are v3-only. Keeping a legacy branch here would allow a
 	// v3 control session to silently fall back to JSON/base64 after a data-port
 	// failure, defeating range resume and the binary integrity contract.
 	return fmt.Errorf("v3 对端未提供可用的二进制数据端口")
-	if supportsParallel {
-		return e.transferParallelFile(ctx, peer, message, file, session, reader, dialect, offer.TransferToken, offer.StreamCount, protocolLabel)
-	}
-	progressOptions := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: int64(tuning.chunkSize * tuning.windowSize), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "probing"}
-	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "send", "transferring", progressOptions)
-	if supportsProgress {
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, 0, message.AttachmentSize, "remote-receive", "receiving", progressOptions)
-	}
-	var sent, lastProgress int64
-	windowID, chunkIndex := 0, 0
-	lastThroughput := 0.0
-	var legacyBuffer []byte
-	if !supportsWindowed {
-		pooled := fileChunkBufferPool.Get().([]byte)
-		defer fileChunkBufferPool.Put(pooled)
-		legacyBuffer = pooled[:defaultTransferChunkSize]
-	}
-	acknowledge := func(options transferProgressOptions) (wireMessage, error) {
-		progress, err := readFileProgress(reader, message.AttachmentID)
-		if err != nil {
-			if session.isCanceled() {
-				return wireMessage{}, errAttachmentCanceled
-			}
-			return wireMessage{}, err
-		}
-		phase := "receiving"
-		if progress.Status == "failed" {
-			phase = "failed"
-		}
-		if progress.Status == "canceled" {
-			return wireMessage{}, errAttachmentCanceled
-		}
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase, options)
-		if progress.Status == "failed" {
-			return wireMessage{}, fmt.Errorf("对方接收文件失败")
-		}
-		return progress, nil
-	}
-	if supportsBinary {
-		tuning, err = e.transferBinaryFilePipelined(ctx, peer.DeviceID, message, file, session, reader, tuning, protocolLabel)
-		if err != nil {
-			return err
-		}
-	} else {
-		for {
-			if session.isCanceled() {
-				return errAttachmentCanceled
-			}
-			if supportsWindowed {
-				windowSize := tuning.windowSize
-				windowStart := time.Now()
-				var chunks int
-				var windowBytes int64
-				var writeErr error
-				if supportsBinary {
-					chunks, windowBytes, writeErr = session.writeBinaryFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize, message.AttachmentSize-sent)
-				} else {
-					chunks, windowBytes, writeErr = session.writeFileWindow(file, message.AttachmentID, windowID, chunkIndex, tuning.chunkSize, windowSize)
-				}
-				if writeErr != nil {
-					if errors.Is(writeErr, errAttachmentCanceled) || session.isCanceled() {
-						return errAttachmentCanceled
-					}
-					return writeErr
-				}
-				if chunks == 0 {
-					break
-				}
-				chunkIndex += chunks
-				sent += windowBytes
-				writeFinished := time.Now()
-				progressOptions = transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: windowSize, windowBytes: windowBytes, transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: "stable"}
-				progress, ackErr := acknowledge(progressOptions)
-				if ackErr != nil {
-					return ackErr
-				}
-				if progress.WindowID != windowID {
-					return fmt.Errorf("文件窗口确认无效")
-				}
-				ackLatency := time.Since(writeFinished)
-				windowDuration := time.Since(windowStart).Seconds()
-				throughput := float64(windowBytes) / windowDuration
-				progressOptions.ackLatency = ackLatency
-				progressOptions.diskWriteMs = progress.DiskWriteMs
-				progressOptions.windowThroughput = throughput
-				progressOptions.tuningState = "stable"
-				if sent-lastProgress >= int64(tuning.chunkSize) || sent == message.AttachmentSize {
-					e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", progressOptions)
-					lastProgress = sent
-				}
-				tuning, progressOptions.tuningState, progressOptions.tuningReason = adjustTransferTuning(tuning, ackLatency, progress.DiskWriteMs, throughput, lastThroughput, supportsBinary)
-				if progressOptions.tuningState != "stable" || progressOptions.tuningReason != "" {
-					// Publish the decision after measuring this window so the details
-					// panel shows the actual adjustment and its reason immediately.
-					e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", progressOptions)
-					log.Printf("文件传输调优: peer=%s mode=%s chunk=%d window=%d throughput=%.1fMB/s ack=%s disk=%dms state=%s", peer.DeviceID, transferMode, tuning.chunkSize, tuning.windowSize, throughput/(1024*1024), ackLatency, progress.DiskWriteMs, progressOptions.tuningState)
-				}
-				lastThroughput = throughput
-				tuning.binary = false
-				e.rememberTransferTuning(peer.DeviceID, tuning)
-				windowID++
-				if progress.Transferred >= message.AttachmentSize || sent >= message.AttachmentSize {
-					break
-				}
-				continue
-			}
-
-			n, readErr := file.Read(legacyBuffer)
-			if n > 0 {
-				if err := session.write(wireMessage{Type: "file_chunk", AttachmentID: message.AttachmentID, ChunkIndex: chunkIndex, Payload: base64.StdEncoding.EncodeToString(legacyBuffer[:n])}); err != nil {
-					if session.isCanceled() {
-						return errAttachmentCanceled
-					}
-					return err
-				}
-				chunkIndex++
-				sent += int64(n)
-				if err := func() error {
-					if !supportsProgress {
-						return nil
-					}
-					_, err := acknowledge(transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel})
-					return err
-				}(); err != nil {
-					return err
-				}
-				if sent-lastProgress >= int64(defaultTransferChunkSize) || sent == message.AttachmentSize {
-					e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, sent, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: defaultTransferChunkSize, windowSize: 1, windowBytes: int64(n), transferMode: transferMode, displayLocalMetrics: transferMode == legacyTransferMode, transport: "TLS/TCP", protocol: protocolLabel})
-					lastProgress = sent
-				}
-			}
-			if readErr == io.EOF || sent >= message.AttachmentSize {
-				break
-			}
-			if readErr != nil {
-				return readErr
-			}
-		}
-	}
-	if supportsBinary {
-		return nil
-	}
-	if session.isCanceled() {
-		return errAttachmentCanceled
-	}
-	if err := session.write(wireMessage{Type: "file_complete", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileSize: message.AttachmentSize}); err != nil {
-		if session.isCanceled() {
-			return errAttachmentCanceled
-		}
-		return err
-	}
-	if supportsProgress {
-		progress, err := readFileProgress(reader, message.AttachmentID)
-		if err != nil {
-			if session.isCanceled() {
-				return errAttachmentCanceled
-			}
-			return err
-		}
-		phase := "completed"
-		if progress.Status == "failed" {
-			phase = "failed"
-		}
-		verified := progress.Status == "completed"
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, progress.Transferred, message.AttachmentSize, "remote-receive", phase, transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: tuning.windowSize, windowBytes: progress.WindowBytes, diskWriteMs: progress.DiskWriteMs, transferMode: transferMode, transport: "TLS/TCP", protocol: protocolLabel, verified: &verified})
-		if progress.Status == "failed" {
-			return fmt.Errorf("对方接收文件失败")
-		}
-		if progress.Status == "canceled" {
-			return errAttachmentCanceled
-		}
-	}
-	return nil
 }
 
 type parallelStreamProgress struct {
@@ -5465,6 +5274,9 @@ func parallelLaunchTarget(launched, completed, total int, confirmed, diskWriteMs
 }
 
 func (e *Engine) transferParallelFile(ctx context.Context, peer Peer, message Message, file *os.File, control *wireSession, controlReader *wireReader, dialect ProtocolDialect, token string, streamCount int, protocolLabel string) error {
+	if dialect.Major >= ProtocolMajor {
+		return fmt.Errorf("v3 文件必须使用二进制数据端口")
+	}
 	e.mu.Lock()
 	if e.peerPools == nil {
 		e.peerPools = make(map[string]*PeerPool)
@@ -5737,6 +5549,9 @@ func binaryAckTargetForBudget(budget int64) int64 {
 // provides ordering and backpressure; the ACK reader releases the next send
 // slot after the receiver has flushed the corresponding window.
 func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string, message Message, file *os.File, session *wireSession, reader *wireReader, tuning transferTuning, protocolLabel string) (transferTuning, error) {
+	if strings.Contains(protocolLabel, fmt.Sprintf("/%d", ProtocolMajor)) {
+		return tuning, fmt.Errorf("v3 文件必须使用二进制数据端口")
+	}
 	if message.AttachmentSize <= 0 {
 		return tuning, fmt.Errorf("文件大小无效")
 	}
@@ -6651,7 +6466,10 @@ func cachedAvatarMatches(peer Peer) bool {
 }
 
 func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
-	state := conn.ConnectionState()
+	return verifyPeerCertificateState(conn.ConnectionState(), peer)
+}
+
+func verifyPeerCertificateState(state tls.ConnectionState, peer Peer) error {
 	if len(state.PeerCertificates) == 0 {
 		return fmt.Errorf("对方没有提供证书")
 	}

@@ -289,7 +289,7 @@ func TestServeFriendPreviewFlushesFirstChunkOverHTTP(t *testing.T) {
 
 	select {
 	case <-firstWritten:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("发送端没有写出首块数据")
 	}
 	releaseStream()

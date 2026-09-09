@@ -36,19 +36,12 @@ func DialV3Data(ctx context.Context, addr string, config *tls.Config) (net.Conn,
 	cfg := config.Clone()
 	cfg.MinVersion = tls.VersionTLS13
 	cfg.NextProtos = []string{v3DataALPN}
-	d := net.Dialer{}
-	conn, err := tls.DialWithDialer(&d, "tcp", addr, cfg)
+	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 5 * time.Second}, Config: cfg}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	if err := conn.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	_ = conn.SetDeadline(time.Time{})
+
 	return conn, nil
 }
 
@@ -80,12 +73,18 @@ func DialV3DataCandidates(ctx context.Context, hosts []string, port int, config 
 		conn net.Conn
 		err  error
 	}
-	results := make(chan result, len(unique))
+	results := make(chan result)
 	for _, host := range unique {
 		host := host
 		go func() {
 			conn, err := DialV3Data(probeCtx, net.JoinHostPort(host, strconv.Itoa(port)), config)
-			results <- result{conn: conn, err: err}
+			select {
+			case results <- result{conn: conn, err: err}:
+			case <-probeCtx.Done():
+				if conn != nil {
+					_ = conn.Close()
+				}
+			}
 		}()
 	}
 	var lastErr error

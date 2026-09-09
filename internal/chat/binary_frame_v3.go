@@ -40,7 +40,10 @@ type BinaryFrameV3 struct {
 }
 
 func (f BinaryFrameV3) MarshalBinary() ([]byte, error) {
-	if f.Length != uint32(len(f.Payload)) && f.Type == FrameChunkData {
+	if f.Type < FrameBeginFile || f.Type > FramePoolPong {
+		return nil, errors.New("unknown v3 frame type")
+	}
+	if uint64(f.Length) != uint64(len(f.Payload)) {
 		return nil, errors.New("v3 frame payload length mismatch")
 	}
 	b := make([]byte, v3FrameHeaderSize+len(f.Payload))
@@ -70,6 +73,9 @@ func ReadBinaryFrameV3(r io.Reader, maxPayload uint32) (BinaryFrameV3, error) {
 	if binary.BigEndian.Uint16(h[4:]) != ProtocolMajor {
 		return BinaryFrameV3{}, fmt.Errorf("unsupported v3 frame version")
 	}
+	if V3FrameType(h[6]) < FrameBeginFile || V3FrameType(h[6]) > FramePoolPong {
+		return BinaryFrameV3{}, errors.New("unknown v3 frame type")
+	}
 	n := binary.BigEndian.Uint32(h[41:])
 	if n > maxPayload {
 		return BinaryFrameV3{}, errors.New("v3 frame too large")
@@ -90,4 +96,13 @@ func ReadBinaryFrameV3(r io.Reader, maxPayload uint32) (BinaryFrameV3, error) {
 
 func NewChunkFrame(id [16]byte, stream uint16, seq, offset uint64, payload []byte) BinaryFrameV3 {
 	return BinaryFrameV3{Type: FrameChunkData, TransferID: id, StreamID: stream, Sequence: seq, Offset: offset, Length: uint32(len(payload)), ChunkHash: sha256.Sum256(payload), Payload: payload}
+}
+
+// Control JSON never carries file bytes in v3.
+func isLegacyFileData(kind string) bool {
+	switch kind {
+	case "file_chunk", "file_window", "file_stream_join", "file_complete", "share_chunk":
+		return true
+	}
+	return false
 }
