@@ -111,6 +111,9 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 	pool := e.v3Pool(peer.DeviceID, len(assignments))
 	var progressMu sync.Mutex
 	completedBytes := message.AttachmentSize
+	progressStarted := time.Now()
+	lastProgressAt := progressStarted
+	lastProgressBytes := completedBytes
 	for _, ranges := range assignments {
 		for _, r := range ranges {
 			completedBytes -= r.End - r.Start
@@ -120,8 +123,20 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		progressMu.Lock()
 		defer progressMu.Unlock()
 		completedBytes += n
+		now := time.Now()
+		elapsed := now.Sub(lastProgressAt)
+		if elapsed <= 0 {
+			elapsed = time.Millisecond
+		}
+		rate := float64(completedBytes-lastProgressBytes) / elapsed.Seconds()
+		if rate <= 0 && latency > 0 {
+			rate = float64(n) / latency.Seconds()
+		}
+		lastProgressAt, lastProgressBytes = now, completedBytes
+		avg := float64(completedBytes) / now.Sub(progressStarted).Seconds()
 		profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency})
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), windowBytes: int64(pool.Active()) * int64(profile.ChunkBytes(message.AttachmentSize)), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable"})
+		_ = avg
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, len(assignments))

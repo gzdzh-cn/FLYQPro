@@ -129,6 +129,9 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 		transfer.v3Streams[first.StreamID] = stream
 	}
 	transfer.v3Mu.Unlock()
+	progressStarted := time.Now()
+	lastProgressAt := progressStarted
+	lastProgressBytes := transfer.received
 
 	ack := func(frame BinaryFrameV3, nack bool) error {
 		typ := FrameChunkAck
@@ -257,6 +260,26 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 		}
 		if err := ack(frame, false); err != nil {
 			return err
+		}
+		if frame.Type == FrameChunkData {
+			now := time.Now()
+			elapsed := now.Sub(lastProgressAt)
+			if elapsed <= 0 {
+				elapsed = time.Millisecond
+			}
+			transfer.v3Mu.Lock()
+			received := transfer.received
+			transfer.v3Mu.Unlock()
+			rate := float64(received-lastProgressBytes) / elapsed.Seconds()
+			if rate <= 0 {
+				rate = float64(len(frame.Payload)) / elapsed.Seconds()
+			}
+			lastProgressAt, lastProgressBytes = now, received
+			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "transferring", transferProgressOptions{
+				chunkSize: len(frame.Payload), windowBytes: int64(len(frame.Payload)), activeStreams: 1, streamCount: 1,
+				transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
+				confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable",
+			})
 		}
 	}
 }
