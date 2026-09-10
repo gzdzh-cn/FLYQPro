@@ -1911,6 +1911,20 @@ func (s *ChatService) CancelAttachment(attachmentID string) error {
 	}
 	return s.engine.CancelAttachment(attachmentID)
 }
+
+func (s *ChatService) PauseAttachment(attachmentID string) error {
+	if s.engine.IsAttachmentMigrationActive() {
+		return fmt.Errorf("附件迁移正在进行")
+	}
+	return s.engine.PauseAttachment(attachmentID)
+}
+
+func (s *ChatService) ResumeAttachment(attachmentID string) (chat.Message, error) {
+	if s.engine.IsAttachmentMigrationActive() {
+		return chat.Message{}, fmt.Errorf("附件迁移正在进行")
+	}
+	return s.engine.ResumeAttachment(gctx.New(), attachmentID)
+}
 func (s *ChatService) SetPeerRemark(deviceID, remark string) error {
 	return chat.SetPeerRemark(gctx.New(), deviceID, remark)
 }

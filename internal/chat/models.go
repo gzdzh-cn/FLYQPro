@@ -401,6 +401,7 @@ type wireMessage struct {
 	RelativePath        string                   `json:"relativePath,omitempty"`
 	SharedFolderID      string                   `json:"sharedFolderId,omitempty"`
 	TransferID          string                   `json:"transferId,omitempty"`
+	Announcement        bool                     `json:"announcement,omitempty"`
 	TransferToken       string                   `json:"transferToken,omitempty"`
 	StreamID            int                      `json:"streamId,omitempty"`
 	StreamCount         int                      `json:"streamCount,omitempty"`

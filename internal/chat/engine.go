@@ -76,13 +76,14 @@ type Engine struct {
 }
 
 type transferMetric struct {
-	startedAt     time.Time
-	startedBytes  int64
-	lastAt        time.Time
-	lastBytes     int64
-	peakSpeed     float64
-	smoothedSpeed float64
-	speedSampleAt time.Time
+	startedAt        time.Time
+	startedBytes     int64
+	lastAt           time.Time
+	lastBytes        int64
+	peakSpeed        float64
+	smoothedSpeed    float64
+	speedSampleAt    time.Time
+	speedSampleBytes int64
 }
 
 type transferTuning struct {
@@ -416,6 +417,9 @@ type outgoingTransfer struct {
 	peerID    string
 	session   *wireSession
 	createdAt time.Time
+	cancel    chan struct{}
+	pause     chan struct{}
+	pauseOnce sync.Once
 	dataMu    sync.Mutex
 	data      map[int]*wireSession
 }
@@ -1777,7 +1781,8 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			}
 		}
 		_ = sessionWrite(session, conn, wireMessage{Type: "manifest_applied", Status: "accepted", TransferID: message.TransferID})
-	case "file_offer":
+	case "file_announce", "file_offer":
+		announcement := message.Type == "file_announce" || message.Announcement
 		if !e.isFriend(hello.DeviceID) {
 			_ = writeWire(conn, wireMessage{Type: "error", Status: "FRIENDSHIP_REQUIRED"})
 			return
@@ -1825,13 +1830,38 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 			}
 			switch existing.AttachmentStatus {
 			case "canceled", "rejected", "failed", "paused":
+			case "pending", "preparing":
+				e.mu.RLock()
+				pending := e.pendingIncoming[attachmentID]
+				e.mu.RUnlock()
+				if pending != nil && !announcement {
+					return
+				}
 			default:
 				return
 			}
 		}
 		thumbnailData, thumbnailMime := validThumbnail(message.ThumbnailData, message.ThumbnailMime)
-		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "sent", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentThumbnail: thumbnailData, AttachmentThumbnailMime: thumbnailMime, AttachmentStatus: "pending"}
-		attachment := Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, Status: "pending"}
+		pendingStatus := "pending"
+		if announcement {
+			pendingStatus = "preparing"
+		}
+		messageRecord := Message{MessageID: message.MessageID, ConversationID: conversationID, SenderDeviceID: hello.DeviceID, Kind: "file", Content: message.FileName, Status: "sent", CreatedAt: nowString(), AttachmentID: attachmentID, AttachmentName: message.FileName, AttachmentSize: message.FileSize, AttachmentMime: attachmentMime, AttachmentThumbnail: thumbnailData, AttachmentThumbnailMime: thumbnailMime, AttachmentStatus: pendingStatus}
+		attachment := Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.FileName, MimeType: attachmentMime, FileSize: message.FileSize, SHA256: message.SHA256, ThumbnailData: thumbnailData, ThumbnailMime: thumbnailMime, Status: pendingStatus}
+		if announcement {
+			if err := SaveMessage(context.Background(), messageRecord); err != nil {
+				return
+			}
+			if err := SaveAttachment(context.Background(), attachment); err != nil {
+				return
+			}
+			if !messageAlreadyExists {
+				_ = IncrementConversationUnread(context.Background(), conversationID)
+			}
+			e.emit("chat:message", messageRecord)
+			_ = sessionWrite(session, conn, wireMessage{Type: "file_announce_response", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "accepted"})
+			return
+		}
 		parallelMode := hasCapability(hello.Capabilities, fileParallelCapability) && message.TransferMode == parallelBinaryMode && message.TransferToken != ""
 		windowed := hasCapability(hello.Capabilities, fileWindowCapability) || parallelMode
 		binaryMode := message.TransferMode == v3TransferMode || (windowed && hasCapability(hello.Capabilities, fileStreamCapability) && message.TransferMode == binaryTransferMode)
@@ -2089,6 +2119,25 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 	case "file_accept":
 		// A receiver sends file_accept on the existing offer connection. The
 		// sender side consumes it in transferFileWithDialect.
+	case "file_resume":
+		if message.AttachmentID == "" || !e.isFriend(hello.DeviceID) {
+			return
+		}
+		_ = writeWire(conn, wireMessage{Type: "file_resume_response", MessageID: message.MessageID, AttachmentID: message.AttachmentID, Status: "accepted"})
+		go func(attachmentID, messageID string) {
+			attachment, err := GetAttachment(context.Background(), attachmentID)
+			if err != nil {
+				return
+			}
+			resumeMessage, err := GetMessage(context.Background(), attachment.MessageID)
+			if err != nil || resumeMessage.SenderDeviceID != e.identity.DeviceID {
+				return
+			}
+			if messageID != "" && resumeMessage.MessageID != messageID {
+				return
+			}
+			_, _ = e.RetryAttachment(context.Background(), resumeMessage.MessageID)
+		}(message.AttachmentID, message.MessageID)
 	case "file_reject", "file_cancel":
 		e.cancelIncomingFromRemote(message.AttachmentID, message.Type == "file_reject")
 	}
@@ -2358,12 +2407,15 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 		transfer.received = transfer.resumeCommitted
 	}
 	_ = transfer.file.Close()
-	attachment, _ := GetAttachment(context.Background(), attachmentID)
-	attachment.Status = "paused"
-	attachment.LocalPath = transfer.tempPath
-	_ = SaveAttachment(context.Background(), attachment)
-	_ = UpdateMessageStatus(context.Background(), transfer.messageID, "paused")
-	e.emitAttachmentStatus(transfer.messageID, "paused", transfer.tempPath)
+	if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
+		attachment.Status = "paused"
+		attachment.LocalPath = transfer.tempPath
+		_ = SaveAttachment(context.Background(), attachment)
+	}
+	if transfer.messageID != "" {
+		_ = UpdateMessageStatus(context.Background(), transfer.messageID, "paused")
+		e.emitAttachmentStatus(transfer.messageID, "paused", transfer.tempPath)
+	}
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "paused", receiverProgressOptions(transfer, nil))
 	log.Printf("文件接收暂停，等待恢复: attachment=%s reason=%s bytes=%d", attachmentID, reason, transfer.received)
 }
@@ -2653,6 +2705,7 @@ type transferProgressOptions struct {
 
 const transferSpeedSmoothingWindow = 1500 * time.Millisecond
 const transferSpeedSampleInterval = 500 * time.Millisecond
+const transferSpeedMinimumSampleInterval = 200 * time.Millisecond
 
 func smoothTransferSpeed(previous, sample float64, elapsed time.Duration) float64 {
 	if sample <= 0 {
@@ -2777,15 +2830,15 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	reset := !ok || transferred < metric.lastBytes || phase == "awaiting_acceptance" || phase == "preparing_thumbnail" || phase == "queued" || phase == "retrying"
 	var rawSpeed float64
 	if reset {
-		metric = transferMetric{startedAt: now, startedBytes: transferred, lastAt: now, lastBytes: transferred}
+		metric = transferMetric{startedAt: now, startedBytes: transferred, lastAt: now, lastBytes: transferred, speedSampleAt: now, speedSampleBytes: transferred}
 	} else if displayMetrics {
 		sampleStartedAt := metric.speedSampleAt
 		if sampleStartedAt.IsZero() {
-			sampleStartedAt = metric.lastAt
+			sampleStartedAt = metric.startedAt
 		}
 		elapsedDuration := now.Sub(sampleStartedAt)
 		elapsed := elapsedDuration.Seconds()
-		if elapsed > 0 && transferred > metric.lastBytes {
+		if (elapsedDuration >= transferSpeedMinimumSampleInterval || option.confirmedThroughput > 0 || option.windowThroughput > 0) && transferred > metric.speedSampleBytes {
 			rawSpeed = option.windowThroughput
 			if direction == "remote-receive" && option.confirmedThroughput > 0 {
 				rawSpeed = option.confirmedThroughput
@@ -2795,11 +2848,12 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 				rawSpeed = 0
 			}
 			if rawSpeed <= 0 && !(direction == "remote-receive" && (option.transferMode == binaryTransferMode || option.transferMode == parallelBinaryMode)) {
-				rawSpeed = float64(transferred-metric.lastBytes) / elapsed
+				rawSpeed = float64(transferred-metric.speedSampleBytes) / elapsed
 			}
 			if rawSpeed > 0 {
 				metric.smoothedSpeed = smoothTransferSpeed(metric.smoothedSpeed, rawSpeed, elapsedDuration)
 				metric.speedSampleAt = now
+				metric.speedSampleBytes = transferred
 				if metric.smoothedSpeed > metric.peakSpeed {
 					metric.peakSpeed = metric.smoothedSpeed
 				}
@@ -2992,7 +3046,32 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 	preparing := e.preparing[attachmentID]
 	e.mu.RUnlock()
 	if outgoing != nil {
-		outgoing.session.cancel(attachmentID)
+		if cancel := outgoing.cancel; cancel != nil {
+			// Closing the task signal interrupts queue waits and derived transfer
+			// contexts without waiting for a remote response.
+			select {
+			case <-cancel:
+			default:
+				close(cancel)
+			}
+		}
+		e.closeOutgoingData(attachmentID)
+		// The UI receives the local terminal state immediately. Remote cleanup
+		// and the worker's final return happen independently.
+		go func(session *wireSession) {
+			if session == nil || session.conn == nil {
+				return
+			}
+			_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_ = writeWire(session.conn, wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
+			session.close()
+		}(outgoing.session)
+		if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
+			attachment.Status = "canceled"
+			_ = SaveAttachment(context.Background(), attachment)
+			e.emitAttachmentStatus(attachment.MessageID, "canceled", "")
+		}
+		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "canceled")
 		return nil
 	}
 	if preparing != nil {
@@ -3025,8 +3104,14 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 	}
 	e.mu.Unlock()
 	if offer != nil {
-		_ = offer.session.write(wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
-		offer.session.close()
+		go func(session *wireSession) {
+			if session == nil || session.conn == nil {
+				return
+			}
+			_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_ = writeWire(session.conn, wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
+			session.close()
+		}(offer.session)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: offer.attachment.AttachmentID, MessageID: offer.attachment.MessageID, FileName: offer.attachment.FileName, MimeType: offer.attachment.MimeType, FileSize: offer.attachment.FileSize, SHA256: offer.attachment.SHA256, ThumbnailData: offer.attachment.ThumbnailData, ThumbnailMime: offer.attachment.ThumbnailMime, Status: "canceled"})
 		e.emitAttachmentStatus(offer.message.MessageID, "canceled", "")
 		return nil
@@ -3039,8 +3124,14 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 			received = transfer.received
 			transfer.parallelMu.Unlock()
 		}
-		_ = transfer.session.write(wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
-		transfer.session.close()
+		go func(session *wireSession) {
+			if session == nil || session.conn == nil {
+				return
+			}
+			_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_ = writeWire(session.conn, wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
+			session.close()
+		}(transfer.session)
 		closeParallelSessions(transfer)
 		_ = transfer.file.Close()
 		removeTransferResumeState(attachmentID, true)
@@ -3050,6 +3141,100 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 		return nil
 	}
 	return fmt.Errorf("附件传输不存在")
+}
+
+// PauseAttachment stops active data IO and preserves the durable resume ranges.
+// It deliberately returns before any remote control write so the local UI can
+// enter the paused state without waiting on a blocked peer connection.
+func (e *Engine) PauseAttachment(attachmentID string) error {
+	e.mu.RLock()
+	outgoing := e.outgoing[attachmentID]
+	preparing := e.preparing[attachmentID]
+	transfer := e.incoming[attachmentID]
+	offer := e.pendingIncoming[attachmentID]
+	e.mu.RUnlock()
+	if outgoing != nil {
+		outgoing.pauseOnce.Do(func() { close(outgoing.pause) })
+		e.closeOutgoingData(attachmentID)
+		if outgoing.session != nil {
+			go func(session *wireSession) {
+				_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+				_ = writeWire(session.conn, wireMessage{Type: "file_pause", AttachmentID: attachmentID, Status: "paused"})
+			}(outgoing.session)
+		}
+		if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
+			attachment.Status = "paused"
+			_ = SaveAttachment(context.Background(), attachment)
+			e.emitAttachmentStatus(attachment.MessageID, "paused", "")
+		}
+		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "paused")
+		return nil
+	}
+	if preparing != nil {
+		return fmt.Errorf("附件仍在准备，稍后可暂停")
+	}
+	if transfer != nil {
+		if transfer.session != nil {
+			go func(session *wireSession) {
+				_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+				_ = writeWire(session.conn, wireMessage{Type: "file_pause", AttachmentID: attachmentID, Status: "paused"})
+			}(transfer.session)
+		}
+		e.pauseIncomingFile(attachmentID, "USER_PAUSED")
+		return nil
+	}
+	if offer != nil {
+		_ = UpdateMessageStatus(context.Background(), offer.message.MessageID, "paused")
+		e.emitAttachmentStatus(offer.message.MessageID, "paused", "")
+		return nil
+	}
+	return fmt.Errorf("附件传输不存在")
+}
+
+// ResumeAttachment restarts an outgoing task from its persisted ranges. For
+// an incoming task it changes the local state back to pending; the sender's
+// next offer will reuse the same resume state.
+func (e *Engine) ResumeAttachment(ctx context.Context, attachmentID string) (Message, error) {
+	attachment, err := GetAttachment(ctx, attachmentID)
+	if err != nil {
+		return Message{}, err
+	}
+	message, err := GetMessage(ctx, attachment.MessageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if message.SenderDeviceID == e.identity.DeviceID {
+		return e.RetryAttachment(ctx, message.MessageID)
+	}
+	message.Status, message.AttachmentStatus = "pending", "pending"
+	attachment.Status = "pending"
+	_ = UpdateMessageStatus(ctx, message.MessageID, "pending")
+	_ = SaveAttachment(ctx, attachment)
+	e.emit("chat:message", message)
+	// The receiver may only have a sparse, non-contiguous resume file. Report
+	// the durable byte count instead of the file size so the UI does not jump
+	// to 100% when the user resumes a paused receive task.
+	transferred := int64(0)
+	if state, stateErr := loadTransferResumeState(attachmentID); stateErr == nil && transferResumeMatches(state, message.MessageID, message.SenderDeviceID, attachment.FileSize, attachment.SHA256) {
+		for _, item := range state.CompletedRanges {
+			if item.Length > 0 {
+				transferred += item.Length
+			}
+		}
+		if transferred > attachment.FileSize {
+			transferred = attachment.FileSize
+		}
+	}
+	if peer, peerErr := e.peer(message.SenderDeviceID); peerErr == nil {
+		go func() {
+			if err := e.sendToPeer(peer, wireMessage{Type: "file_resume", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "requested"}); err != nil {
+				log.Printf("发送文件继续请求失败: attachment=%s error=%v", attachmentID, err)
+			}
+		}()
+	}
+	options := transferProgressOptions{durableBytes: transferred, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor)}
+	e.emitTransferProgress(message.MessageID, attachmentID, message.SenderDeviceID, transferred, attachment.FileSize, "receive", "paused", options)
+	return message, nil
 }
 
 func (e *Engine) discoveryLoop() {
@@ -4310,6 +4495,10 @@ func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath stri
 	if !e.isFriend(deviceID) {
 		return Message{}, fmt.Errorf("不是好友")
 	}
+	peer, err := e.peer(deviceID)
+	if err != nil {
+		return Message{}, err
+	}
 	path = filepath.Clean(path)
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
@@ -4346,7 +4535,12 @@ func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath stri
 	if isImage {
 		e.emitTransferProgress(message.MessageID, attachmentID, deviceID, 0, message.AttachmentSize, "send", "preparing_thumbnail")
 	}
+	announceDone := make(chan error, 1)
+	go func() { announceDone <- e.announceFile(peer, message) }()
 	sum, thumbnailData, thumbnailMime, prepareErr := e.prepareOutgoingAttachment(path, message.AttachmentMime, cancel)
+	if announceErr := <-announceDone; announceErr != nil {
+		log.Printf("文件预告发送失败，将由正式 offer 重试: attachment=%s error=%v", attachmentID, announceErr)
+	}
 	if prepareErr != nil {
 		status := "failed"
 		if errors.Is(prepareErr, errAttachmentCanceled) {
@@ -4397,6 +4591,32 @@ func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath stri
 		message = latest
 	}
 	return e.finishAttachmentSend(ctx, message, "sent"), nil
+}
+
+// announceFile publishes metadata while the sender computes the content hash.
+func (e *Engine) announceFile(peer Peer, message Message) error {
+	dialects := protocolDialectsForPeer(peer)
+	if len(dialects) == 0 {
+		return fmt.Errorf("对方握手协议不兼容")
+	}
+	control, err := e.fileControlForPeer(peer, dialects[0])
+	if err != nil {
+		return err
+	}
+	_ = control.session.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer control.session.conn.SetReadDeadline(time.Time{})
+	if err := control.session.write(wireMessage{Type: "file_announce", MessageID: message.MessageID, AttachmentID: message.AttachmentID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, RelativePath: message.RelativePath, TransferMode: v3TransferMode, Announcement: true}); err != nil {
+		e.discardFileControl(peer.DeviceID, control.session)
+		return err
+	}
+	var response wireMessage
+	if err := control.reader.Decode(&response); err != nil {
+		return err
+	}
+	if response.Type != "file_announce_response" || response.Status != "accepted" {
+		return fmt.Errorf("对方未接受文件预告: %s", response.Reason)
+	}
+	return nil
 }
 
 type attachmentHashResult struct {
@@ -4616,10 +4836,37 @@ func (e *Engine) transferFile(ctx context.Context, deviceID string, message Mess
 	return lastErr
 }
 
-func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, message Message, path, sum string, cancel <-chan struct{}) error {
+func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, message Message, path, sum string, cancel chan struct{}) error {
 	if e.transferScheduler == nil {
 		e.transferScheduler = newTransferScheduler()
 	}
+	// Register the task before dialing so cancel/pause can interrupt hashing,
+	// queue waits, TLS handshakes and data IO immediately.
+	e.mu.Lock()
+	active := e.outgoing[message.AttachmentID]
+	if active == nil {
+		active = &outgoingTransfer{message: message, peerID: deviceID, createdAt: time.Now(), cancel: cancel, pause: make(chan struct{}), data: make(map[int]*wireSession)}
+		e.outgoing[message.AttachmentID] = active
+	} else {
+		active.cancel = cancel
+		if active.pause == nil {
+			active.pause = make(chan struct{})
+		}
+	}
+	e.mu.Unlock()
+	transferCtx, stopTransfer := context.WithCancel(ctx)
+	paused := make(chan struct{})
+	go func() {
+		select {
+		case <-cancel:
+			stopTransfer()
+		case <-active.pause:
+			close(paused)
+			stopTransfer()
+		case <-ctx.Done():
+		}
+	}()
+	defer stopTransfer()
 	e.emitTransferProgress(message.MessageID, message.AttachmentID, deviceID, e.lastTransferBytes(message.AttachmentID, "remote-receive"), message.AttachmentSize, "send", "queued")
 	releasePeer, err := e.transferScheduler.acquirePeer(ctx, deviceID, cancel)
 	if err != nil {
@@ -4663,11 +4910,24 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 		if acquireErr != nil {
 			return acquireErr
 		}
-		err = e.transferFile(ctx, deviceID, message, path, sum)
+		err = e.transferFile(transferCtx, deviceID, message, path, sum)
 		releaseGlobal()
+		select {
+		case <-paused:
+			return errTransferPaused
+		default:
+		}
 		if err == nil || !transientTransferError(err) {
 			return err
 		}
+		// transferFileWithDialect removes the per-attempt entry on failure;
+		// restore the shared task object before retrying so pause/cancel signals
+		// remain attached to the managed transfer across reconnects.
+		e.mu.Lock()
+		if e.outgoing[message.AttachmentID] == nil {
+			e.outgoing[message.AttachmentID] = active
+		}
+		e.mu.Unlock()
 	}
 }
 
@@ -4776,7 +5036,21 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		}
 	}()
 	e.mu.Lock()
-	e.outgoing[message.AttachmentID] = &outgoingTransfer{message: message, peerID: peer.DeviceID, session: session, createdAt: time.Now(), data: make(map[int]*wireSession)}
+	active := e.outgoing[message.AttachmentID]
+	if active == nil {
+		active = &outgoingTransfer{message: message, peerID: peer.DeviceID, createdAt: time.Now(), pause: make(chan struct{}), data: make(map[int]*wireSession)}
+		e.outgoing[message.AttachmentID] = active
+	}
+	active.message = message
+	active.peerID = peer.DeviceID
+	active.session = session
+	active.createdAt = time.Now()
+	if active.pause == nil {
+		active.pause = make(chan struct{})
+	}
+	if active.data == nil {
+		active.data = make(map[int]*wireSession)
+	}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()

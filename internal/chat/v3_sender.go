@@ -128,14 +128,22 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		if elapsed <= 0 {
 			elapsed = time.Millisecond
 		}
-		rate := float64(completedBytes-lastProgressBytes) / elapsed.Seconds()
-		if rate <= 0 && latency > 0 {
+		rate := 0.0
+		if elapsed >= transferSpeedMinimumSampleInterval && completedBytes > lastProgressBytes {
+			rate = float64(completedBytes-lastProgressBytes) / elapsed.Seconds()
+			lastProgressAt, lastProgressBytes = now, completedBytes
+		}
+		if rate <= 0 && latency >= transferSpeedMinimumSampleInterval && n > 0 {
 			rate = float64(n) / latency.Seconds()
 		}
-		lastProgressAt, lastProgressBytes = now, completedBytes
 		avg := float64(completedBytes) / now.Sub(progressStarted).Seconds()
 		profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), windowBytes: int64(pool.Active()) * int64(profile.ChunkBytes(message.AttachmentSize)), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable"})
+		options := transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), windowBytes: int64(pool.Active()) * int64(profile.ChunkBytes(message.AttachmentSize)), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable"}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", options)
+		// The sender's primary progress is the remote durable byte count. Emit
+		// the same sample under remote-receive so the UI can calculate ETA from
+		// confirmed bytes instead of the local socket write position.
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "remote-receive", "receiving", options)
 		_ = avg
 	}
 	var wg sync.WaitGroup
