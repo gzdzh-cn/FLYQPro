@@ -67,7 +67,7 @@
         <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
         <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
+          <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), expandedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
             <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'attachment-bubble': message.kind === 'file', 'image-attachment-bubble': message.kind === 'file' && isImageMessage(message), 'is-favorite': message.isFavorite }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
@@ -102,7 +102,10 @@
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
-              <template v-else>{{ message.content }}</template>
+              <template v-else>
+                <div class="message-text">{{ expandedMessageIds.has(message.messageId) ? message.content : collapsedMessageText(message.content) }}</div>
+                <button v-if="messageTextNeedsCollapse(message.content)" type="button" class="message-expand" :aria-expanded="expandedMessageIds.has(message.messageId)" @click.stop="toggleMessageExpanded(message.messageId)">{{ expandedMessageIds.has(message.messageId) ? '收起' : '展开' }}</button>
+              </template>
               <small>{{ formatTime(message.createdAt) }}<template v-if="messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) && (message.kind === 'file' || message.senderDeviceId === deviceInfo?.deviceId)"> <span class="message-status" :class="{ rejected: (message.attachmentStatus || message.status) === 'rejected' }">{{ messageStatusText(message.status, message.kind, message.attachmentStatus, message.senderDeviceId === deviceInfo?.deviceId) }}</span></template></small>
             </div>
             <div v-if="message.senderDeviceId === deviceInfo?.deviceId" class="avatar message-avatar" :style="avatarStyle(store.profile.nickname, store.profile.avatarData)">{{ store.profile.avatarData ? '' : initials(store.profile.nickname) }}</div>
@@ -361,6 +364,9 @@ const contactMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Pe
 const deleteConfirm = reactive<{ visible: boolean; kind: 'hide' | 'remove'; x: number; y: number; peer?: Peer; deleteLocalFiles: boolean }>({ visible: false, kind: 'hide', x: 0, y: 0, deleteLocalFiles: false })
 const selectionMode = ref(false)
 const selectedMessageIds = reactive(new Set<string>())
+const expandedMessageIds = reactive(new Set<string>())
+const collapsedMessageMaxUnits = 360
+const collapsedMessageMaxLines = 8
 const attachmentDetailsVisible = ref(false)
 const attachmentDetails = ref<AttachmentDetails>()
 const attachmentDetailsMessage = ref<any>()
@@ -1459,6 +1465,43 @@ async function confirmPendingDelete() {
     Message.error(error?.message || (kind === 'hide' ? '删除失败' : '删除好友失败'))
   }
 }
+function messageCharacterUnits(character: string) { return (character.codePointAt(0) || 0) > 0xff ? 2 : 1 }
+function messageTextNeedsCollapse(content: string) {
+  let units = 0
+  let lines = 1
+  for (const character of String(content || '')) {
+    if (character === '\n') {
+      if (++lines > collapsedMessageMaxLines) return true
+      continue
+    }
+    units += messageCharacterUnits(character)
+    if (units > collapsedMessageMaxUnits) return true
+  }
+  return false
+}
+function collapsedMessageText(content: string) {
+  const text = String(content || '')
+  let preview = ''
+  let units = 0
+  let lines = 1
+  for (const character of text) {
+    if (character === '\n') {
+      if (lines >= collapsedMessageMaxLines) return `${preview.trimEnd()}…`
+      lines++
+      preview += character
+      continue
+    }
+    const characterUnits = messageCharacterUnits(character)
+    if (units + characterUnits > collapsedMessageMaxUnits) return `${preview.trimEnd()}…`
+    units += characterUnits
+    preview += character
+  }
+  return preview
+}
+function toggleMessageExpanded(messageId: string) {
+  if (expandedMessageIds.has(messageId)) expandedMessageIds.delete(messageId)
+  else expandedMessageIds.add(messageId)
+}
 function attachmentHasLocalFile(message: any) { return Boolean(message?.attachmentId && message?.attachmentPath && ['sent', 'saved'].includes(message?.attachmentStatus || message?.status)) }
 function attachmentCompletedLocal(message: any) { return attachmentHasLocalFile(message) }
 async function copyTextMessage(message: any) {
@@ -2435,10 +2478,26 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .message-retry { width: 22px; height: 22px; flex: 0 0 22px; border: 0; border-radius: 50%; background: #f53f3f; color: #fff; font-weight: 800; line-height: 22px; cursor: pointer; box-shadow: 0 3px 8px rgba(245, 63, 63, .25); }
 .message-retry:hover { background: #cb2634; }
 .message-retry:disabled { opacity: .55; cursor: wait; }
-.message-line { animation: message-enter .18s cubic-bezier(.22, .8, .28, 1) both; content-visibility: auto; contain-intrinsic-size: 52px; }
-.message-bubble { max-width: min(72%, 680px); padding: 9px 12px; border-radius: 14px 14px 14px 5px; line-height: 1.45; }
+.message-line { min-width: 0; max-width: 100%; box-sizing: border-box; animation: message-enter .18s cubic-bezier(.22, .8, .28, 1) both; content-visibility: auto; contain-intrinsic-size: 52px; }
+.message-bubble {
+  /* Keep flex items shrinkable so a long unbroken URL/token cannot widen the
+   * message row beyond the conversation viewport.  This applies equally to
+   * locally-sent and remotely-received messages. */
+  min-width: 0;
+  max-width: min(72%, 680px);
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border-radius: 14px 14px 14px 5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .message-line.mine .message-bubble { border-radius: 14px 14px 5px 14px; }
-.message-bubble.text-bubble { position: relative; }
+.message-bubble.text-bubble { position: relative; white-space: pre-wrap; }
+.message-text { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.message-expand { display: block; margin: 5px 0 0 auto; padding: 2px 0; border: 0; background: transparent; color: inherit; font-size: 11px; font-weight: 600; line-height: 1.4; cursor: pointer; opacity: .72; }
+.message-expand:hover { opacity: 1; text-decoration: underline; }
+.message-bubble .message-quote { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .message-bubble.text-bubble::after { content: ''; position: absolute; top: 50%; width: 14px; height: 18px; transform: translateY(-50%); background: inherit; pointer-events: none; }
 .message-line:not(.mine) .message-bubble.text-bubble::after { left: -7px; clip-path: polygon(100% 0, 100% 100%, 0 50%); border-radius: 3px 0 0 3px; }
 .message-line.mine .message-bubble.text-bubble::after { right: -7px; clip-path: polygon(0 0, 100% 50%, 0 100%); border-radius: 0 3px 3px 0; }
