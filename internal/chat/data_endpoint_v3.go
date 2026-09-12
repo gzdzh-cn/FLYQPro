@@ -16,6 +16,22 @@ type V3DataEndpoint struct {
 	Addr     string
 }
 
+type tlsTCPV3DataTransport struct {
+	hosts  []string
+	port   int
+	config *tls.Config
+}
+
+func newTLSTCPV3DataTransport(hosts []string, port int, config *tls.Config) V3DataTransport {
+	return &tlsTCPV3DataTransport{hosts: append([]string(nil), hosts...), port: port, config: config.Clone()}
+}
+
+func (*tlsTCPV3DataTransport) Kind() V3TransportKind { return TransportTLSTCP }
+func (t *tlsTCPV3DataTransport) OpenStream(ctx context.Context) (net.Conn, error) {
+	return DialV3DataCandidates(ctx, t.hosts, t.port, t.config)
+}
+func (*tlsTCPV3DataTransport) Close() error { return nil }
+
 func ListenV3Data(addr string, config *tls.Config) (*V3DataEndpoint, error) {
 	if config == nil {
 		return nil, errors.New("nil TLS config")

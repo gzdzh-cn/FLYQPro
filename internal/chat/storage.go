@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"path/filepath"
@@ -135,6 +136,30 @@ type attachmentMigrationRow struct {
 	PeerDeviceID string `orm:"peer_device_id"`
 }
 
+type transferResumeRow struct {
+	AttachmentID    string `orm:"attachment_id"`
+	TransferID      string `orm:"transfer_id"`
+	MessageID       string `orm:"message_id"`
+	SenderDeviceID  string `orm:"sender_device_id"`
+	Direction       string `orm:"direction"`
+	SessionID       string `orm:"session_id"`
+	Generation      uint64 `orm:"generation"`
+	CheckpointSeq   uint64 `orm:"checkpoint_seq"`
+	FileName        string `orm:"file_name"`
+	FileSize        int64  `orm:"file_size"`
+	SHA256          string `orm:"sha256"`
+	SourceMTimeNS   int64  `orm:"source_mtime_ns"`
+	Retries         int    `orm:"retries"`
+	ErrorCode       string `orm:"error_code"`
+	Retryable       int    `orm:"retryable"`
+	TempPath        string `orm:"temp_path"`
+	TargetPath      string `orm:"target_path"`
+	TransferMode    string `orm:"transfer_mode"`
+	CompletedRanges string `orm:"completed_ranges"`
+	Status          string `orm:"status"`
+	UpdatedAt       string `orm:"updated_at"`
+}
+
 type ConversationAttachment struct {
 	Attachment
 	SenderDeviceID string `json:"senderDeviceId"`
@@ -155,6 +180,88 @@ func exec(ctx context.Context, sql string, args ...any) error {
 		return err
 	}
 	return fmt.Errorf("数据库尚未初始化")
+}
+
+func saveTransferResumeRecord(ctx context.Context, state transferResumeState) error {
+	ranges, err := json.Marshal(normalizeTransferRanges(state.CompletedRanges, state.FileSize))
+	if err != nil {
+		return err
+	}
+	return exec(ctx, `INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, checkpoint_seq=excluded.checkpoint_seq, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
+		state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, state.CheckpointSeq, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), nowString())
+}
+
+func loadTransferResumeRecord(ctx context.Context, attachmentID string) (transferResumeState, error) {
+	var rows []transferResumeRow
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes WHERE attachment_id=? LIMIT 1`, attachmentID)
+	if err != nil {
+		return transferResumeState{}, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return transferResumeState{}, err
+	}
+	if len(rows) == 0 {
+		return transferResumeState{}, fmt.Errorf("resume record not found")
+	}
+	row := rows[0]
+	var ranges []TransferRange
+	if err := json.Unmarshal([]byte(row.CompletedRanges), &ranges); err != nil {
+		return transferResumeState{}, err
+	}
+	updatedAt := parseTime(row.UpdatedAt)
+	if updatedAt.IsZero() {
+		return transferResumeState{}, fmt.Errorf("resume record timestamp invalid")
+	}
+	return transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, CheckpointSeq: row.CheckpointSeq, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: ranges, UpdatedAt: updatedAt}, nil
+}
+
+func listTransferResumeRecords(ctx context.Context) ([]transferResumeState, error) {
+	var rows []transferResumeRow
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	states := make([]transferResumeState, 0, len(rows))
+	for _, row := range rows {
+		var ranges []TransferRange
+		if err := json.Unmarshal([]byte(row.CompletedRanges), &ranges); err != nil {
+			continue
+		}
+		updatedAt := parseTime(row.UpdatedAt)
+		if updatedAt.IsZero() {
+			continue
+		}
+		states = append(states, transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, CheckpointSeq: row.CheckpointSeq, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: normalizeTransferRanges(ranges, row.FileSize), UpdatedAt: updatedAt})
+	}
+	return states, nil
+}
+
+func markTransferResumeTerminal(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
+	if err := exec(ctx, `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, completed_ranges='[]', updated_at=? WHERE attachment_id=?`, string(state), string(code), boolInt(retryable), nowString(), attachmentID); err != nil {
+		return err
+	}
+	if state == TransferCompleted {
+		return nil
+	}
+	// Failed and cancelled records remain inspectable. Mirror their terminal
+	// state to the compatibility sidecar before callers optionally remove the
+	// partial payload; successful completion is the only path that cleans it.
+	record, err := loadTransferResumeRecord(ctx, attachmentID)
+	if err != nil {
+		return nil
+	}
+	record.State, record.ErrorCode, record.Retryable = state, code, retryable
+	record.CompletedRanges = nil
+	return saveTransferResumeState(record)
+}
+
+func updateTransferResumeStatus(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
+	return exec(ctx, `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, updated_at=? WHERE attachment_id=?`, string(state), string(code), boolInt(retryable), nowString(), attachmentID)
 }
 
 func EnsureDefaults(ctx context.Context, defaultPath string) error {

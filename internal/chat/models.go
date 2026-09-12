@@ -30,6 +30,85 @@ const (
 	DiscoveryScopeFriend = "friend"
 )
 
+type TransferErrorCode string
+
+const (
+	ErrCertificateChanged  TransferErrorCode = "CERTIFICATE_CHANGED"
+	ErrDeviceKeyChanged    TransferErrorCode = "DEVICE_KEY_CHANGED"
+	ErrDeviceNotTrusted    TransferErrorCode = "DEVICE_NOT_TRUSTED"
+	ErrFriendshipRequired  TransferErrorCode = "FRIENDSHIP_REQUIRED"
+	ErrSessionNotReady     TransferErrorCode = "SESSION_NOT_READY"
+	ErrChunkVerifyFailed   TransferErrorCode = "CHUNK_VERIFY_FAILED"
+	ErrSourceFileChanged   TransferErrorCode = "SOURCE_FILE_CHANGED"
+	ErrInsufficientStorage TransferErrorCode = "INSUFFICIENT_DISK_SPACE"
+)
+
+func classifyTransferError(reason string) TransferErrorCode {
+	reason = strings.ToUpper(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(reason, "CERTIFICATE"):
+		return ErrCertificateChanged
+	case strings.Contains(reason, "DEVICE_KEY"):
+		return ErrDeviceKeyChanged
+	case strings.Contains(reason, "NOT_TRUSTED"):
+		return ErrDeviceNotTrusted
+	case strings.Contains(reason, "FRIENDSHIP"):
+		return ErrFriendshipRequired
+	case strings.Contains(reason, "SESSION"):
+		return ErrSessionNotReady
+	case strings.Contains(reason, "CHUNK") || strings.Contains(reason, "CHECKSUM") || strings.Contains(reason, "SHA"):
+		return ErrChunkVerifyFailed
+	case strings.Contains(reason, "SOURCE"):
+		return ErrSourceFileChanged
+	case strings.Contains(reason, "STORAGE") || strings.Contains(reason, "DISK") || strings.Contains(reason, "NO SPACE") || strings.Contains(reason, "ENOSPC") || strings.Contains(reason, "QUOTA"):
+		return ErrInsufficientStorage
+	default:
+		return ""
+	}
+}
+
+// TransferState is the cross-platform lifecycle vocabulary exposed by the
+// desktop service and mirrored by Android. The legacy phase field remains in
+// progress events for UI compatibility; State is the canonical value.
+type TransferState string
+
+const (
+	TransferQueued        TransferState = "queued"
+	TransferActive        TransferState = "active"
+	TransferPausedLocal   TransferState = "paused_local"
+	TransferPausedPeer    TransferState = "paused_peer"
+	TransferPausedNetwork TransferState = "paused_network_unstable"
+	TransferCompleted     TransferState = "completed"
+	TransferCancelled     TransferState = "cancelled"
+	TransferFailed        TransferState = "failed"
+	TransferUnknown       TransferState = "unknown"
+)
+
+func canonicalTransferState(phase string) TransferState {
+	switch phase {
+	case "pending", "queued", "awaiting_acceptance", "preparing", "preparing_thumbnail", "retrying":
+		return TransferQueued
+	case "transferring", "receiving", "resuming", "verifying":
+		return TransferActive
+	case "paused", "paused_local":
+		return TransferPausedLocal
+	case "paused_peer":
+		return TransferPausedPeer
+	case "paused_network_unstable", "network_unstable_timeout":
+		return TransferPausedNetwork
+	case "completed":
+		return TransferCompleted
+	case "canceled", "cancelled", "cancelled_by_local", "cancelled_by_peer", "rejected":
+		return TransferCancelled
+	case "failed":
+		return TransferFailed
+	case "unknown":
+		return TransferUnknown
+	default:
+		return TransferUnknown
+	}
+}
+
 type ProtocolDialect struct {
 	Name  string
 	Magic string

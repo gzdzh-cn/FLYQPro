@@ -139,6 +139,7 @@
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
                 <p><span>已耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
                 <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailProgress?.phase) }}</strong></p>
+                <p v-if="detailProgress?.errorCode"><span>失败原因</span><strong>{{ transferErrorLabel(detailProgress.errorCode) }} · {{ transferRetryLabel(detailProgress) }}</strong></p>
                 <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
                 <p><span>{{ detailIsReceiver ? '已落盘容量' : '对方已确认' }}</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }}</strong></p>
                 <p><span>总容量</span><strong>{{ formatMetricBytes(detailTotalBytes) }}</strong></p>
@@ -1189,7 +1190,9 @@ const detailTuningState = computed(() => {
   if (!detailProgress.value) return '暂未提供'
   return detailIsReceiver.value ? '接收端监测' : tuningStateLabel(detailProgress.value.tuningState)
 })
-function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', queued: '排队中', retrying: '重试中', resuming: '恢复传输', paused: '等待恢复', verifying: '校验中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || phase || '未知' }
+function transferPhaseLabel(phase?: string) { return ({ awaiting_acceptance: '等待对方接收', preparing_thumbnail: '文件准备中', queued: '排队中', retrying: '重试中', resuming: '恢复传输', paused: '等待恢复', verifying: '校验中', transferring: '传输中', receiving: '接收中', 'remote-receive': '对方接收中', completed: '已完成', canceled: '已取消', rejected: '已拒绝', failed: '传输失败' } as Record<string, string>)[phase || ''] || '状态未知' }
+function transferErrorLabel(code?: string) { return ({ CERTIFICATE_CHANGED: '对方证书已变化', DEVICE_KEY_CHANGED: '对方设备密钥已变化', DEVICE_NOT_TRUSTED: '设备尚未信任', FRIENDSHIP_REQUIRED: '需要先建立好友关系', SESSION_NOT_READY: '对方会话尚未就绪', CHUNK_VERIFY_FAILED: '文件校验失败', SOURCE_FILE_CHANGED: '源文件已变化', INSUFFICIENT_DISK_SPACE: '磁盘空间不足' } as Record<string, string>)[code || ''] || '传输发生错误' }
+function transferRetryLabel(progress?: { errorCode?: string; retryable?: boolean }) { return ['FRIENDSHIP_REQUIRED', 'SESSION_NOT_READY'].includes(progress?.errorCode || '') ? '等待对方' : progress?.retryable ? '可重试' : '不可恢复' }
 function transferDirectionLabel(direction?: string) { return ({ send: '发送', receive: '接收', 'remote-receive': '对方接收' } as Record<string, string>)[direction || ''] || direction || '未知' }
 function tuningStateLabel(state?: string) { return ({ probing: '探测中', observing: '接收端监测', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
@@ -2484,7 +2487,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
    * message row beyond the conversation viewport.  This applies equally to
    * locally-sent and remotely-received messages. */
   min-width: 0;
-  max-width: min(72%, 680px);
+  max-width: min(72%, 640px);
   box-sizing: border-box;
   padding: 9px 12px;
   border-radius: 14px 14px 14px 5px;

@@ -413,15 +413,18 @@ type parallelRange struct {
 }
 
 type outgoingTransfer struct {
-	message   Message
-	peerID    string
-	session   *wireSession
-	createdAt time.Time
-	cancel    chan struct{}
-	pause     chan struct{}
-	pauseOnce sync.Once
-	dataMu    sync.Mutex
-	data      map[int]*wireSession
+	message              Message
+	peerID               string
+	session              *wireSession
+	createdAt            time.Time
+	cancel               chan struct{}
+	pause                chan struct{}
+	pauseOnce            sync.Once
+	dataMu               sync.Mutex
+	data                 map[int]*wireSession
+	resumeMu             sync.Mutex
+	resumeState          transferResumeState
+	resumePersistedBytes int64
 }
 
 type fileControlConnection struct {
@@ -847,7 +850,8 @@ func (e *Engine) peerPoolWatchdogLoop() {
 			e.mu.RUnlock()
 			for _, pool := range pools {
 				now := time.Now()
-				if pool.Watchdog(now) > 0 {
+				if stalled := pool.Watchdog(now); stalled > 0 {
+					e.emit("slot-reconnecting", map[string]any{"eventVersion": 1, "peerDeviceId": pool.peerID, "generation": pool.Generation(), "stalledSlots": stalled, "updatedAt": now.UTC().Format(time.RFC3339Nano)})
 					pool.ReplaceDead()
 				}
 				// Keep slots reusable between files, but release connections that
@@ -876,7 +880,7 @@ func (e *Engine) resumeInterruptedOutgoing() {
 	e.mu.RUnlock()
 	messageIDs, err := ListPausedOutgoingFileMessageIDs(context.Background(), deviceID)
 	if err != nil {
-		log.Printf("加载待恢复文件失败: %v", err)
+		log.Printf("加载待恢复文件失败: %s", redactDiagnosticError(err))
 		return
 	}
 	for _, messageID := range messageIDs {
@@ -886,7 +890,7 @@ func (e *Engine) resumeInterruptedOutgoing() {
 				if message, messageErr := GetMessage(context.Background(), messageID); messageErr == nil && message.Status == "paused" {
 					e.finishAttachmentSend(context.Background(), message, "failed")
 				}
-				log.Printf("自动恢复文件失败: message=%s err=%v", messageID, retryErr)
+				log.Printf("自动恢复文件失败: message=%s err=%s", messageID, redactDiagnosticError(retryErr))
 			}
 		}()
 	}
@@ -1064,6 +1068,21 @@ func (e *Engine) handleConnection(raw net.Conn) {
 		return
 	}
 	existing, existingErr := e.peer(hello.DeviceID)
+	claimedIdentity := Peer{DeviceID: hello.DeviceID, PublicKeyPEM: hello.PublicKey, CertificateFingerprint: hello.CertFP}
+	identityToVerify := claimedIdentity
+	if existingErr == nil && (existing.PublicKeyPEM != "" || existing.CertificateFingerprint != "") {
+		identityToVerify = existing
+	}
+	if identityToVerify.PublicKeyPEM == "" && identityToVerify.CertificateFingerprint == "" {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: string(ErrDeviceNotTrusted)})
+		return
+	}
+	// Verify the certificate against the previously trusted identity before
+	// hello metadata can update the peer record.
+	if verifyErr := verifyPeerCertificate(conn, identityToVerify); verifyErr != nil {
+		_ = writeWire(conn, wireMessage{Type: "error", Status: verifyErr.Error()})
+		return
+	}
 	if hello.Probe && existingErr != nil && !isFriend {
 		_ = writeWire(conn, wireMessage{Type: "error", Status: "PEER_NOT_FOUND"})
 		return
@@ -1348,6 +1367,11 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		transferMode: receiverTransferMode(transfer),
 		tuningState:  "observing",
 		verified:     verified,
+		errorCode:    string(transfer.resumeState.ErrorCode),
+		retryable:    transfer.resumeState.Retryable,
+		retries:      transfer.resumeState.Retries,
+		generation:   transfer.resumeState.Generation,
+		sessionID:    transfer.resumeState.SessionID,
 	}
 	if transfer.parallel {
 		transfer.parallelMu.Lock()
@@ -1553,7 +1577,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		}
 		request := FriendRequest{RequestID: requestID, DeviceID: hello.DeviceID, Nickname: hello.Nickname, Message: message.Content, Status: "pending", Direction: "received", CreatedAt: nowString()}
 		if err := SaveFriendRequest(context.Background(), request); err != nil {
-			log.Printf("保存好友申请失败: device=%s, request=%s, error=%v", hello.DeviceID, requestID, err)
+			log.Printf("保存好友申请失败: device=%s, request=%s, error=%s", hello.DeviceID, requestID, redactDiagnosticError(err))
 			if conn != nil {
 				_ = writeWire(conn, wireMessage{Type: "error", Status: "REQUEST_STORAGE_UNAVAILABLE"})
 			}
@@ -1563,7 +1587,7 @@ func (e *Engine) handleWire(conn net.Conn, hello wireMessage, message wireMessag
 		// newly received request disappear from the next startup. Only older
 		// in-flight requests are superseded; terminal history stays intact.
 		if err := e.prepareNewFriendRequest(context.Background(), hello.DeviceID, request.Direction, request.RequestID); err != nil {
-			log.Printf("更新旧好友申请状态失败: device=%s, error=%v", hello.DeviceID, err)
+			log.Printf("更新旧好友申请状态失败: device=%s, error=%s", hello.DeviceID, redactDiagnosticError(err))
 		}
 		// A request received while the relationship is already active is a
 		// retransmission/late packet, not a new removal cycle. Downgrading here
@@ -2255,8 +2279,14 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 		return err
 	}
 	transfer := &incomingFile{v3Done: make(chan string, 1), file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
-	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
+	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, Direction: "receive", FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, State: TransferActive, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
 	if resumeMatches && len(resumeState.CompletedRanges) > 0 {
+		transfer.resumeState.CheckpointSeq = resumeState.CheckpointSeq
+		transfer.resumeState.SessionID = resumeState.SessionID
+		transfer.resumeState.Generation = resumeState.Generation
+		transfer.resumeState.Retries = resumeState.Retries
+		transfer.resumeState.ErrorCode = resumeState.ErrorCode
+		transfer.resumeState.Retryable = resumeState.Retryable
 		transfer.v3Ranges = make([]ByteRange, 0, len(resumeState.CompletedRanges))
 		for _, item := range resumeState.CompletedRanges {
 			if item.Offset >= 0 && item.Length > 0 && item.Offset+item.Length <= attachment.FileSize {
@@ -2311,7 +2341,7 @@ func persistIncomingResume(transfer *incomingFile) error {
 		defer transfer.v3Mu.Unlock()
 		// Hold the range lock across fsync and the snapshot: ranges added
 		// afterwards belong to the next checkpoint, never this ACK batch.
-		if err := transfer.file.Sync(); err != nil {
+		if err := syncTransferFile(transfer.file); err != nil {
 			return err
 		}
 		state := transfer.resumeState
@@ -2340,7 +2370,7 @@ func persistIncomingResume(transfer *incomingFile) error {
 			return err
 		}
 	}
-	if err := transfer.file.Sync(); err != nil {
+	if err := syncTransferFile(transfer.file); err != nil {
 		return err
 	}
 	state := transfer.resumeState
@@ -2392,6 +2422,7 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 		transfer.parallelMu.Unlock()
 	}
 	closeParallelSessions(transfer)
+	transfer.resumeState.State = TransferPausedLocal
 	_ = persistIncomingResume(transfer)
 	if transfer.parallel {
 		transfer.resumeMu.Lock()
@@ -2417,7 +2448,7 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 		e.emitAttachmentStatus(transfer.messageID, "paused", transfer.tempPath)
 	}
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "paused", receiverProgressOptions(transfer, nil))
-	log.Printf("文件接收暂停，等待恢复: attachment=%s reason=%s bytes=%d", attachmentID, reason, transfer.received)
+	log.Printf("文件接收暂停，等待恢复: attachment=%s reason=%s bytes=%d", attachmentID, redactDiagnosticText(reason), transfer.received)
 }
 
 func (e *Engine) cleanupAttachmentSession(session *wireSession) {
@@ -2452,6 +2483,7 @@ func (e *Engine) cleanupAttachmentSession(session *wireSession) {
 			transfer.parallelMu.Unlock()
 		}
 		closeParallelSessions(transfer)
+		transfer.resumeState.State = TransferPausedNetwork
 		_ = persistIncomingResume(transfer)
 		if transfer.file != nil {
 			_ = transfer.file.Close()
@@ -2459,6 +2491,7 @@ func (e *Engine) cleanupAttachmentSession(session *wireSession) {
 		transfer.v3IOMu.Unlock()
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: transfer.attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, LocalPath: transfer.tempPath, Status: "paused"})
 		e.emitAttachmentStatus(transfer.messageID, "paused", transfer.tempPath)
+		e.emit("session-disconnected", map[string]any{"eventVersion": 1, "transferId": transfer.attachmentID, "messageId": transfer.messageID, "peerDeviceId": transfer.senderID, "state": string(TransferPausedNetwork), "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)})
 	}
 }
 
@@ -2500,7 +2533,8 @@ func (e *Engine) cancelIncomingFromRemote(attachmentID string, rejected bool) {
 		}
 		closeParallelSessions(transfer)
 		_ = transfer.file.Close()
-		removeTransferResumeState(attachmentID, true)
+		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferCancelled, "", false)
+		removeTransferResumeArtifacts(attachmentID, true, false)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, Status: status})
 		e.emitAttachmentStatus(transfer.messageID, status, "")
 		verified := false
@@ -2529,7 +2563,9 @@ func (e *Engine) failIncomingFile(attachmentID, reason string) {
 	if transfer.file != nil {
 		_ = transfer.file.Close()
 	}
-	removeTransferResumeState(attachmentID, true)
+	code := classifyTransferError(reason)
+	_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferFailed, code, code == ErrInsufficientStorage || code == ErrSessionNotReady)
+	removeTransferResumeArtifacts(attachmentID, code != ErrChunkVerifyFailed, false)
 	attachment, _ := GetAttachment(context.Background(), attachmentID)
 	_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, Status: "failed"})
 	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "failed", transfer.messageID)
@@ -2557,6 +2593,13 @@ func closeParallelSessions(transfer *incomingFile) {
 }
 
 func (e *Engine) finishIncomingFile(attachmentID string) string {
+	// EndFile may be retransmitted after the sender loses the first ACK. A
+	// completed attachment is already atomically committed; acknowledge the
+	// duplicate without reopening the .part file or rewriting the destination.
+	if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil &&
+		attachment.Status == "saved" && attachment.LocalPath != "" {
+		return "completed"
+	}
 	e.mu.Lock()
 	transfer := e.incoming[attachmentID]
 	delete(e.incoming, attachmentID)
@@ -2573,7 +2616,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	}
 	transfer.v3Mu.Unlock()
 	if v3Valid && transfer.v3Streams != nil {
-		if transfer.file.Sync() != nil {
+		if syncTransferFile(transfer.file) != nil {
 			v3Valid = false
 		} else {
 			digest := sha256.New()
@@ -2601,7 +2644,7 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		parallelValid = parallelValid && covered == transfer.expected && transfer.parallelWritten == transfer.expected
 		transfer.parallelMu.Unlock()
 		if parallelValid {
-			parallelValid = transfer.file.Sync() == nil
+			parallelValid = syncTransferFile(transfer.file) == nil
 			if parallelValid {
 				digest := sha256.New()
 				hashFile, err := os.Open(transfer.tempPath)
@@ -2639,9 +2682,19 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		status = "failed"
 		localPath = ""
 	}
-	// Keep the .part for recovery/diagnostics on verification or commit errors,
+	if valid {
+		if err := markTransferResumeTerminal(context.Background(), attachmentID, TransferCompleted, "", false); err != nil {
+			valid = false
+			status = "failed"
+			localPath = ""
+		}
+	} else {
+		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferFailed, classifyTransferError("SHA-256 mismatch"), false)
+	}
+	// Keep the .part and terminal sidecar for verification or commit errors,
 	// but invalidate completed ranges so corrupt content is never skipped.
-	removeTransferResumeState(attachmentID, false)
+	// Successful completion is the only path that removes the sidecar.
+	removeTransferResumeArtifacts(attachmentID, false, valid)
 	attachmentMime := transfer.mimeType
 	if attachmentMime == "" {
 		attachmentMime = mime.TypeByExtension(filepath.Ext(transfer.fileName))
@@ -2677,6 +2730,12 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 }
 
 type transferProgressOptions struct {
+	sessionID           string
+	generation          uint64
+	slotID              int
+	retries             int
+	errorCode           string
+	retryable           bool
 	chunkSize           int
 	windowSize          int
 	windowBytes         int64
@@ -2700,6 +2759,8 @@ type transferProgressOptions struct {
 	protocol            string
 	tuningState         string
 	tuningReason        string
+	goodSamples         int
+	badSamples          int
 	verified            *bool
 }
 
@@ -2736,17 +2797,23 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		percent = int(transferred * 100 / total)
 	}
 	value := map[string]any{
+		"eventVersion": 1,
 		"messageId":    messageID,
 		"attachmentId": attachmentID,
+		"transferId":   attachmentID,
 		"peerDeviceId": peerDeviceID,
 		"transferred":  transferred,
 		"total":        total,
 		"percent":      percent,
 		"direction":    direction,
 		"phase":        phase,
-		"transport":    "TLS/TCP",
+		"state":        string(canonicalTransferState(phase)),
+		"transport":    "TLS13/TCP-v3",
 		"protocol":     fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
 		"updatedAt":    time.Now().UTC().Format(time.RFC3339Nano),
+		"sessionId":    "",
+		"generation":   uint64(0),
+		"durableBytes": int64(0),
 	}
 	var option transferProgressOptions
 	if len(options) > 0 {
@@ -2757,6 +2824,22 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	}
 	if option.protocol != "" {
 		value["protocol"] = option.protocol
+	}
+	if option.sessionID != "" {
+		value["sessionId"] = option.sessionID
+	}
+	value["generation"] = option.generation
+	if option.slotID > 0 {
+		value["slotId"] = option.slotID
+	}
+	value["retries"] = option.retries
+	value["errorCode"] = option.errorCode
+	value["retryable"] = option.retryable || option.errorCode == string(ErrInsufficientStorage) || option.errorCode == string(ErrSessionNotReady)
+	if option.durableBytes > 0 || phase == "completed" {
+		value["durableBytes"] = option.durableBytes
+		if phase == "completed" && option.durableBytes == 0 {
+			value["durableBytes"] = transferred
+		}
 	}
 	if option.chunkSize > 0 {
 		value["chunkSize"] = option.chunkSize
@@ -2816,6 +2899,8 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.tuningReason != "" {
 		value["tuningReason"] = option.tuningReason
 	}
+	value["goodSamples"] = option.goodSamples
+	value["badSamples"] = option.badSamples
 	if option.verified != nil {
 		value["verified"] = *option.verified
 	}
@@ -2913,6 +2998,11 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		value["remoteReceived"] = transferred
 	}
 	e.emit("chat:transfer-progress", value)
+	e.emit("transfer-progress", value)
+	e.emit("transfer-state-changed", value)
+	if value["state"] == string(TransferPausedNetwork) {
+		e.emit("recovery-required", value)
+	}
 }
 
 // ArchivePendingAttachments moves files that arrived during a storage
@@ -3071,6 +3161,7 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 			_ = SaveAttachment(context.Background(), attachment)
 			e.emitAttachmentStatus(attachment.MessageID, "canceled", "")
 		}
+		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferCancelled, "", false)
 		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "canceled")
 		return nil
 	}
@@ -3134,7 +3225,8 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 		}(transfer.session)
 		closeParallelSessions(transfer)
 		_ = transfer.file.Close()
-		removeTransferResumeState(attachmentID, true)
+		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferCancelled, "", false)
+		removeTransferResumeArtifacts(attachmentID, true, false)
 		_ = SaveAttachment(context.Background(), Attachment{AttachmentID: transfer.attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, Status: "canceled"})
 		e.emitAttachmentStatus(transfer.messageID, "canceled", "")
 		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "canceled", receiverProgressOptions(transfer, nil))
@@ -3167,6 +3259,7 @@ func (e *Engine) PauseAttachment(attachmentID string) error {
 			_ = SaveAttachment(context.Background(), attachment)
 			e.emitAttachmentStatus(attachment.MessageID, "paused", "")
 		}
+		_ = updateTransferResumeStatus(context.Background(), attachmentID, TransferPausedLocal, "", true)
 		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "paused")
 		return nil
 	}
@@ -3228,7 +3321,7 @@ func (e *Engine) ResumeAttachment(ctx context.Context, attachmentID string) (Mes
 	if peer, peerErr := e.peer(message.SenderDeviceID); peerErr == nil {
 		go func() {
 			if err := e.sendToPeer(peer, wireMessage{Type: "file_resume", MessageID: message.MessageID, AttachmentID: attachmentID, Status: "requested"}); err != nil {
-				log.Printf("发送文件继续请求失败: attachment=%s error=%v", attachmentID, err)
+				log.Printf("发送文件继续请求失败: attachment=%s error=%s", attachmentID, redactDiagnosticError(err))
 			}
 		}()
 	}
@@ -3657,8 +3750,8 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	e.mu.RUnlock()
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
-	if dialect.Major >= 2 {
-		capabilities = append(capabilities, "file-progress-v1", fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "range-resume-v2")
+	if dialect.Major >= ProtocolMajor {
+		capabilities = append(capabilities, "file-progress-v1", fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1")
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)
@@ -3962,7 +4055,7 @@ func (e *Engine) maybeSyncFriendRemoval(peer Peer) {
 	e.friendRemovalSyncMu.Unlock()
 	go func() {
 		if err := e.NotifyFriendRemoved(peer.DeviceID); err != nil {
-			log.Printf("解除好友关系离线同步失败: device=%s, err=%v", peer.DeviceID, err)
+			log.Printf("解除好友关系离线同步失败: device=%s, err=%s", peer.DeviceID, redactDiagnosticError(err))
 		}
 	}()
 }
@@ -4539,7 +4632,7 @@ func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath stri
 	go func() { announceDone <- e.announceFile(peer, message) }()
 	sum, thumbnailData, thumbnailMime, prepareErr := e.prepareOutgoingAttachment(path, message.AttachmentMime, cancel)
 	if announceErr := <-announceDone; announceErr != nil {
-		log.Printf("文件预告发送失败，将由正式 offer 重试: attachment=%s error=%v", attachmentID, announceErr)
+		log.Printf("文件预告发送失败，将由正式 offer 重试: attachment=%s error=%s", attachmentID, redactDiagnosticError(announceErr))
 	}
 	if prepareErr != nil {
 		status := "failed"
@@ -4854,6 +4947,42 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 		}
 	}
 	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		if e.outgoing[message.AttachmentID] == active {
+			delete(e.outgoing, message.AttachmentID)
+		}
+		e.mu.Unlock()
+	}()
+	var sourceMTimeNS int64
+	var sourceInfo os.FileInfo
+	if info, statErr := os.Stat(path); statErr == nil {
+		sourceInfo = info
+		sourceMTimeNS = info.ModTime().UnixNano()
+	}
+	if saved, savedErr := loadTransferResumeState(message.AttachmentID); savedErr == nil && saved.Direction == "send" && outgoingResumeSourceChanged(saved, sourceInfo) && contiguousTransferOffset(saved.CompletedRanges, saved.FileSize) > 0 {
+		_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferFailed, ErrSourceFileChanged, false)
+		return newTransferError(ErrSourceFileChanged, false, fmt.Errorf("源文件在恢复前已变化"))
+	}
+	resumeState := transferResumeState{
+		TransferID: message.AttachmentID, AttachmentID: message.AttachmentID,
+		MessageID: message.MessageID, SenderDeviceID: deviceID, Direction: "send",
+		FileName: message.AttachmentName, FileSize: message.AttachmentSize,
+		SHA256: sum, TargetPath: path, SourceMTimeNS: sourceMTimeNS,
+		TransferMode: v3TransferMode, State: TransferQueued,
+	}
+	if err := persistOutgoingResumeState(resumeState); err != nil {
+		return newTransferError(ErrSessionNotReady, true, err)
+	}
+	if persisted, err := loadTransferResumeRecord(context.Background(), message.AttachmentID); err == nil {
+		resumeState = persisted
+	}
+	active.resumeMu.Lock()
+	active.resumeState = resumeState
+	for _, item := range resumeState.CompletedRanges {
+		active.resumePersistedBytes += item.Length
+	}
+	active.resumeMu.Unlock()
 	transferCtx, stopTransfer := context.WithCancel(ctx)
 	paused := make(chan struct{})
 	go func() {
@@ -4894,6 +5023,11 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 			if inspectErr != nil {
 				return inspectErr
 			}
+			if saved, savedErr := loadTransferResumeRecord(context.Background(), message.AttachmentID); savedErr == nil && outgoingResumeSourceChanged(saved, info) {
+				cause := fmt.Errorf("源文件修改时间发生变化")
+				_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferFailed, ErrSourceFileChanged, false)
+				return newTransferError(ErrSourceFileChanged, false, cause)
+			}
 			if info.Size() != message.AttachmentSize || !strings.EqualFold(currentSum, sum) {
 				message.AttachmentSize = info.Size()
 				sum = currentSum
@@ -4917,7 +5051,13 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 			return errTransferPaused
 		default:
 		}
-		if err == nil || !transientTransferError(err) {
+		if err == nil {
+			_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferCompleted, "", false)
+			return nil
+		}
+		if !transientTransferError(err) {
+			code, retryable := transferErrorInfo(err)
+			_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferFailed, code, retryable)
 			return err
 		}
 		// transferFileWithDialect removes the per-attempt entry on failure;
@@ -4941,7 +5081,7 @@ func (e *Engine) fileControlForPeer(peer Peer, dialect ProtocolDialect) (*fileCo
 	if pooled != nil {
 		e.discardFileControl(peer.DeviceID, pooled.session)
 	}
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return nil, err
 	}
@@ -5077,7 +5217,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	if err := session.write(offer); err != nil {
 		return err
 	}
-	supportsDemand := hasCapability(response.Capabilities, "attachment-demand-v1") && responseDialect.Major >= 2
+	supportsDemand := hasCapability(response.Capabilities, "attachment-demand-v1") && responseDialect.Major >= ProtocolMajor
 	resumeOffset := int64(0)
 	if supportsDemand || responseDialect.Major >= ProtocolMajor {
 		offerResponse, err := readFileOfferResponse(reader, message.AttachmentID)
@@ -5186,7 +5326,7 @@ type parallelStreamAck struct {
 }
 
 func (e *Engine) openParallelDataStream(ctx context.Context, peer Peer, dialect ProtocolDialect, message Message, token string, streamID, streamCount int, offset, length int64, chunkSize int) (*wireSession, *wireReader, error) {
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -5804,6 +5944,17 @@ func effectiveAckLatency(ackLatency time.Duration, diskWriteMs int64) time.Durat
 	return latency
 }
 
+func updateTransferEWMA(previous, sample float64) float64 {
+	if sample < 0 {
+		sample = 0
+	}
+	if previous <= 0 {
+		return sample
+	}
+	const sampleWeight = 0.25
+	return previous*(1-sampleWeight) + sample*sampleWeight
+}
+
 func binaryAckTargetForBudget(budget int64) int64 {
 	target := budget / 2
 	minimum := int64(minInFlightBytes)
@@ -5895,8 +6046,9 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 	pending := make([]binaryPendingWindow, 0, 16)
 	sent, confirmed, inFlight := resumeOffset, resumeOffset, int64(0)
 	windowID, chunkIndex := 0, 0
-	lastThroughput := 0.0
+	smoothedThroughput, smoothedAckMs, smoothedDiskMs := 0.0, 0.0, 0.0
 	stableCycles, degradedCycles := 0, 0
+	adjustmentCooldown := 0
 	lastDiagnosticAt := time.Time{}
 	rateSampleAt := time.Now()
 	rateSampleBytes := resumeOffset
@@ -6005,26 +6157,35 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 			}
 		}
 		effectiveAckWait := effectiveAckLatency(ackWait, ack.progress.DiskWriteMs)
-		healthy := effectiveAckWait <= 250*time.Millisecond && ack.progress.DiskWriteMs <= 300 && (lastThroughput == 0 || throughput >= lastThroughput*0.90)
+		previousSmoothedThroughput := smoothedThroughput
+		smoothedThroughput = updateTransferEWMA(smoothedThroughput, throughput)
+		smoothedAckMs = updateTransferEWMA(smoothedAckMs, float64(effectiveAckWait.Milliseconds()))
+		smoothedDiskMs = updateTransferEWMA(smoothedDiskMs, float64(ack.progress.DiskWriteMs))
+		decisionAck := time.Duration(smoothedAckMs * float64(time.Millisecond))
+		decisionDiskMs := int64(smoothedDiskMs)
+		healthy := decisionAck <= 250*time.Millisecond && decisionDiskMs <= 300 && (previousSmoothedThroughput == 0 || smoothedThroughput >= previousSmoothedThroughput*0.90)
 		if healthy {
 			stableCycles++
 		} else {
 			stableCycles = 0
 		}
-		// Require two consecutive bad samples. A single delayed Wi-Fi ACK or
-		// scheduler pause must not permanently collapse the transfer window.
-		degraded := effectiveAckWait > time.Second || ack.progress.DiskWriteMs > 500 || (lastThroughput > 0 && throughput < lastThroughput*0.75)
+		// Require consecutive samples so one delayed Wi-Fi ACK or scheduler
+		// pause cannot collapse the transfer window.
+		degraded := decisionAck > time.Second || decisionDiskMs > 500 || (previousSmoothedThroughput > 0 && smoothedThroughput < previousSmoothedThroughput*0.75)
 		if degraded {
 			degradedCycles++
 		} else {
 			degradedCycles = 0
 		}
 		state, reason := "stable", ""
-		if stableCycles >= 2 || degradedCycles >= 2 {
+		if adjustmentCooldown > 0 {
+			adjustmentCooldown--
+		}
+		if adjustmentCooldown == 0 && (stableCycles >= 5 || degradedCycles >= 3) {
 			var tuneReason string
-			tuning, state, tuneReason = adjustTransferTuning(tuning, effectiveAckWait, ack.progress.DiskWriteMs, throughput, lastThroughput, true)
+			tuning, state, tuneReason = adjustTransferTuning(tuning, decisionAck, decisionDiskMs, smoothedThroughput, previousSmoothedThroughput, true)
 			var budgetState, budgetReason string
-			inFlightBudget, budgetState, budgetReason = adjustInFlightBudget(inFlightBudget, tuning.chunkSize, effectiveAckWait, ack.progress.DiskWriteMs, throughput, lastThroughput)
+			inFlightBudget, budgetState, budgetReason = adjustInFlightBudget(inFlightBudget, tuning.chunkSize, decisionAck, decisionDiskMs, smoothedThroughput, previousSmoothedThroughput)
 			if state == "stable" && budgetState != "stable" {
 				state, reason = budgetState, budgetReason
 			} else {
@@ -6034,15 +6195,15 @@ func (e *Engine) transferBinaryFilePipelined(ctx context.Context, peerID string,
 				}
 			}
 			if state != "stable" {
-				stableCycles = 0
+				stableCycles, degradedCycles = 0, 0
+				adjustmentCooldown = 2
 			}
 		}
 		tuneTCPBuffers(session.conn, inFlightBudget)
-		lastThroughput = throughput
-		options := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: ackWindow.windowSize, windowBytes: ackedBytes, inFlightBytes: inFlight, ackTargetBytes: binaryAckTargetForBudget(inFlightBudget), socketWriteMs: ackWindow.writeDuration.Milliseconds(), ackWaitMs: ackWait.Milliseconds(), ackLatency: ackWait, diskWriteMs: ack.progress.DiskWriteMs, windowThroughput: throughput, confirmedThroughput: confirmedThroughput, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: state, tuningReason: reason}
+		options := transferProgressOptions{chunkSize: tuning.chunkSize, windowSize: ackWindow.windowSize, windowBytes: ackedBytes, inFlightBytes: inFlight, ackTargetBytes: binaryAckTargetForBudget(inFlightBudget), socketWriteMs: ackWindow.writeDuration.Milliseconds(), ackWaitMs: ackWait.Milliseconds(), ackLatency: ackWait, diskWriteMs: ack.progress.DiskWriteMs, windowThroughput: throughput, confirmedThroughput: confirmedThroughput, transferMode: binaryTransferMode, transport: "TLS/TCP", protocol: protocolLabel, tuningState: state, tuningReason: reason, goodSamples: stableCycles, badSamples: degradedCycles}
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmed, message.AttachmentSize, "remote-receive", "receiving", options)
 		if reason != "" || lastDiagnosticAt.IsZero() || time.Since(lastDiagnosticAt) >= time.Second {
-			log.Printf("文件传输确认: peer=%s attachment=%s mode=%s window=%d chunk=%d ack_bytes=%d in_flight=%d write=%dms ack=%dms throughput=%.1fMB/s state=%s reason=%s", peerID, message.AttachmentID, binaryTransferMode, ackWindow.id, tuning.chunkSize, ackedBytes, inFlight, ackWindow.writeDuration.Milliseconds(), ackWait.Milliseconds(), throughput/(1024*1024), state, reason)
+			log.Printf("文件传输确认: peer=%s attachment=%s mode=%s window=%d chunk=%d ack_bytes=%d in_flight=%d write=%dms ack=%dms throughput=%.1fMB/s state=%s reason=%s", peerID, message.AttachmentID, binaryTransferMode, ackWindow.id, tuning.chunkSize, ackedBytes, inFlight, ackWindow.writeDuration.Milliseconds(), ackWait.Milliseconds(), throughput/(1024*1024), state, redactDiagnosticText(reason))
 			lastDiagnosticAt = time.Now()
 		}
 		e.rememberTransferTuning(peerID, tuning)
@@ -6259,7 +6420,7 @@ func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect P
 	if peer.IP == "" || peer.Port == 0 {
 		return fmt.Errorf("好友地址不可用")
 	}
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return err
 	}
@@ -6515,7 +6676,7 @@ func (e *Engine) RefreshPeerAvatar(deviceID string) error {
 }
 
 func (e *Engine) refreshPeerAvatarWithDialect(peer Peer, dialect ProtocolDialect) error {
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return err
 	}
@@ -6589,7 +6750,7 @@ func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error 
 	if peer.IP == "" || peer.Port == 0 {
 		return fmt.Errorf("好友地址不可用")
 	}
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return err
 	}
@@ -6720,7 +6881,7 @@ func (e *Engine) probeKnownPeers() {
 	}
 }
 
-func (e *Engine) clientTLSConfig() (*tls.Config, error) {
+func (e *Engine) clientTLSConfig(peer Peer) (*tls.Config, error) {
 	e.mu.RLock()
 	identity := e.identity
 	e.mu.RUnlock()
@@ -6728,7 +6889,18 @@ func (e *Engine) clientTLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{Certificates: []tls.Certificate{certificate}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, nil
+	if peer.DeviceID == "" || peer.PublicKeyPEM == "" || peer.CertificateFingerprint == "" {
+		return nil, newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("设备身份材料缺失"))
+	}
+	config := &tls.Config{
+		Certificates:       []tls.Certificate{certificate},
+		InsecureSkipVerify: true, // replaced by the mandatory identity pin below
+		MinVersion:         tls.VersionTLS13,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			return verifyPeerCertificateState(state, peer)
+		},
+	}
+	return config, nil
 }
 
 func cachedAvatarMatches(peer Peer) bool {
@@ -6745,31 +6917,32 @@ func verifyPeerCertificate(conn *tls.Conn, peer Peer) error {
 
 func verifyPeerCertificateState(state tls.ConnectionState, peer Peer) error {
 	if len(state.PeerCertificates) == 0 {
-		return fmt.Errorf("对方没有提供证书")
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("对方没有提供证书"))
 	}
 	certificate := state.PeerCertificates[0]
 	actual := sha256Hex(certificate.Raw)
-	if peer.PublicKeyPEM != "" {
-		block, _ := pem.Decode([]byte(peer.PublicKeyPEM))
-		if block == nil {
-			return fmt.Errorf("设备公钥无效")
-		}
-		expected, err := x509.ParsePKIXPublicKey(block.Bytes)
-		if err != nil {
-			return fmt.Errorf("设备公钥无效")
-		}
-		expectedDER, err := x509.MarshalPKIXPublicKey(expected)
-		if err != nil {
-			return err
-		}
-		actualDER, err := x509.MarshalPKIXPublicKey(certificate.PublicKey)
-		if err != nil || !strings.EqualFold(hex.EncodeToString(actualDER), hex.EncodeToString(expectedDER)) {
-			return fmt.Errorf("设备身份不匹配")
-		}
-		return nil
+	if peer.DeviceID == "" || peer.PublicKeyPEM == "" || peer.CertificateFingerprint == "" {
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("设备身份材料缺失"))
 	}
-	if peer.CertificateFingerprint != "" && !strings.EqualFold(actual, peer.CertificateFingerprint) {
-		return fmt.Errorf("CERTIFICATE_CHANGED")
+	block, _ := pem.Decode([]byte(peer.PublicKeyPEM))
+	if block == nil {
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("设备公钥无效"))
+	}
+	expected, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("设备公钥无效"))
+	}
+	expectedDER, err := x509.MarshalPKIXPublicKey(expected)
+	if err != nil {
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("设备公钥无效"))
+	}
+	actualDER, err := x509.MarshalPKIXPublicKey(certificate.PublicKey)
+	if err != nil || !strings.EqualFold(hex.EncodeToString(actualDER), hex.EncodeToString(expectedDER)) ||
+		!strings.EqualFold(sha256Hex(expectedDER), peer.DeviceID) {
+		return newTransferError(ErrDeviceKeyChanged, false, fmt.Errorf("设备身份不匹配"))
+	}
+	if !strings.EqualFold(actual, peer.CertificateFingerprint) {
+		return newTransferError(ErrCertificateChanged, false, fmt.Errorf("证书指纹变化"))
 	}
 	return nil
 }

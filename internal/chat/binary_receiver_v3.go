@@ -34,6 +34,9 @@ func ReceiveBinaryFileV3(ctx context.Context, r io.Reader, w *RangeWriterV3, max
 		switch frame.Type {
 		case FrameChunkData:
 			ok, writeErr := w.WriteChunk(int64(frame.Offset), frame.Payload, frame.ChunkHash[:])
+			if writeErr == nil {
+				writeErr = w.Checkpoint()
+			}
 			if ack != nil {
 				if e := ack(frame, writeErr); e != nil {
 					return V3ReceiveResult{Status: "failed", Err: e}

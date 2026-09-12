@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"os"
 	"testing"
 )
 
@@ -30,5 +31,11 @@ func TestReceiveBinaryFileV3(t *testing.T) {
 	got := ReceiveBinaryFileV3(context.Background(), &data, w, 1024, nil)
 	if got.Status != "completed" || got.Completed != 6 {
 		t.Fatalf("%+v", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("committed file missing: %v", err)
+	}
+	if _, err := os.Stat(path + ".part"); !os.IsNotExist(err) {
+		t.Fatalf("temporary part file was not atomically committed: %v", err)
 	}
 }

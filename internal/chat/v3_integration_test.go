@@ -6,39 +6,62 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+func firstNonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
 // Exercise the production sender, receiver, resume store and final rename over
 // mutual TLS 1.3. A reusable connection is counted at the actual accept boundary.
 func runV3TLS(t *testing.T, sizes []int, streams int, resumed bool) {
 	t.Helper()
 	dbctx := openSharedFolderTestDatabase(t)
-	if err := UpsertPeer(dbctx, Peer{DeviceID: "sender", Nickname: "sender", Relation: "friend"}); err != nil {
+	senderIdentity, senderCertificate := parallelTestIdentity(t)
+	receiverIdentity, receiverCertificate := parallelTestIdentity(t)
+	senderID := senderIdentity.DeviceID
+	if err := UpsertPeer(dbctx, Peer{DeviceID: senderID, Nickname: "sender", Relation: "friend"}); err != nil {
 		t.Fatal(err)
 	}
-	conversationID, err := EnsureConversation(dbctx, "sender")
+	conversationID, err := EnsureConversation(dbctx, senderID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, cert := parallelTestIdentity(t)
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAnyClientCert})
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{receiverCertificate}, MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAnyClientCert})
 	if err != nil {
 		t.Fatal(err)
 	}
 	receiver, sender := NewEngine(), NewEngine()
-	sender.identity = identity
-	receiver.peers["sender"] = Peer{DeviceID: "sender", CertificateFingerprint: sha256Hex(cert.Certificate[0])}
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", DataPort: listener.Addr().(*net.TCPAddr).Port, CertificateFingerprint: sha256Hex(cert.Certificate[0])}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	sender.identity = senderIdentity
+	senderPeer := pinnedTestPeer(senderIdentity, senderCertificate)
+	senderPeer.Relation = PeerRelation
+	receiver.peers[senderID] = senderPeer
+	peer := pinnedTestPeer(receiverIdentity, receiverCertificate)
+	peer.IP = "127.0.0.1"
+	peer.DataPort = listener.Addr().(*net.TCPAddr).Port
+	totalBytes := 0
+	for _, size := range sizes {
+		totalBytes += size
+	}
+	testTimeout := 90 * time.Second
+	if estimated := time.Duration(totalBytes/(8*1024*1024))*time.Second + 2*time.Minute; estimated > testTimeout {
+		testTimeout = estimated
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	var accepts atomic.Int32
 	var wg sync.WaitGroup
 	acceptDone := make(chan struct{})
@@ -70,6 +93,24 @@ func runV3TLS(t *testing.T, sizes []int, streams int, resumed bool) {
 		}
 	}()
 	root := t.TempDir()
+	type validationSample struct {
+		Result          string        `json:"result"`
+		Scenario        string        `json:"scenario"`
+		Bytes           int           `json:"bytes"`
+		DataTimeMS      int64         `json:"dataTimeMs"`
+		MiBPerSecond    float64       `json:"mibPerSecond"`
+		Slots           int           `json:"slots"`
+		SHA256Verified  bool          `json:"sha256Verified"`
+		Resumed         bool          `json:"resumed"`
+		CanonicalState  TransferState `json:"canonicalState"`
+		SessionID       string        `json:"sessionId"`
+		Generation      uint64        `json:"generation"`
+		CheckpointSeq   uint64        `json:"checkpointSeq"`
+		DurableBytes    int64         `json:"durableBytes"`
+		FinalFileBytes  int64         `json:"finalFileBytes"`
+		PartFilePresent bool          `json:"partFilePresent"`
+	}
+	samples := make([]validationSample, 0, len(sizes))
 	for index, size := range sizes {
 		id := fmt.Sprintf("file-%d", index)
 		sourcePath, finalPath := filepath.Join(root, id+".src"), filepath.Join(root, id+".out")
@@ -89,9 +130,9 @@ func runV3TLS(t *testing.T, sizes []int, streams int, resumed bool) {
 		}
 		var sum [32]byte
 		copy(sum[:], digest.Sum(nil))
-		message := Message{MessageID: "msg-" + id, AttachmentID: id, AttachmentName: id, AttachmentSize: int64(size), SenderDeviceID: "sender", ConversationID: conversationID, Kind: "file", Status: "receiving", CreatedAt: nowString()}
+		message := Message{MessageID: "msg-" + id, AttachmentID: id, AttachmentName: id, AttachmentSize: int64(size), SenderDeviceID: senderID, ConversationID: conversationID, Kind: "file", Status: "receiving", CreatedAt: nowString()}
 		attachment := Attachment{AttachmentID: id, MessageID: message.MessageID, FileName: id, FileSize: int64(size), SHA256: hex.EncodeToString(sum[:])}
-		if err := receiver.beginIncomingFile(message, attachment, "sender", nil, finalPath, false); err != nil {
+		if err := receiver.beginIncomingFile(message, attachment, senderID, nil, finalPath, false); err != nil {
 			t.Fatal(err)
 		}
 		var completed []ByteRange
@@ -123,13 +164,59 @@ func runV3TLS(t *testing.T, sizes []int, streams int, resumed bool) {
 		if err := verifyFile(finalPath, int64(size), hex.EncodeToString(sum[:])); err != nil {
 			t.Fatalf("file %d not verified/renamed: %v", index, err)
 		}
+		resume, err := loadTransferResumeRecord(context.Background(), id)
+		if err != nil || resume.State != TransferCompleted || resume.SessionID == "" || resume.Generation == 0 {
+			t.Fatalf("file %d terminal session checkpoint missing: state=%+v err=%v", index, resume, err)
+		}
+		finalInfo, err := os.Stat(finalPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		partPath, _, err := transferResumePaths(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, partErr := os.Stat(partPath)
+		partPresent := partErr == nil
+		if partErr != nil && !os.IsNotExist(partErr) {
+			t.Fatal(partErr)
+		}
 		t.Logf("file=%d bytes=%d dataTime=%s MiBps=%.2f slots=%d sha256Verified=true", index, size, elapsed, float64(size)/(1<<20)/elapsed.Seconds(), streams)
+		samples = append(samples, validationSample{
+			Result: "pass", Scenario: "desktop-desktop-tls-v3", Bytes: size, DataTimeMS: elapsed.Milliseconds(),
+			MiBPerSecond: float64(size) / (1 << 20) / elapsed.Seconds(), Slots: streams,
+			SHA256Verified: true, Resumed: resumed, CanonicalState: resume.State,
+			SessionID: resume.SessionID, Generation: resume.Generation, CheckpointSeq: resume.CheckpointSeq,
+			DurableBytes: int64(size), FinalFileBytes: finalInfo.Size(), PartFilePresent: partPresent,
+		})
 
 	}
 	if got := accepts.Load(); got > int32(streams) {
 		t.Fatalf("connections not reused: %d for %d files/%d slots", got, len(sizes), streams)
 	}
 	t.Logf("files=%d TLS13 connections=%d slots=%d SHA256=verified", len(sizes), accepts.Load(), streams)
+	if reportPath := os.Getenv("FLYQPRO_TRANSFER_REPORT"); reportPath != "" {
+		encoded, err := json.MarshalIndent(map[string]any{
+			"schemaVersion": 1,
+			"status":        "pass",
+			"transport":     "TLS13/TCP-v3",
+			"generatedAt":   time.Now().UTC().Format(time.RFC3339Nano),
+			"goVersion":     runtime.Version(),
+			"goos":          runtime.GOOS,
+			"goarch":        runtime.GOARCH,
+			"network":       "IPv4 loopback",
+			"buildId":       firstNonEmpty(os.Getenv("FLYQPRO_BUILD_ID"), "local"),
+			"commit":        firstNonEmpty(os.Getenv("GIT_COMMIT"), "unknown"),
+			"worktree":      firstNonEmpty(os.Getenv("FLYQPRO_WORKTREE_STATUS"), "dirty-or-unknown"),
+			"samples":       samples,
+		}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(reportPath, append(encoded, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestV3PersistentTLSTenFiles(t *testing.T) {

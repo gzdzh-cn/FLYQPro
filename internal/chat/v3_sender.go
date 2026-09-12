@@ -14,6 +14,79 @@ import (
 	"time"
 )
 
+type v3ProgressSample struct {
+	bytes, chunkBytes       int64
+	ackLatency              time.Duration
+	throughput              float64
+	tuningState, reason     string
+	goodSamples, badSamples int
+}
+
+type v3AdaptiveTuner struct {
+	chunkBytes                int
+	ewmaThroughput, ewmaAckMS float64
+	goodSamples, badSamples   int
+	cooldown                  int
+}
+
+func newV3AdaptiveTuner(initial int) *v3AdaptiveTuner {
+	if !validTransferChunkSize(initial) {
+		initial = defaultTransferChunkSize
+	}
+	return &v3AdaptiveTuner{chunkBytes: initial}
+}
+
+func (t *v3AdaptiveTuner) Observe(bytes int64, latency time.Duration) v3ProgressSample {
+	seconds := latency.Seconds()
+	if seconds <= 0 {
+		seconds = time.Millisecond.Seconds()
+	}
+	throughput := float64(bytes) / seconds
+	previousThroughput := t.ewmaThroughput
+	t.ewmaThroughput = updateTransferEWMA(t.ewmaThroughput, throughput)
+	t.ewmaAckMS = updateTransferEWMA(t.ewmaAckMS, float64(latency.Milliseconds()))
+	sample := v3ProgressSample{bytes: bytes, chunkBytes: int64(t.chunkBytes), ackLatency: latency, throughput: t.ewmaThroughput, tuningState: "stable"}
+	if t.cooldown > 0 {
+		t.cooldown--
+		sample.tuningState = "cooldown"
+		sample.goodSamples, sample.badSamples = t.goodSamples, t.badSamples
+		return sample
+	}
+	bad := t.ewmaAckMS > 150 || previousThroughput > 0 && t.ewmaThroughput < previousThroughput*0.70
+	good := t.ewmaAckMS <= 75 && (previousThroughput == 0 || t.ewmaThroughput >= previousThroughput*0.85)
+	switch {
+	case bad:
+		t.badSamples++
+		t.goodSamples = 0
+		if t.badSamples >= 3 {
+			previous := t.chunkBytes
+			t.chunkBytes = maxInt(minTransferChunkSize, t.chunkBytes/2)
+			t.badSamples = 0
+			t.cooldown = 2
+			if t.chunkBytes < previous {
+				sample.tuningState, sample.reason = "backing_off", "连续 3 个确认延迟或吞吐坏样本，降低 v3 分块"
+			}
+		}
+	case good:
+		t.goodSamples++
+		t.badSamples = 0
+		if t.goodSamples >= 5 {
+			previous := t.chunkBytes
+			t.chunkBytes = nextTransferChunkSize(t.chunkBytes)
+			t.goodSamples = 0
+			t.cooldown = 2
+			if t.chunkBytes > previous {
+				sample.tuningState, sample.reason = "accelerating", "连续 5 个稳定样本，增大 v3 分块"
+			}
+		}
+	default:
+		t.goodSamples, t.badSamples = 0, 0
+	}
+	sample.chunkBytes = int64(t.chunkBytes)
+	sample.goodSamples, sample.badSamples = t.goodSamples, t.badSamples
+	return sample
+}
+
 func isTemporaryNetError(err error) bool {
 	if err == nil {
 		return false
@@ -28,12 +101,12 @@ func (e *Engine) dialV3PeerData(ctx context.Context, peer Peer) (net.Conn, error
 	if peer.DataPort <= 0 {
 		return nil, os.ErrInvalid
 	}
-	config, err := e.clientTLSConfig()
+	config, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return nil, err
 	}
-	config.VerifyConnection = func(state tls.ConnectionState) error { return verifyPeerCertificateState(state, peer) }
-	conn, err := DialV3DataCandidates(ctx, append([]string{peer.IP}, peer.LocalAddresses...), peer.DataPort, config)
+	transport := newTLSTCPV3DataTransport(append([]string{peer.IP}, peer.LocalAddresses...), peer.DataPort, config)
+	conn, err := transport.OpenStream(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -88,8 +161,8 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 	if streams < 1 {
 		streams = 1
 	}
-	if streams > 8 {
-		streams = 8
+	if streams > parallelMaxStreams {
+		streams = parallelMaxStreams
 	}
 	if message.RelativePath != "" && streams > 4 {
 		streams = 4
@@ -119,10 +192,10 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			completedBytes -= r.End - r.Start
 		}
 	}
-	progress := func(n int64, latency time.Duration) {
+	progress := func(sample v3ProgressSample) {
 		progressMu.Lock()
 		defer progressMu.Unlock()
-		completedBytes += n
+		completedBytes += sample.bytes
 		now := time.Now()
 		elapsed := now.Sub(lastProgressAt)
 		if elapsed <= 0 {
@@ -133,12 +206,11 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			rate = float64(completedBytes-lastProgressBytes) / elapsed.Seconds()
 			lastProgressAt, lastProgressBytes = now, completedBytes
 		}
-		if rate <= 0 && latency >= transferSpeedMinimumSampleInterval && n > 0 {
-			rate = float64(n) / latency.Seconds()
+		if rate <= 0 && sample.throughput > 0 {
+			rate = sample.throughput
 		}
 		avg := float64(completedBytes) / now.Sub(progressStarted).Seconds()
-		profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
-		options := transferProgressOptions{chunkSize: profile.ChunkBytes(message.AttachmentSize), windowBytes: int64(pool.Active()) * int64(profile.ChunkBytes(message.AttachmentSize)), activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: latency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable"}
+		options := transferProgressOptions{sessionID: fmt.Sprintf("%x", pool.SessionID()), generation: pool.Generation(), chunkSize: int(sample.chunkBytes), windowBytes: int64(pool.Active()) * sample.chunkBytes, activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: sample.ackLatency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: sample.tuningState, tuningReason: sample.reason, goodSamples: sample.goodSamples, badSamples: sample.badSamples}
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", options)
 		// The sender's primary progress is the remote durable byte count. Emit
 		// the same sample under remote-receive so the UI can calculate ETA from
@@ -214,7 +286,7 @@ func writeV3Frame(conn net.Conn, frame BinaryFrameV3) error {
 	return nil
 }
 
-func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, file *os.File, digest [32]byte, pool *PeerPool, ranges []ByteRange, progress ...func(int64, time.Duration)) (result error) {
+func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, file *os.File, digest [32]byte, pool *PeerPool, ranges []ByteRange, progress ...func(v3ProgressSample)) (result error) {
 	slot, err := pool.Acquire(ctx, message.AttachmentID)
 	if err != nil {
 		return err
@@ -265,7 +337,8 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 		return fmt.Errorf("SOURCE_CHANGED")
 	}
 	profile := LinkProfileV3{Type: peer.LinkType, SpeedMbps: peer.LinkSpeedMbps}
-	buf := make([]byte, profile.ChunkBytes(message.AttachmentSize))
+	tuner := newV3AdaptiveTuner(profile.ChunkBytes(message.AttachmentSize))
+	buf := make([]byte, maxTransferChunkSize)
 	var seq uint64
 	for _, r := range ranges {
 		if r.Start < 0 || r.End < r.Start || r.End > message.AttachmentSize {
@@ -275,7 +348,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			n := min(int64(len(buf)), r.End-off)
+			n := min(int64(tuner.chunkBytes), r.End-off)
 			if _, err := io.ReadFull(io.NewSectionReader(file, off, n), buf[:n]); err != nil {
 				return err
 			}
@@ -315,9 +388,13 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			if !acknowledged {
 				return fmt.Errorf("v3 chunk %d unconfirmed: %w", seq, errors.Join(err, io.ErrUnexpectedEOF))
 			}
+			if err := e.persistOutgoingConfirmedRange(message.AttachmentID, off, off+n, fmt.Sprintf("%x", sessionID), generation); err != nil {
+				return newTransferError(ErrSessionNotReady, true, fmt.Errorf("保存发送恢复范围失败: %w", err))
+			}
 			slot.Progress(n, n)
+			sample := tuner.Observe(n, time.Since(ackStarted))
 			if len(progress) > 0 {
-				progress[0](n, time.Since(ackStarted))
+				progress[0](sample)
 			}
 			off += n
 			seq++

@@ -103,9 +103,21 @@ export interface AttachmentDetails {
 }
 
 export interface TransferProgress {
+  eventVersion?: number
   messageId?: string
   attachmentId: string
   peerDeviceId?: string
+  transferId?: string
+  sessionId?: string
+  generation?: number
+  slotId?: number
+  retries?: number
+  errorCode?: string
+  retryable?: boolean
+  goodSamples?: number
+  badSamples?: number
+  state?: 'queued' | 'active' | 'paused_local' | 'paused_peer' | 'paused_network_unstable' | 'completed' | 'cancelled' | 'failed' | string
+  durableBytes?: number
   transferred: number
   total: number
   percent: number

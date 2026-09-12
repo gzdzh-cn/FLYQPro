@@ -49,7 +49,7 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "binary-frame-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}
@@ -171,6 +171,45 @@ func TestEffectiveAckLatencyExcludesFlushTime(t *testing.T) {
 	}
 	if got := effectiveAckLatency(100*time.Millisecond, 250); got != 0 {
 		t.Fatalf("flush time should not produce negative latency: %s", got)
+	}
+}
+
+func TestTransferEWMARejectsSingleSpike(t *testing.T) {
+	value := updateTransferEWMA(100, 500)
+	if value != 200 {
+		t.Fatalf("EWMA spike value = %v, want 200", value)
+	}
+	value = updateTransferEWMA(value, 100)
+	if value != 175 {
+		t.Fatalf("EWMA recovery value = %v, want 175", value)
+	}
+}
+
+func TestV3AdaptiveTunerRequiresHysteresisAndCooldown(t *testing.T) {
+	bad := newV3AdaptiveTuner(maxTransferChunkSize)
+	for index := 0; index < 2; index++ {
+		if sample := bad.Observe(256*1024, 400*time.Millisecond); sample.tuningState == "backing_off" {
+			t.Fatal("v3 tuner backed off before three bad samples")
+		}
+	}
+	if sample := bad.Observe(256*1024, 400*time.Millisecond); sample.tuningState != "backing_off" || bad.chunkBytes != mediumTransferChunkSize {
+		t.Fatalf("third bad sample did not back off: sample=%+v chunk=%d", sample, bad.chunkBytes)
+	}
+	if sample := bad.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "cooldown" {
+		t.Fatalf("first post-adjustment sample skipped cooldown: %+v", sample)
+	}
+	if sample := bad.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "cooldown" {
+		t.Fatalf("second post-adjustment sample skipped cooldown: %+v", sample)
+	}
+
+	good := newV3AdaptiveTuner(minTransferChunkSize)
+	for index := 0; index < 4; index++ {
+		if sample := good.Observe(256*1024, 10*time.Millisecond); sample.tuningState == "accelerating" {
+			t.Fatal("v3 tuner accelerated before five good samples")
+		}
+	}
+	if sample := good.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "accelerating" || good.chunkBytes != mediumTransferChunkSize {
+		t.Fatalf("fifth good sample did not accelerate: sample=%+v chunk=%d", sample, good.chunkBytes)
 	}
 }
 

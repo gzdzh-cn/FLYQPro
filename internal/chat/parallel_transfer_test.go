@@ -34,13 +34,28 @@ func parallelTestIdentity(t *testing.T) (Identity, tls.Certificate) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := Identity{PrivateKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})), CertificatePEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))}
-	identity.DeviceID = "sender"
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{DeviceInfo: DeviceInfo{
+		DeviceID:               sha256Hex(publicDER),
+		PublicKeyPEM:           string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
+		CertificateFingerprint: sha256Hex(der),
+	}, PrivateKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})), CertificatePEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))}
 	cert, err := identity.TLSCertificate()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return identity, cert
+}
+
+func pinnedTestPeer(identity Identity, certificate tls.Certificate) Peer {
+	return Peer{
+		DeviceID:               identity.DeviceID,
+		PublicKeyPEM:           identity.PublicKeyPEM,
+		CertificateFingerprint: sha256Hex(certificate.Certificate[0]),
+	}
 }
 
 // Exercise production v3 TLS workers, durable ranges and final binary confirmation.
@@ -53,11 +68,23 @@ func TestV3LargeTLS(t *testing.T) {
 	if value == "" {
 		t.Skip("set FLYQPRO_TRANSFER_TEST_BYTES for a large TCP/TLS transfer")
 	}
-	size, err := strconv.Atoi(value)
-	if err != nil || size < 4 {
+	size64, err := strconv.ParseInt(value, 10, 63)
+	if err != nil || size64 < 4 || int64(int(size64)) != size64 {
 		t.Fatal("invalid FLYQPRO_TRANSFER_TEST_BYTES")
 	}
-	runParallelTLS(t, size)
+	runs := 5
+	if rawRuns := os.Getenv("FLYQPRO_TRANSFER_RUNS"); rawRuns != "" {
+		parsed, parseErr := strconv.Atoi(rawRuns)
+		if parseErr != nil || parsed <= 0 {
+			t.Fatalf("invalid FLYQPRO_TRANSFER_RUNS %q", rawRuns)
+		}
+		runs = parsed
+	}
+	sizes := make([]int, runs)
+	for index := range sizes {
+		sizes[index] = int(size64)
+	}
+	runV3TLS(t, sizes, 4, false)
 }
 
 func runParallelTLS(t *testing.T, size int) {
@@ -143,7 +170,9 @@ func TestParallelJoinCancellationInterruptsHandshake(t *testing.T) {
 	}()
 	sender := NewEngine()
 	sender.identity = identity
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	peer := pinnedTestPeer(identity, cert)
+	peer.IP = "127.0.0.1"
+	peer.Port = listener.Addr().(*net.TCPAddr).Port
 	result := make(chan error, 1)
 	go func() {
 		session, _, err := sender.openParallelDataStream(ctx, peer, protocolDialects[0], Message{AttachmentID: "attachment"}, "token", 0, 1, 0, 1024, parallelChunkSize)
@@ -226,7 +255,9 @@ func TestParallelFailureAckInterruptsBlockedWrite(t *testing.T) {
 	sender.identity = identity
 	message := Message{AttachmentID: "attachment", AttachmentSize: size}
 	sender.outgoing[message.AttachmentID] = &outgoingTransfer{session: newWireSession(nil)}
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	peer := pinnedTestPeer(identity, cert)
+	peer.IP = "127.0.0.1"
+	peer.Port = listener.Addr().(*net.TCPAddr).Port
 	updates := make(chan parallelStreamProgress, 32)
 	done := make(chan struct{})
 	go func() {

@@ -50,7 +50,10 @@ func Open(ctx context.Context) error {
 	// configuration and can reopen the previous path after an environment change.
 	database, err = gdb.New(gdb.ConfigNode{
 		Type: "sqlite", Name: path, Extra: "busy_timeout=5000",
-		MaxOpenConnCount: 1, MaxIdleConnCount: 1, Debug: !productionBuild,
+		// GoFrame's SQL debug output includes bound message contents and absolute
+		// attachment paths. Keep it disabled in every product build; structured,
+		// redacted transfer diagnostics are emitted by the chat layer instead.
+		MaxOpenConnCount: 1, MaxIdleConnCount: 1, Debug: false,
 	})
 	if err != nil {
 		return gerror.WrapCode(gcode.CodeInternalError, err, "创建 SQLite 连接失败")
@@ -77,6 +80,18 @@ func Open(ctx context.Context) error {
 	if _, err := database.Exec(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(3, datetime('now')) ON CONFLICT(version) DO NOTHING`); err != nil {
 		database = nil
 		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
+	}
+	if _, err := database.Exec(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(4, datetime('now')) ON CONFLICT(version) DO NOTHING`); err != nil {
+		database = nil
+		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
+	}
+	if _, err := database.Exec(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(5, datetime('now')) ON CONFLICT(version) DO NOTHING`); err != nil {
+		database = nil
+		return gerror.WrapCode(gcode.CodeInternalError, err, "记录 SQLite 迁移版本失败")
+	}
+	if _, err := database.Exec(ctx, `INSERT INTO transfer_resume_migrations(id, status, cursor, last_error, updated_at) VALUES(1, 'pending', '', '', datetime('now')) ON CONFLICT(id) DO NOTHING`); err != nil {
+		database = nil
+		return gerror.WrapCode(gcode.CodeInternalError, err, "初始化传输恢复迁移状态失败")
 	}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
@@ -176,6 +191,14 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"friend_removals", "relationship_version", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_removals", "public_key_pem", "TEXT NOT NULL DEFAULT ''"},
 		{"friend_removals", "certificate_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+		{"transfer_resumes", "direction", "TEXT NOT NULL DEFAULT 'receive'"},
+		{"transfer_resumes", "session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"transfer_resumes", "generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "checkpoint_seq", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "source_mtime_ns", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "retries", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "error_code", "TEXT NOT NULL DEFAULT ''"},
+		{"transfer_resumes", "retryable", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, migration := range migrations {
 		var columns []struct {
@@ -217,6 +240,25 @@ func Close(ctx context.Context) error {
 	}
 	err := database.Close(ctx)
 	database = nil
+	return err
+}
+
+// SetTransferResumeMigrationStatus records the resumable sidecar migration
+// state. It is intentionally small and monotonic so a crash can leave the
+// previous checkpoint usable while the next startup retries the migration.
+func SetTransferResumeMigrationStatus(ctx context.Context, status, cursor, lastError string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	storageMu.RLock()
+	database := database
+	storageMu.RUnlock()
+	if database == nil {
+		return gerror.New("数据库尚未初始化")
+	}
+	_, err := database.Exec(ctx, `INSERT INTO transfer_resume_migrations(id, status, cursor, last_error, updated_at)
+		VALUES(1, ?, ?, ?, datetime('now'))
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status, cursor=excluded.cursor, last_error=excluded.last_error, updated_at=excluded.updated_at`, status, cursor, lastError)
 	return err
 }
 

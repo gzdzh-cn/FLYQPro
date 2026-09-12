@@ -1,0 +1,19 @@
+{
+  "eventVersion": 1,
+  "transferId": "transfer-example",
+  "messageId": "message-example",
+  "peerDeviceId": "peer-example",
+  "sessionId": "00112233445566778899aabbccddeeff",
+  "generation": 1,
+  "state": "active",
+  "phase": "transferring",
+  "direction": "send",
+  "transferred": 1048576,
+  "total": 8388608,
+  "durableBytes": 1048576,
+  "retries": 0,
+  "errorCode": "",
+  "retryable": false,
+  "transport": "TLS13/TCP-v3",
+  "updatedAt": "2026-09-11T00:00:00Z"
+}

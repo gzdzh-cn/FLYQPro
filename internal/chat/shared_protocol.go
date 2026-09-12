@@ -328,7 +328,7 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 	if len(peer.Capabilities) > 0 && !hasCapability(peer.Capabilities, sharedDriveCapability) {
 		return nil, nil, ProtocolDialect{}, fmt.Errorf("对方客户端不支持多共享文件夹")
 	}
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return nil, nil, ProtocolDialect{}, err
 	}

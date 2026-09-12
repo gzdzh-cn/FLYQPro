@@ -77,9 +77,6 @@ func (p LinkProfileV3) SlotLimit(size int64) int {
 		return 1
 	}
 	if p.Type == LinkEthernet && p.SpeedMbps >= 1000 {
-		if size >= 1<<30 {
-			return 8
-		}
 		return 4
 	}
 	if p.Type == LinkEthernet {
@@ -89,7 +86,7 @@ func (p LinkProfileV3) SlotLimit(size int64) int {
 	// size in that case so large transfers still fill a gigabit-class link,
 	// while small files avoid connection setup overhead.
 	if size >= 1<<30 {
-		return 8
+		return 4
 	}
 	if size >= 64<<20 {
 		return 4

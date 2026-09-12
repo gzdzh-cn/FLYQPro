@@ -55,7 +55,7 @@ window.addEventListener('unhandledrejection', (event) => {
   console.error('[FlyQPro] 未处理的异步错误', event.reason)
   if (!document.querySelector('.chat-app')) bootError.value = String(event.reason?.message || event.reason || '页面初始化异常')
 });
-const eventNames = ['chat:profile-updated', 'chat:network-status', 'chat:peer-updated', 'chat:friend-request', 'chat:friend-request-updated', 'chat:message', 'chat:message-status', 'chat:attachment', 'chat:transfer-progress', 'chat:attachment-migration'];
+const eventNames = ['chat:profile-updated', 'chat:network-status', 'chat:peer-updated', 'chat:friend-request', 'chat:friend-request-updated', 'chat:message', 'chat:message-status', 'chat:attachment', 'transfer-progress', 'transfer-state-changed', 'slot-reconnecting', 'session-disconnected', 'recovery-required', 'chat:attachment-migration'];
 let handlers: Array<() => void> = [];
 onMounted(() => {
   document.getElementById('app-loading')?.remove();

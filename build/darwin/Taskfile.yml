@@ -22,9 +22,9 @@ tasks:
       GOOS: darwin
       CGO_ENABLED: 1
       GOARCH: '{{.ARCH | default ARCH}}'
-      CGO_CFLAGS: "-mmacosx-version-min=10.15"
-      CGO_LDFLAGS: "-mmacosx-version-min=10.15"
-      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      CGO_CFLAGS: "-mmacosx-version-min=11.0"
+      CGO_LDFLAGS: "-mmacosx-version-min=11.0"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
       PRODUCTION: '{{.PRODUCTION | default "false"}}'
 
   build:universal:
@@ -74,6 +74,23 @@ tasks:
     vars:
       DMG_ARCH: '{{if eq .ARCH "amd64"}}x86_64{{else}}{{.ARCH}}{{end}}'
       DMG_NAME: '{{.APP_NAME}}-macos-{{.DMG_ARCH}}.dmg'
+
+  # Release-only task. It intentionally fails closed when signing credentials
+  # are absent; package/package:macdmg remain unsigned development tasks.
+  package:signed:
+    summary: Builds and notarizes a universal Developer ID application
+    deps:
+      - task: package:universal
+    cmds:
+      - sh -c 'test -n "${FLYQPRO_DEVELOPER_ID:-}" || { echo "FLYQPRO_DEVELOPER_ID is required" >&2; exit 2; }'
+      - sh -c 'test -n "${FLYQPRO_NOTARY_PROFILE:-}" || { echo "FLYQPRO_NOTARY_PROFILE is required" >&2; exit 2; }'
+      - codesign --force --deep --options runtime --timestamp --sign "${FLYQPRO_DEVELOPER_ID}" "{{.BIN_DIR}}/{{.APP_NAME}}.app"
+      - codesign --verify --deep --strict --verbose=2 "{{.BIN_DIR}}/{{.APP_NAME}}.app"
+      - ditto -c -k --keepParent "{{.BIN_DIR}}/{{.APP_NAME}}.app" "{{.BIN_DIR}}/{{.APP_NAME}}.zip"
+      - xcrun notarytool submit "{{.BIN_DIR}}/{{.APP_NAME}}.zip" --keychain-profile "${FLYQPRO_NOTARY_PROFILE}" --wait
+      - xcrun stapler staple "{{.BIN_DIR}}/{{.APP_NAME}}.app"
+      - xcrun stapler validate "{{.BIN_DIR}}/{{.APP_NAME}}.app"
+      - spctl --assess --type execute --verbose=2 "{{.BIN_DIR}}/{{.APP_NAME}}.app"
 
 
   create:app:bundle:

@@ -22,10 +22,11 @@ func NewRangeWriterV3(finalPath string, size int64) (*RangeWriterV3, error) {
 		return nil, errors.New("invalid file size")
 	}
 	part := finalPath + ".part"
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
+	persistence := currentTransferPersistenceIO()
+	if err := persistence.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(part, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := persistence.OpenFile(part, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -34,6 +35,14 @@ func NewRangeWriterV3(finalPath string, size int64) (*RangeWriterV3, error) {
 		return nil, err
 	}
 	return &RangeWriterV3{partPath: part, finalPath: finalPath, size: size, file: f}, nil
+}
+func (w *RangeWriterV3) Checkpoint() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return errors.New("range writer closed")
+	}
+	return syncTransferFile(w.file)
 }
 func (w *RangeWriterV3) WriteChunk(offset int64, payload, expectedHash []byte) (bool, error) {
 	w.mu.Lock()
@@ -77,13 +86,18 @@ func (w *RangeWriterV3) Complete(expected []byte) error {
 	if len(expected) != sha256.Size || !equalBytes(h.Sum(nil), expected) {
 		return errors.New("file hash mismatch")
 	}
-	if err := w.file.Sync(); err != nil {
+	if err := syncTransferFile(w.file); err != nil {
 		return err
 	}
 	if err := w.file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(w.partPath, w.finalPath)
+	if err := currentTransferPersistenceIO().Rename(w.partPath, w.finalPath); err != nil {
+		return err
+	}
+	// The file fsync makes its contents durable; syncing the parent directory
+	// makes the atomic rename durable across a crash as well.
+	return syncCommittedV3File(w.finalPath)
 }
 func (w *RangeWriterV3) Close() error {
 	w.mu.Lock()

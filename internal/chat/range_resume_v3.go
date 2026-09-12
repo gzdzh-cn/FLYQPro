@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -60,10 +61,26 @@ func SaveResumeV3(path string, s ResumeStateV3) error {
 		return e
 	}
 	tmp := path + ".tmp"
-	if e = os.WriteFile(tmp, b, 0600); e != nil {
+	persistence := currentTransferPersistenceIO()
+	file, e := persistence.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if e != nil {
 		return e
 	}
-	return os.Rename(tmp, path)
+	if _, e = file.Write(b); e == nil {
+		e = persistence.SyncFile(file)
+	}
+	if closeErr := file.Close(); e == nil {
+		e = closeErr
+	}
+	if e != nil {
+		_ = persistence.Remove(tmp)
+		return e
+	}
+	if e = persistence.Rename(tmp, path); e != nil {
+		_ = persistence.Remove(tmp)
+		return e
+	}
+	return persistence.SyncDirectory(filepath.Dir(path))
 }
 func LoadResumeV3(path string) (ResumeStateV3, error) {
 	b, e := os.ReadFile(path)

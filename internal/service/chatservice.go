@@ -1211,6 +1211,44 @@ func (s *ChatService) ResumeSharedTransfer(transferID string) (chat.SharedTransf
 	return s.engine.ResumeSharedTransfer(transferID)
 }
 
+// ListTransferSessions returns lightweight pool diagnostics for the desktop
+// transfer monitor. It never exposes sockets or file paths.
+func (s *ChatService) ListTransferSessions() []chat.SessionSummary {
+	return s.engine.ListSessionSummaries()
+}
+
+func (s *ChatService) GetActiveTransferCount() int {
+	return s.engine.ActiveTransferCount()
+}
+
+func (s *ChatService) ListActiveTransfers() []chat.TransferSnapshot {
+	return s.engine.ListActiveTransfers()
+}
+
+func (s *ChatService) ListRecoveryTasks() []chat.TransferSnapshot {
+	return s.engine.ListRecoveryTasks()
+}
+
+func (s *ChatService) GetTransferDiagnostics(transferID string) (chat.TransferSnapshot, error) {
+	return s.engine.GetTransferDiagnostics(strings.TrimSpace(transferID))
+}
+
+func (s *ChatService) PauseTransfer(transferID string) error {
+	return s.engine.PauseTransfer(strings.TrimSpace(transferID))
+}
+
+func (s *ChatService) ResumeTransfer(transferID string) (chat.Message, error) {
+	return s.engine.ResumeTransfer(gctx.New(), strings.TrimSpace(transferID))
+}
+
+func (s *ChatService) RetryTransfer(transferID string) (chat.Message, error) {
+	return s.engine.RetryTransfer(gctx.New(), strings.TrimSpace(transferID))
+}
+
+func (s *ChatService) CancelTransfer(transferID string) error {
+	return s.engine.CancelTransfer(strings.TrimSpace(transferID))
+}
+
 func (s *ChatService) GetFriendSharedEntryDetails(deviceID, folderID, relativePath string) (chat.SharedEntry, error) {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativePath)))
 	if clean == "." {

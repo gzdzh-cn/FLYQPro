@@ -114,7 +114,7 @@ export const useChatStore = defineStore('chat', {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))
         return
       }
-      if (name === 'chat:transfer-progress') {
+      if (name === 'transfer-progress') {
         const progress = value as TransferProgress
         if (progress?.attachmentId) {
           const attachmentId = progress.attachmentId
@@ -123,7 +123,7 @@ export const useChatStore = defineStore('chat', {
           const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
           const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
           const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }
-          if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) {
+          if (['completed', 'canceled', 'cancelled', 'rejected', 'failed'].includes(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')) {
             this.transferHistory[attachmentId] = snapshot
             this.transferHistoryByDirection[attachmentId] = directions
             delete this.transferProgress[attachmentId]

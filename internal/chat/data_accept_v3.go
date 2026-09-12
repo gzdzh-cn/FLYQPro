@@ -30,25 +30,59 @@ func (e *Engine) dataAcceptLoop() {
 			case <-stop:
 				return
 			default:
-				log.Printf("v3 数据连接接受失败: %v", err)
+				log.Printf("v3 数据连接接受失败: %s", redactDiagnosticError(err))
 				return
 			}
 		}
 		go func(c net.Conn) {
 			defer c.Close()
+			authenticatedPeerID := ""
 			if tc, ok := c.(*tls.Conn); ok {
 				if err := tc.HandshakeContext(context.Background()); err != nil {
 					return
 				}
+				peer, err := e.authenticateInboundDataPeer(tc.ConnectionState())
+				if err != nil {
+					return
+				}
+				authenticatedPeerID = peer.DeviceID
 			}
-			_ = e.receiveV3DataConnection(c)
+			_ = e.receiveV3DataConnection(c, authenticatedPeerID)
 		}(conn)
 	}
 }
 
-func (e *Engine) receiveV3DataConnection(conn net.Conn) error {
+func (e *Engine) authenticateInboundDataPeer(state tls.ConnectionState) (Peer, error) {
+	if len(state.PeerCertificates) == 0 {
+		return Peer{}, newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("客户端未提供证书"))
+	}
+	e.mu.RLock()
+	candidates := make([]Peer, 0, len(e.peers))
+	for _, peer := range e.peers {
+		if peer.Relation == PeerRelation && peer.DeviceID != "" && peer.PublicKeyPEM != "" && peer.CertificateFingerprint != "" {
+			candidates = append(candidates, peer)
+		}
+	}
+	e.mu.RUnlock()
+	var identityChange error
+	for _, peer := range candidates {
+		if err := verifyPeerCertificateState(state, peer); err == nil {
+			return peer, nil
+		} else if code, _ := transferErrorInfo(err); code == ErrCertificateChanged && peer.PublicKeyPEM != "" {
+			// A matching public key with a changed certificate is attributable to
+			// this friend even when Android's generated certificate CN is an alias.
+			identityChange = err
+		}
+	}
+	if identityChange != nil {
+		return Peer{}, identityChange
+	}
+	return Peer{}, newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("客户端设备未受信任"))
+}
+
+func (e *Engine) receiveV3DataConnection(conn net.Conn, authenticatedPeerIDs ...string) error {
 	for {
-		if err := e.receiveV3Transfer(conn); err != nil {
+		if err := e.receiveV3Transfer(conn, authenticatedPeerIDs...); err != nil {
 			return err
 		}
 	}
@@ -57,7 +91,7 @@ func (e *Engine) receiveV3DataConnection(conn net.Conn) error {
 // receiveV3Transfer consumes exactly one BeginFile ... EndFile sequence. The
 // underlying TLS connection remains open so the sender can reuse the slot for
 // the next file without another handshake.
-func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
+func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string) (result error) {
 	first, err := ReadBinaryFrameV3(conn, maxBinaryFileFramePayload)
 	if err != nil {
 		return err
@@ -85,6 +119,9 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 		}
 		time.Sleep(10 * time.Millisecond) // control response may arrive after the data connection
 	}
+	if len(authenticatedPeerIDs) > 0 && authenticatedPeerIDs[0] != "" && transfer.senderID != authenticatedPeerIDs[0] {
+		return newTransferError(ErrDeviceNotTrusted, false, fmt.Errorf("数据连接设备与传输发送方不一致"))
+	}
 	if tc, ok := conn.(*tls.Conn); ok {
 		peer, err := e.peer(transfer.senderID)
 		if err != nil {
@@ -111,14 +148,32 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 		return fmt.Errorf("v3 transfer has no writable file")
 	}
 	transfer.v3Mu.Lock()
+	newSessionIdentity := false
 	if transfer.v3SessionID == ([16]byte{}) {
 		transfer.v3SessionID = first.SessionID
 		transfer.v3Generation = first.Generation
+		newSessionIdentity = true
 	} else if transfer.v3SessionID != first.SessionID || transfer.v3Generation != first.Generation {
 		transfer.v3Mu.Unlock()
 		return fmt.Errorf("v3 session or generation mismatch")
 	}
 	transfer.v3Mu.Unlock()
+	if newSessionIdentity {
+		transfer.resumeMu.Lock()
+		state := transfer.resumeState
+		state.SessionID = hex.EncodeToString(first.SessionID[:])
+		state.Generation = first.Generation
+		state.TransferMode = v3TransferMode
+		state.CheckpointSeq++
+		if state.AttachmentID != "" {
+			if err := saveTransferResumeState(state); err != nil {
+				transfer.resumeMu.Unlock()
+				return err
+			}
+		}
+		transfer.resumeState = state
+		transfer.resumeMu.Unlock()
+	}
 	transfer.v3Mu.Lock()
 	if transfer.v3Streams == nil {
 		transfer.v3Streams = make(map[uint16]*v3StreamState)
@@ -131,7 +186,10 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 	transfer.v3Mu.Unlock()
 	progressStarted := time.Now()
 	lastProgressAt := progressStarted
+	transfer.v3Mu.Lock()
 	lastProgressBytes := transfer.received
+	transfer.v3Mu.Unlock()
+	var lastCheckpointDuration time.Duration
 
 	ack := func(frame BinaryFrameV3, nack bool) error {
 		typ := FrameChunkAck
@@ -171,7 +229,10 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 				if transfer.v3Sink != nil {
 					return nil
 				}
-				return commitV3Checkpoint(transfer, version) // idempotent, durable duplicate
+				checkpointStarted := time.Now()
+				err := commitV3Checkpoint(transfer, version) // idempotent, durable duplicate
+				lastCheckpointDuration = time.Since(checkpointStarted)
+				return err
 			}
 			if int64(frame.Offset) < r.End && r.Start < int64(frame.Offset)+int64(len(frame.Payload)) {
 				transfer.v3Mu.Unlock()
@@ -206,7 +267,10 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 		transfer.v3WrittenVersion++
 		version := transfer.v3WrittenVersion
 		transfer.v3Mu.Unlock()
-		return commitV3Checkpoint(transfer, version)
+		checkpointStarted := time.Now()
+		err := commitV3Checkpoint(transfer, version)
+		lastCheckpointDuration = time.Since(checkpointStarted)
+		return err
 	}
 	if err := consume(first); err != nil {
 		_ = ack(first, true)
@@ -249,6 +313,7 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 				transfer.v3Done <- "completed"
 			} else if complete {
 				if status := e.finishIncomingFile(attachmentID); status != "completed" {
+					_ = ack(frame, true)
 					return fmt.Errorf("v3 transfer failed: %s", status)
 				}
 			}
@@ -278,7 +343,7 @@ func (e *Engine) receiveV3Transfer(conn net.Conn) (result error) {
 			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "transferring", transferProgressOptions{
 				chunkSize: len(frame.Payload), windowBytes: int64(len(frame.Payload)), activeStreams: 1, streamCount: 1,
 				transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
-				confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: "stable",
+				confirmedThroughput: rate, windowThroughput: rate, diskWriteMs: lastCheckpointDuration.Milliseconds(), displayLocalMetrics: true, tuningState: "stable",
 			})
 		}
 	}

@@ -140,6 +140,37 @@ var schemaStatements = []string{
 		FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS transfer_resumes (
+		attachment_id TEXT PRIMARY KEY,
+		transfer_id TEXT NOT NULL DEFAULT '',
+		message_id TEXT NOT NULL DEFAULT '',
+		sender_device_id TEXT NOT NULL DEFAULT '',
+		direction TEXT NOT NULL DEFAULT 'receive',
+		session_id TEXT NOT NULL DEFAULT '',
+		generation INTEGER NOT NULL DEFAULT 0,
+		checkpoint_seq INTEGER NOT NULL DEFAULT 0,
+		file_name TEXT NOT NULL DEFAULT '',
+		file_size INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '',
+		source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+		retries INTEGER NOT NULL DEFAULT 0,
+		error_code TEXT NOT NULL DEFAULT '',
+		retryable INTEGER NOT NULL DEFAULT 0,
+		temp_path TEXT NOT NULL DEFAULT '',
+		target_path TEXT NOT NULL DEFAULT '',
+		transfer_mode TEXT NOT NULL DEFAULT '',
+		completed_ranges TEXT NOT NULL DEFAULT '[]',
+		status TEXT NOT NULL DEFAULT 'paused_network_unstable',
+		updated_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_transfer_resumes_updated ON transfer_resumes(updated_at)`,
+	`CREATE TABLE IF NOT EXISTS transfer_resume_migrations (
+		id INTEGER PRIMARY KEY CHECK(id = 1),
+		status TEXT NOT NULL DEFAULT 'pending',
+		cursor TEXT NOT NULL DEFAULT '',
+		last_error TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL
+	)`,
 	`DROP INDEX IF EXISTS idx_outbox_retry`,
 	`DROP TABLE IF EXISTS outbox`,
 	`CREATE TABLE IF NOT EXISTS network_diagnostics (

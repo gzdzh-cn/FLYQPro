@@ -818,7 +818,7 @@ watch([conversationId, initialMessageId, previewSource, sharedDeviceId, sharedRe
 onMounted(async () => {
   await loadTheme()
   window.addEventListener('keydown', handleKey)
-  for (const name of ['chat:message', 'chat:message-status', 'chat:attachment', 'chat:transfer-progress']) eventCancels.push(Events.On(name, handleEvent))
+  for (const name of ['chat:message', 'chat:message-status', 'chat:attachment', 'transfer-progress']) eventCancels.push(Events.On(name, handleEvent))
   eventCancels.push(Events.On('chat:profile-updated', (event: any) => {
     const theme = event?.data?.theme ?? event?.theme
     if (theme) applyTheme(theme)
