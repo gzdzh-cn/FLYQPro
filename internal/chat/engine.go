@@ -425,6 +425,24 @@ type outgoingTransfer struct {
 	resumeMu             sync.Mutex
 	resumeState          transferResumeState
 	resumePersistedBytes int64
+	terminalMu           sync.Mutex
+	terminal             bool
+}
+
+func (t *outgoingTransfer) markCanceled() bool {
+	t.terminalMu.Lock()
+	defer t.terminalMu.Unlock()
+	if t.terminal {
+		return false
+	}
+	t.terminal = true
+	return true
+}
+
+func (t *outgoingTransfer) isCanceled() bool {
+	t.terminalMu.Lock()
+	defer t.terminalMu.Unlock()
+	return t.terminal
 }
 
 type fileControlConnection struct {
@@ -3168,6 +3186,12 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 	preparing := e.preparing[attachmentID]
 	e.mu.RUnlock()
 	if outgoing != nil {
+		// The terminal transition is local and idempotent. Do it before any
+		// persistence or remote notification so a slow database/socket cannot
+		// keep the cancel button spinning or let a late ACK complete the task.
+		if !outgoing.markCanceled() {
+			return nil
+		}
 		if cancel := outgoing.cancel; cancel != nil {
 			// Closing the task signal interrupts queue waits and derived transfer
 			// contexts without waiting for a remote response.
@@ -3178,6 +3202,15 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 			}
 		}
 		e.closeOutgoingData(attachmentID)
+		e.mu.RLock()
+		pools := make([]*PeerPool, 0, len(e.peerPools))
+		for _, pool := range e.peerPools {
+			pools = append(pools, pool)
+		}
+		e.mu.RUnlock()
+		for _, pool := range pools {
+			pool.CloseTransfer(attachmentID)
+		}
 		// The UI receives the local terminal state immediately. Remote cleanup
 		// and the worker's final return happen independently.
 		go func(session *wireSession) {
@@ -3188,12 +3221,16 @@ func (e *Engine) CancelAttachment(attachmentID string) error {
 			_ = writeWire(session.conn, wireMessage{Type: "file_cancel", AttachmentID: attachmentID, Status: "canceled"})
 			session.close()
 		}(outgoing.session)
-		if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
-			attachment.Status = "canceled"
-			_ = SaveAttachment(context.Background(), attachment)
-			e.emitAttachmentStatus(attachment.MessageID, "canceled", "")
-		}
-		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferCancelled, "", false)
+		message := outgoing.message
+		message.Status, message.AttachmentStatus, message.AttachmentPath = "canceled", "canceled", ""
+		e.emit("chat:message", message)
+		e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": message.MessageID, "conversationId": message.ConversationID, "status": "canceled", "localPath": ""})
+		go func() {
+			_ = UpdateMessageStatus(context.Background(), message.MessageID, "canceled")
+			_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, MimeType: message.AttachmentMime, FileSize: message.AttachmentSize, SHA256: messageAttachmentSHA(context.Background(), message), ThumbnailData: message.AttachmentThumbnail, ThumbnailMime: message.AttachmentThumbnailMime, Status: "canceled"})
+			_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferCancelled, "", false)
+			removeTransferResumeState(attachmentID, true)
+		}()
 		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "canceled")
 		return nil
 	}
@@ -5078,12 +5115,18 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 		}
 		err = e.transferFile(transferCtx, deviceID, message, path, sum)
 		releaseGlobal()
+		if active.isCanceled() {
+			return errAttachmentCanceled
+		}
 		select {
 		case <-paused:
 			return errTransferPaused
 		default:
 		}
 		if err == nil {
+			if active.isCanceled() {
+				return errAttachmentCanceled
+			}
 			_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferCompleted, "", false)
 			return nil
 		}
@@ -5091,6 +5134,14 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 			code, retryable := transferErrorInfo(err)
 			_ = markTransferResumeTerminal(context.Background(), message.AttachmentID, TransferFailed, code, retryable)
 			return err
+		}
+		if attempt >= 2 {
+			// A few failed reconnects are a network state, not an invitation to
+			// spin forever. Keep the resume record and let the normal restore loop
+			// retry with bounded 1/2/4/8s backoff (capped by retryDelay).
+			_ = updateTransferResumeStatus(context.Background(), message.AttachmentID, TransferPausedNetwork, ErrSessionNotReady, true)
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, deviceID, e.lastTransferBytes(message.AttachmentID, "remote-receive"), message.AttachmentSize, "send", string(TransferPausedNetwork), transferProgressOptions{errorCode: string(ErrSessionNotReady), retryable: true})
+			return errTransferPaused
 		}
 		// transferFileWithDialect removes the per-attempt entry on failure;
 		// restore the shared task object before retrying so pause/cancel signals

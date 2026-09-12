@@ -352,8 +352,8 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 		if err != nil {
 			return err
 		}
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		return writeV3Frame(conn, begin)
+		_ = conn.SetDeadline(time.Time{})
+		return slot.WriteFrame(begin)
 	}
 	if err := open(); err != nil {
 		return err
@@ -387,6 +387,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 				frame     BinaryFrameV3
 				started   time.Time
 				confirmed bool
+				sent      bool
 			}
 			pending := make([]pendingChunk, 0, 8)
 			var pendingBytes int64
@@ -415,22 +416,26 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 						continue
 					}
 				}
-				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+				_ = conn.SetDeadline(time.Time{})
 				writeErr := error(nil)
 				for i := range pending {
 					if pending[i].confirmed {
 						continue
 					}
-					if err = writeV3Frame(conn, pending[i].frame); err != nil {
+					if err = slot.WriteFrame(pending[i].frame); err != nil {
 						writeErr = err
 						break
+					}
+					if !pending[i].sent {
+						slot.MarkSent(int64(len(pending[i].frame.Payload)))
+						pending[i].sent = true
 					}
 				}
 				if writeErr == nil && batchEnabled && pendingBytes < windowBytes {
 					// Explicitly delimit a short final window. This avoids relying on
 					// transport read deadlines (which some TLS stacks buffer).
 					ping := BinaryFrameV3{Type: FramePoolPing, TransferID: id, StreamID: streamID, Sequence: seq, SessionID: sessionID, Generation: generation}
-					if err = writeV3Frame(conn, ping); err != nil {
+					if err = slot.WriteFrame(ping); err != nil {
 						writeErr = err
 					}
 				}
@@ -444,24 +449,34 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 					if pending[i].confirmed {
 						continue
 					}
-					ack, errRead := ReadBinaryFrameV3(conn, 64*1024)
-					if errRead != nil {
-						readErr = errRead
-						break
-					}
-					if !matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {
-						if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkNack) {
-							readErr = fmt.Errorf("v3 chunk nack")
-						} else {
-							readErr = fmt.Errorf("v3 stale or invalid acknowledgement")
+					for {
+						ack, errRead := ReadBinaryFrameV3(conn, 64*1024)
+						if errRead != nil {
+							readErr = errRead
+							break
+						}
+						if ack.Type == FramePoolPong {
+							continue
+						}
+						if !matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {
+							if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkNack) {
+								readErr = fmt.Errorf("v3 chunk nack")
+							} else {
+								readErr = fmt.Errorf("v3 stale or invalid acknowledgement")
+							}
+							break
+						}
+						pending[i].confirmed = true
+						slot.MarkAck(int64(len(pending[i].frame.Payload)))
+						if metricsEnabled && len(ack.Payload) > 0 {
+							if snapshot, decodeErr := decodeTransferMetricsSnapshot(ack.Payload); decodeErr == nil && snapshot.MetricSeq >= lastMetrics.MetricSeq {
+								lastMetrics = snapshot
+							}
 						}
 						break
 					}
-					pending[i].confirmed = true
-					if metricsEnabled && len(ack.Payload) > 0 {
-						if snapshot, decodeErr := decodeTransferMetricsSnapshot(ack.Payload); decodeErr == nil && snapshot.MetricSeq >= lastMetrics.MetricSeq {
-							lastMetrics = snapshot
-						}
+					if readErr != nil {
+						break
 					}
 				}
 				if readErr == nil {
@@ -489,7 +504,6 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 				if len(progress) > 0 {
 					progress[0](sample)
 				}
-				slot.Progress(n, n)
 			}
 		}
 	}
@@ -503,13 +517,21 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 	end := BinaryFrameV3{Type: FrameEndFile, TransferID: id, StreamID: streamID, Sequence: seq, Offset: uint64(message.AttachmentSize), ChunkHash: digest, SessionID: sessionID, Generation: generation}
 	// Hashing a multi-gigabyte file on slow storage can take minutes.
 	slot.Drain()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
-	if err := writeV3Frame(conn, end); err != nil {
+	_ = conn.SetDeadline(time.Time{})
+	if err := slot.WriteFrame(end); err != nil {
 		return err
 	}
-	reply, err := ReadBinaryFrameV3(conn, 1024)
-	if err != nil {
-		return err
+	var reply BinaryFrameV3
+	for {
+		reply, err = ReadBinaryFrameV3(conn, 1024)
+		if err != nil {
+			return err
+		}
+		// A short batch is delimited with PoolPing. Its Pong can arrive after
+		// the last chunk ACK and must not be mistaken for EndFile's ACK.
+		if reply.Type != FramePoolPong {
+			break
+		}
 	}
 	if !matchesV3Reply(reply, end, FrameEndFile) || reply.ChunkHash != digest {
 		return fmt.Errorf("v3 receiver did not confirm file verification")

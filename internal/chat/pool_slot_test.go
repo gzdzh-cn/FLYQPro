@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -57,6 +58,50 @@ func TestV3FrameSessionGenerationRoundTrip(t *testing.T) {
 	if err != nil || decoded.SessionID != session || decoded.Generation != 42 || string(decoded.Payload) != "payload" {
 		t.Fatalf("frame metadata mismatch: err=%v decoded=%+v", err, decoded)
 	}
+}
+
+type oneByteReader struct {
+	r io.Reader
+}
+
+func (r oneByteReader) Read(dst []byte) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
+	return r.r.Read(dst[:1])
+}
+
+func TestV3FrameReaderSurvivesFragmentedSlowPayload(t *testing.T) {
+	frame := NewChunkFrame([16]byte{7}, 1, 2, 3, bytes.Repeat([]byte("x"), 64*1024))
+	raw, err := frame.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ReadBinaryFrameV3(oneByteReader{r: bytes.NewReader(raw)}, uint32(len(frame.Payload)))
+	if err != nil || len(decoded.Payload) != len(frame.Payload) || decoded.Offset != frame.Offset {
+		t.Fatalf("fragmented frame failed: err=%v length=%d", err, len(decoded.Payload))
+	}
+}
+
+func TestV3WatchdogKeepsSlotWithRecentIOAndDelayedAck(t *testing.T) {
+	p := NewPeerPool("peer", 1)
+	s, err := p.Acquire(context.Background(), "attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	defer b.Close()
+	s.SetConnection(a)
+	s.MarkSent(1024)
+	s.TouchIO("write")
+	if got := p.Watchdog(time.Now().Add(1500 * time.Millisecond)); got != 0 {
+		t.Fatalf("active slot was killed before its I/O became idle: %d", got)
+	}
+	s.TouchIO("read")
+	if got := p.Watchdog(time.Now().Add(1500 * time.Millisecond)); got != 0 {
+		t.Fatalf("slot with recent I/O was killed while ACK was delayed: %d", got)
+	}
+	p.Release(s)
 }
 func TestV3SlotIsolation(t *testing.T) {
 	s := &PoolSlot{State: SlotIdle, LastProgress: time.Now()}

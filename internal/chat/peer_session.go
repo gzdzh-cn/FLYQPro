@@ -63,6 +63,25 @@ func (p *PeerPool) Release(s *PoolSlot) {
 	}
 }
 
+// CloseTransfer interrupts every slot currently owned by one transfer. It is
+// intentionally idempotent: a worker may already have returned its slot when
+// the UI cancellation arrives.
+func (p *PeerPool) CloseTransfer(transferID string) {
+	p.mu.Lock()
+	slots := append([]*PoolSlot(nil), p.slots...)
+	p.mu.Unlock()
+	for _, slot := range slots {
+		if slot != nil {
+			slot.mu.Lock()
+			owned := slot.currentTransferID == transferID && !slot.terminal
+			slot.mu.Unlock()
+			if owned {
+				slot.Cancel()
+			}
+		}
+	}
+}
+
 // EnsureLimit grows a peer's reusable slot set when a later transfer needs a
 // larger pipeline. Existing slots and their generation are preserved.
 func (p *PeerPool) EnsureLimit(limit int) {
@@ -115,7 +134,24 @@ func (p *PeerPool) Watchdog(now time.Time) (stalled int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, s := range p.slots {
-		if s.Stalled(now) {
+		if s.ProbeNeeded(now) {
+			if s.MarkProbe(now) {
+				id := binaryTransferID(s.TransferID())
+				ping := BinaryFrameV3{Type: FramePoolPing, TransferID: id, StreamID: uint16(s.ID), SessionID: p.sessionID, Generation: s.Generation}
+				if conn := s.Connection(); conn != nil {
+					_ = conn.SetWriteDeadline(now.Add(500 * time.Millisecond))
+				}
+				if err := s.WriteFrame(ping); err != nil {
+					s.Kill()
+					stalled++
+				}
+				if conn := s.Connection(); conn != nil {
+					_ = conn.SetWriteDeadline(time.Time{})
+				}
+			}
+			continue
+		}
+		if s.ProbeExpired(now) || s.Stalled(now) && !s.ProbeNeeded(now) {
 			stalled++
 			s.Kill()
 		}

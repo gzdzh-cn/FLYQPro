@@ -364,21 +364,13 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 			versionBefore = versionAfter
 			return nil
 		}
-		if pendingBytes > 0 {
-			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-		} else {
-			_ = conn.SetReadDeadline(time.Time{})
-		}
+		// ReadBinaryFrameV3 uses io.ReadFull for both header and payload. A
+		// short read deadline can expire halfway through a payload and make the
+		// next read start at the wrong byte. 4MiB windows and PoolPing provide
+		// explicit batch boundaries, so complete frame reads need no deadline.
+		_ = conn.SetReadDeadline(time.Time{})
 		frame, err := ReadBinaryFrameV3(conn, maxBinaryFileFramePayload)
 		if err != nil {
-			if pendingBytes > 0 {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					if flushErr := flush(); flushErr != nil {
-						return flushErr
-					}
-					continue
-				}
-			}
 			return err
 		}
 		if frame.TransferID != first.TransferID || frame.StreamID != first.StreamID || frame.SessionID != first.SessionID || frame.Generation != first.Generation {
@@ -390,7 +382,17 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 			}
 		}
 		if frame.Type == FramePoolPing {
+			pong := BinaryFrameV3{Type: FramePoolPong, TransferID: frame.TransferID, StreamID: frame.StreamID, Sequence: frame.Sequence, Offset: frame.Offset, SessionID: frame.SessionID, Generation: frame.Generation}
+			if err := writeV3Frame(conn, pong); err != nil {
+				return err
+			}
 			continue
+		}
+		if frame.Type == FrameCancel {
+			transfer.v3Mu.Lock()
+			transfer.v3Finalizing = true
+			transfer.v3Mu.Unlock()
+			return errAttachmentCanceled
 		}
 		if frame.Type == FrameEndFile {
 			if err := flush(); err != nil {
