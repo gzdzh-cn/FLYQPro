@@ -122,6 +122,10 @@ export interface TransferProgress {
   total: number
   percent: number
   speed?: number
+  metricSource?: 'receiver-durable' | string
+  metricSeq?: number
+  checkpointSeq?: number
+  localSendSpeed?: number
   averageSpeed?: number
   peakSpeed?: number
   rawSpeed?: number

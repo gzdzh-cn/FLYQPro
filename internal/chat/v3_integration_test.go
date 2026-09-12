@@ -49,8 +49,10 @@ func runV3TLS(t *testing.T, sizes []int, streams int, resumed bool) {
 	sender.identity = senderIdentity
 	senderPeer := pinnedTestPeer(senderIdentity, senderCertificate)
 	senderPeer.Relation = PeerRelation
+	senderPeer.Capabilities = []string{ackBatchCapability, transferMetricsCapability}
 	receiver.peers[senderID] = senderPeer
 	peer := pinnedTestPeer(receiverIdentity, receiverCertificate)
+	peer.Capabilities = []string{ackBatchCapability, transferMetricsCapability}
 	peer.IP = "127.0.0.1"
 	peer.DataPort = listener.Addr().(*net.TCPAddr).Port
 	totalBytes := 0

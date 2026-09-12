@@ -49,7 +49,7 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "ack-batch-v1", "transfer-metrics-v1"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
 		}

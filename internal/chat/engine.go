@@ -460,23 +460,25 @@ const discoveryLeaseDuration = 90 * time.Second
 const discoveryPresencePrefix = "presence:"
 
 const (
-	fileWindowCapability     = "file-window-v2"
-	fileStreamCapability     = "file-stream-v3"
-	fileParallelCapability   = "file-stream-v4"
-	fileResumeCapability     = "file-resume-v1"
-	binaryTransferMode       = "binary-window"
-	v3TransferMode           = "binary-v3"
-	parallelBinaryMode       = "parallel-binary"
-	jsonWindowTransferMode   = "json-window"
-	legacyTransferMode       = "legacy-chunk"
-	defaultTransferChunkSize = 256 * 1024
-	minTransferChunkSize     = 256 * 1024
-	mediumTransferChunkSize  = 512 * 1024
-	maxTransferChunkSize     = 1024 * 1024
-	defaultBinaryChunkSize   = mediumTransferChunkSize
-	binaryInitialWindow      = 16
-	initialTransferWindow    = 4
-	minTransferWindow        = 1
+	fileWindowCapability      = "file-window-v2"
+	fileStreamCapability      = "file-stream-v3"
+	fileParallelCapability    = "file-stream-v4"
+	fileResumeCapability      = "file-resume-v1"
+	ackBatchCapability        = "ack-batch-v1"
+	transferMetricsCapability = "transfer-metrics-v1"
+	binaryTransferMode        = "binary-window"
+	v3TransferMode            = "binary-v3"
+	parallelBinaryMode        = "parallel-binary"
+	jsonWindowTransferMode    = "json-window"
+	legacyTransferMode        = "legacy-chunk"
+	defaultTransferChunkSize  = 256 * 1024
+	minTransferChunkSize      = 256 * 1024
+	mediumTransferChunkSize   = 512 * 1024
+	maxTransferChunkSize      = 1024 * 1024
+	defaultBinaryChunkSize    = mediumTransferChunkSize
+	binaryInitialWindow       = 16
+	initialTransferWindow     = 4
+	minTransferWindow         = 1
 	// Window growth is bounded by protocol safety, while writeFileWindow keeps
 	// memory bounded with a streaming buffer instead of retaining a full window.
 	maxTransferWindow    = 256
@@ -2762,6 +2764,12 @@ type transferProgressOptions struct {
 	goodSamples         int
 	badSamples          int
 	verified            *bool
+	metricSource        string
+	metricSeq           uint64
+	checkpointSeq       uint64
+	localSendSpeed      float64
+	averageSpeed        float64
+	peakSpeed           float64
 }
 
 const transferSpeedSmoothingWindow = 1500 * time.Millisecond
@@ -2901,6 +2909,30 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	}
 	value["goodSamples"] = option.goodSamples
 	value["badSamples"] = option.badSamples
+	if option.metricSource != "" {
+		value["metricSource"] = option.metricSource
+	}
+	if option.metricSeq > 0 {
+		value["metricSeq"] = option.metricSeq
+	}
+	if option.checkpointSeq > 0 {
+		value["checkpointSeq"] = option.checkpointSeq
+	}
+	if option.localSendSpeed > 0 {
+		value["localSendSpeed"] = int64(option.localSendSpeed)
+	}
+	if option.metricSource == "receiver-durable" {
+		if option.averageSpeed > 0 {
+			value["averageSpeed"] = int64(option.averageSpeed)
+		}
+		if option.peakSpeed > 0 {
+			value["peakSpeed"] = int64(option.peakSpeed)
+		}
+		if option.confirmedThroughput > 0 {
+			value["speed"] = int64(option.confirmedThroughput)
+			value["rawSpeed"] = int64(option.confirmedThroughput)
+		}
+	}
 	if option.verified != nil {
 		value["verified"] = *option.verified
 	}
@@ -3751,7 +3783,7 @@ func (e *Engine) helloMessageForDialect(kind string, dialect ProtocolDialect) wi
 	profile := e.Profile()
 	capabilities := []string{"text", "image", "file"}
 	if dialect.Major >= ProtocolMajor {
-		capabilities = append(capabilities, "file-progress-v1", fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1")
+		capabilities = append(capabilities, "file-progress-v1", fileResumeCapability, "attachment-demand-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "storage-preflight-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", ackBatchCapability, transferMetricsCapability)
 	}
 	capabilities = append(capabilities, sharedDriveCapability)
 	capabilities = append(capabilities, sharedThumbnailBatchCapability)

@@ -18,6 +18,7 @@ type v3ProgressSample struct {
 	bytes, chunkBytes       int64
 	ackLatency              time.Duration
 	throughput              float64
+	metrics                 *TransferMetricsSnapshotV1
 	tuningState, reason     string
 	goodSamples, badSamples int
 }
@@ -211,11 +212,32 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		}
 		avg := float64(completedBytes) / now.Sub(progressStarted).Seconds()
 		options := transferProgressOptions{sessionID: fmt.Sprintf("%x", pool.SessionID()), generation: pool.Generation(), chunkSize: int(sample.chunkBytes), windowBytes: int64(pool.Active()) * sample.chunkBytes, activeStreams: pool.Active(), streamCount: len(assignments), transferMode: v3TransferMode, transport: "TLS13/TCP-v3", ackLatency: sample.ackLatency, confirmedThroughput: rate, windowThroughput: rate, displayLocalMetrics: true, tuningState: sample.tuningState, tuningReason: sample.reason, goodSamples: sample.goodSamples, badSamples: sample.badSamples}
+		options.localSendSpeed = rate
+		if sample.metrics != nil {
+			options.metricSource = "receiver-durable"
+			options.metricSeq = sample.metrics.MetricSeq
+			options.checkpointSeq = sample.metrics.CheckpointSeq
+			options.durableBytes = sample.metrics.DurableBytes
+			options.confirmedThroughput = sample.metrics.Speed
+			options.windowThroughput = sample.metrics.Speed
+			options.averageSpeed = sample.metrics.AverageSpeed
+			options.peakSpeed = sample.metrics.PeakSpeed
+			options.chunkSize = sample.metrics.ChunkSize
+			options.windowSize = sample.metrics.WindowSize
+			options.windowBytes = sample.metrics.WindowBytes
+			options.ackTargetBytes = sample.metrics.AckTargetBytes
+			options.streamCount = sample.metrics.StreamCount
+			options.activeStreams = sample.metrics.ActiveStreams
+		}
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", options)
 		// The sender's primary progress is the remote durable byte count. Emit
 		// the same sample under remote-receive so the UI can calculate ETA from
 		// confirmed bytes instead of the local socket write position.
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "remote-receive", "receiving", options)
+		remoteBytes := completedBytes
+		if sample.metrics != nil {
+			remoteBytes = sample.metrics.DurableBytes
+		}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, remoteBytes, message.AttachmentSize, "remote-receive", "receiving", options)
 		_ = avg
 	}
 	var wg sync.WaitGroup
@@ -244,6 +266,13 @@ func matchesV3Reply(reply, request BinaryFrameV3, typ V3FrameType) bool {
 		reply.SessionID == request.SessionID && reply.Generation == request.Generation &&
 		reply.StreamID == request.StreamID && reply.Sequence == request.Sequence &&
 		reply.Offset == request.Offset && reply.Length == 0 && len(reply.Payload) == 0
+}
+
+func matchesV3ReplyWithPayload(reply, request BinaryFrameV3, typ V3FrameType) bool {
+	return reply.Type == typ && reply.TransferID == request.TransferID &&
+		reply.SessionID == request.SessionID && reply.Generation == request.Generation &&
+		reply.StreamID == request.StreamID && reply.Sequence == request.Sequence &&
+		reply.Offset == request.Offset
 }
 
 func v3FileDigest(file *os.File, fullSHA string) ([32]byte, error) {
@@ -340,6 +369,12 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 	tuner := newV3AdaptiveTuner(profile.ChunkBytes(message.AttachmentSize))
 	buf := make([]byte, maxTransferChunkSize)
 	var seq uint64
+	batchEnabled := hasCapability(peer.Capabilities, ackBatchCapability)
+	metricsEnabled := hasCapability(peer.Capabilities, transferMetricsCapability)
+	windowBytes := int64(4 * 1024 * 1024)
+	if windowBytes > maxInFlightBytes {
+		windowBytes = maxInFlightBytes
+	}
 	for _, r := range ranges {
 		if r.Start < 0 || r.End < r.Start || r.End > message.AttachmentSize {
 			return os.ErrInvalid
@@ -348,56 +383,114 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			n := min(int64(tuner.chunkBytes), r.End-off)
-			if _, err := io.ReadFull(io.NewSectionReader(file, off, n), buf[:n]); err != nil {
-				return err
+			type pendingChunk struct {
+				frame     BinaryFrameV3
+				started   time.Time
+				confirmed bool
 			}
-			frame := NewChunkFrame(id, streamID, seq, uint64(off), buf[:n])
-			frame.SessionID, frame.Generation = sessionID, generation
-			ackStarted := time.Now()
-			acknowledged := false
+			pending := make([]pendingChunk, 0, 8)
+			var pendingBytes int64
+			for off < r.End && (len(pending) == 0 || pendingBytes < windowBytes) {
+				n := min(int64(tuner.chunkBytes), r.End-off)
+				if _, err := io.ReadFull(io.NewSectionReader(file, off, n), buf[:n]); err != nil {
+					return err
+				}
+				payload := append([]byte(nil), buf[:n]...)
+				frame := NewChunkFrame(id, streamID, seq, uint64(off), payload)
+				frame.SessionID, frame.Generation = sessionID, generation
+				pending = append(pending, pendingChunk{frame: frame, started: time.Now()})
+				pendingBytes += n
+				off += n
+				seq++
+				if !batchEnabled {
+					break
+				}
+			}
+			// Send a whole window before waiting for ACKs. This removes the
+			// per-chunk RTT while retaining exact identity checks and retries.
+			var lastMetrics TransferMetricsSnapshotV1
 			for attempt := 0; attempt < 3; attempt++ {
 				if conn == nil {
 					if err = open(); err != nil {
 						continue
 					}
 				}
-				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-				err = writeV3Frame(conn, frame)
-				var ack BinaryFrameV3
-				if err == nil {
-					ack, err = ReadBinaryFrameV3(conn, 1024)
+				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+				writeErr := error(nil)
+				for i := range pending {
+					if pending[i].confirmed {
+						continue
+					}
+					if err = writeV3Frame(conn, pending[i].frame); err != nil {
+						writeErr = err
+						break
+					}
 				}
-				if err == nil && matchesV3Reply(ack, frame, FrameChunkAck) {
-					acknowledged = true
-					break
+				if writeErr == nil && batchEnabled && pendingBytes < windowBytes {
+					// Explicitly delimit a short final window. This avoids relying on
+					// transport read deadlines (which some TLS stacks buffer).
+					ping := BinaryFrameV3{Type: FramePoolPing, TransferID: id, StreamID: streamID, Sequence: seq, SessionID: sessionID, Generation: generation}
+					if err = writeV3Frame(conn, ping); err != nil {
+						writeErr = err
+					}
 				}
-				if err == nil && !matchesV3Reply(ack, frame, FrameChunkNack) {
-					return fmt.Errorf("v3 stale or invalid acknowledgement")
-				}
-				if attempt == 2 {
-					break
-				}
-				// A timed-out read may have consumed half a frame. Never reuse that byte
-				// stream: reconnect and resend only this unconfirmed, idempotent chunk.
-				slot.CloseConnection()
-				if err = open(); err != nil {
+				if writeErr != nil {
+					slot.CloseConnection()
+					conn = nil
 					continue
 				}
+				readErr := error(nil)
+				for i := range pending {
+					if pending[i].confirmed {
+						continue
+					}
+					ack, errRead := ReadBinaryFrameV3(conn, 64*1024)
+					if errRead != nil {
+						readErr = errRead
+						break
+					}
+					if !matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {
+						if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkNack) {
+							readErr = fmt.Errorf("v3 chunk nack")
+						} else {
+							readErr = fmt.Errorf("v3 stale or invalid acknowledgement")
+						}
+						break
+					}
+					pending[i].confirmed = true
+					if metricsEnabled && len(ack.Payload) > 0 {
+						if snapshot, decodeErr := decodeTransferMetricsSnapshot(ack.Payload); decodeErr == nil && snapshot.MetricSeq >= lastMetrics.MetricSeq {
+							lastMetrics = snapshot
+						}
+					}
+				}
+				if readErr == nil {
+					break
+				}
+				err = readErr
+				slot.CloseConnection()
+				conn = nil
 			}
-			if !acknowledged {
-				return fmt.Errorf("v3 chunk %d unconfirmed: %w", seq, errors.Join(err, io.ErrUnexpectedEOF))
+			for _, chunk := range pending {
+				if !chunk.confirmed {
+					return fmt.Errorf("v3 chunk unconfirmed: %w", errors.Join(err, io.ErrUnexpectedEOF))
+				}
+				n := int64(len(chunk.frame.Payload))
+				if err := e.persistOutgoingConfirmedRange(message.AttachmentID, int64(chunk.frame.Offset), int64(chunk.frame.Offset)+n, fmt.Sprintf("%x", sessionID), generation); err != nil {
+					return newTransferError(ErrSessionNotReady, true, fmt.Errorf("保存发送恢复范围失败: %w", err))
+				}
+				sample := tuner.Observe(n, time.Since(chunk.started))
+				if lastMetrics.Speed > 0 {
+					sample.throughput = lastMetrics.Speed
+					sample.ackLatency = time.Duration(lastMetrics.AckLatencyMs) * time.Millisecond
+					snapshot := lastMetrics
+					sample.metrics = &snapshot
+				}
+				if len(progress) > 0 {
+					progress[0](sample)
+				}
+				slot.Progress(n, n)
 			}
-			if err := e.persistOutgoingConfirmedRange(message.AttachmentID, off, off+n, fmt.Sprintf("%x", sessionID), generation); err != nil {
-				return newTransferError(ErrSessionNotReady, true, fmt.Errorf("保存发送恢复范围失败: %w", err))
-			}
-			slot.Progress(n, n)
-			sample := tuner.Observe(n, time.Since(ackStarted))
-			if len(progress) > 0 {
-				progress[0](sample)
-			}
-			off += n
-			seq++
 		}
 	}
 	current, err := file.Stat()
