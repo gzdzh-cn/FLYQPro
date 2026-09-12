@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,18 +82,135 @@ func (e *Engine) authenticateInboundDataPeer(state tls.ConnectionState) (Peer, e
 }
 
 func (e *Engine) receiveV3DataConnection(conn net.Conn, authenticatedPeerIDs ...string) error {
+	reader := newV3FrameReader(conn, maxBinaryFileFramePayload)
+	defer reader.Close()
 	for {
-		if err := e.receiveV3Transfer(conn, authenticatedPeerIDs...); err != nil {
+		if err := e.receiveV3TransferWithReader(conn, reader, authenticatedPeerIDs...); err != nil {
 			return err
 		}
 	}
 }
 
+// receiveV3Transfer is kept as a small test/helper entry point. Production
+// connections use receiveV3DataConnection so one reader lives for the whole
+// TLS connection and can continue draining frames during a checkpoint.
+func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string) error {
+	reader := newV3FrameReader(conn, maxBinaryFileFramePayload)
+	defer reader.Close()
+	return e.receiveV3TransferWithReader(conn, reader, authenticatedPeerIDs...)
+}
+
+// v3FrameReader owns the only read side of a v3 data connection. In
+// particular, no transfer handler can leave unread bytes in a TLS record while
+// it is syncing the file or persisting a resume checkpoint.
+type v3FrameReader struct {
+	conn     net.Conn
+	frames   chan BinaryFrameV3
+	done     chan struct{}
+	closeOne sync.Once
+	doneOne  sync.Once
+	writeMu  sync.Mutex
+	errMu    sync.Mutex
+	err      error
+}
+
+func newV3FrameReader(conn net.Conn, maxPayload uint32) *v3FrameReader {
+	// Clear any handshake/accept deadline before the long-lived reader starts.
+	// Frame boundaries are enforced by ReadBinaryFrameV3, never by a short
+	// socket read deadline.
+	_ = conn.SetReadDeadline(time.Time{})
+	r := &v3FrameReader{
+		conn:   conn,
+		frames: make(chan BinaryFrameV3, 16), // four 1 MiB chunks plus control frames
+		done:   make(chan struct{}),
+	}
+	go r.run(maxPayload)
+	return r
+}
+
+func (r *v3FrameReader) run(maxPayload uint32) {
+	for {
+		frame, err := ReadBinaryFrameV3(r.conn, maxPayload)
+		if err != nil {
+			r.errMu.Lock()
+			r.err = err
+			r.errMu.Unlock()
+			r.doneOne.Do(func() { close(r.done) })
+			return
+		}
+		if frame.Type == FramePoolPing {
+			// Reply from the reader goroutine, so a slow Sync/SQLite checkpoint
+			// cannot make the sender's liveness probe wait behind the data loop.
+			pong := BinaryFrameV3{Type: FramePoolPong, TransferID: frame.TransferID, StreamID: frame.StreamID, Sequence: frame.Sequence, Offset: frame.Offset, SessionID: frame.SessionID, Generation: frame.Generation}
+			if err := r.WriteFrame(pong); err != nil {
+				r.errMu.Lock()
+				r.err = err
+				r.errMu.Unlock()
+				r.doneOne.Do(func() { close(r.done) })
+				return
+			}
+		}
+		select {
+		case r.frames <- frame:
+		case <-r.done:
+			return
+		}
+	}
+}
+
+func (r *v3FrameReader) WriteFrame(frame BinaryFrameV3) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	return writeV3Frame(r.conn, frame)
+}
+
+func (r *v3FrameReader) Next() (BinaryFrameV3, error) {
+	frame, ready, err := r.Wait(0)
+	if !ready && err == nil {
+		err = net.ErrClosed
+	}
+	return frame, err
+}
+
+// Wait returns ready=false,nil when the bounded low-speed batch timer fires.
+// It is deliberately separate from a socket deadline: the reader continues
+// consuming complete frames, so a timer can never split a frame in flight.
+func (r *v3FrameReader) Wait(timeout time.Duration) (BinaryFrameV3, bool, error) {
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timerC = timer.C
+		defer timer.Stop()
+	}
+	select {
+	case frame := <-r.frames:
+		return frame, true, nil
+	case <-r.done:
+		r.errMu.Lock()
+		err := r.err
+		r.errMu.Unlock()
+		if err == nil {
+			err = net.ErrClosed
+		}
+		return BinaryFrameV3{}, false, err
+	case <-timerC:
+		return BinaryFrameV3{}, false, nil
+	}
+}
+
+func (r *v3FrameReader) Close() {
+	r.closeOne.Do(func() {
+		r.doneOne.Do(func() { close(r.done) })
+		_ = r.conn.Close()
+	})
+}
+
 // receiveV3Transfer consumes exactly one BeginFile ... EndFile sequence. The
 // underlying TLS connection remains open so the sender can reuse the slot for
 // the next file without another handshake.
-func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string) (result error) {
-	first, err := ReadBinaryFrameV3(conn, maxBinaryFileFramePayload)
+func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReader, authenticatedPeerIDs ...string) (result error) {
+	first, err := reader.Next()
 	if err != nil {
 		return err
 	}
@@ -217,7 +335,7 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 			}
 			ackFrame.Payload, ackFrame.Length = payload, uint32(len(payload))
 		}
-		return writeV3Frame(conn, ackFrame)
+		return reader.WriteFrame(ackFrame)
 	}
 	consume := func(frame BinaryFrameV3) error {
 		transfer.v3IOMu.RLock()
@@ -314,11 +432,27 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 			deferCheckpoint = false
 			versionAfter := func() uint64 { transfer.v3Mu.Lock(); defer transfer.v3Mu.Unlock(); return transfer.v3WrittenVersion }()
 			if versionAfter > versionBefore {
+				transfer.v3Mu.Lock()
+				received, durable := transfer.received, transfer.durableBytes
+				transfer.v3Mu.Unlock()
+				phaseOptions := transferProgressOptions{
+					sessionID: fmt.Sprintf("%x", first.SessionID), generation: first.Generation,
+					transferMode: v3TransferMode, transport: "TLS13/TCP-v3",
+					metricSource: "receiver-durable", durableBytes: durable,
+				}
+				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "durability_sync", phaseOptions)
 				started := time.Now()
 				if err := commitV3Checkpoint(transfer, versionAfter); err != nil {
 					return err
 				}
 				lastCheckpointDuration = time.Since(started)
+				transfer.v3Mu.Lock()
+				received, durable = transfer.received, transfer.durableBytes
+				transfer.v3Mu.Unlock()
+				phaseOptions.durableBytes = durable
+				phaseOptions.diskWriteMs = lastCheckpointDuration.Milliseconds()
+				phaseOptions.checkpointSeq = versionAfter
+				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "checkpoint_persist", phaseOptions)
 			}
 			transfer.v3Mu.Lock()
 			received := transfer.received
@@ -368,10 +502,17 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 		// short read deadline can expire halfway through a payload and make the
 		// next read start at the wrong byte. 4MiB windows and PoolPing provide
 		// explicit batch boundaries, so complete frame reads need no deadline.
-		_ = conn.SetReadDeadline(time.Time{})
-		frame, err := ReadBinaryFrameV3(conn, maxBinaryFileFramePayload)
+		frame, ready, err := reader.Wait(150 * time.Millisecond)
 		if err != nil {
 			return err
+		}
+		if !ready {
+			if pendingBytes > 0 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			continue
 		}
 		if frame.TransferID != first.TransferID || frame.StreamID != first.StreamID || frame.SessionID != first.SessionID || frame.Generation != first.Generation {
 			return fmt.Errorf("v3 frame identity mismatch")
@@ -382,10 +523,9 @@ func (e *Engine) receiveV3Transfer(conn net.Conn, authenticatedPeerIDs ...string
 			}
 		}
 		if frame.Type == FramePoolPing {
-			pong := BinaryFrameV3{Type: FramePoolPong, TransferID: frame.TransferID, StreamID: frame.StreamID, Sequence: frame.Sequence, Offset: frame.Offset, SessionID: frame.SessionID, Generation: frame.Generation}
-			if err := writeV3Frame(conn, pong); err != nil {
-				return err
-			}
+			// v3FrameReader already sent the Pong without waiting for this
+			// transfer's checkpoint. The control frame remains here solely to
+			// delimit and flush a short batch.
 			continue
 		}
 		if frame.Type == FrameCancel {

@@ -1381,19 +1381,35 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 	if transfer == nil {
 		return transferProgressOptions{verified: verified}
 	}
+	// Checkpoint persistence updates resumeState without holding the v3 range
+	// lock, while v3 durableBytes is published under that range lock. Snapshot
+	// both independently before building the event so completion and checkpoint
+	// goroutines cannot race with progress emission.
+	transfer.v3Mu.Lock()
+	v3Transfer := transfer.v3Streams != nil
+	v3DurableBytes := transfer.durableBytes
+	transfer.v3Mu.Unlock()
+	parallelTransfer := transfer.parallel
+	transfer.resumeMu.Lock()
+	resumeState := transfer.resumeState
+	resumeDurableBytes := int64(0)
+	if !parallelTransfer && !v3Transfer {
+		resumeDurableBytes = transfer.durableBytes
+	}
+	transfer.resumeMu.Unlock()
 	options := transferProgressOptions{
 		chunkSize:    transfer.chunkSize,
 		windowSize:   transfer.windowSize,
 		transferMode: receiverTransferMode(transfer),
 		tuningState:  "observing",
 		verified:     verified,
-		errorCode:    string(transfer.resumeState.ErrorCode),
-		retryable:    transfer.resumeState.Retryable,
-		retries:      transfer.resumeState.Retries,
-		generation:   transfer.resumeState.Generation,
-		sessionID:    transfer.resumeState.SessionID,
+		errorCode:    string(resumeState.ErrorCode),
+		retryable:    resumeState.Retryable,
+		retries:      resumeState.Retries,
+		generation:   resumeState.Generation,
+		sessionID:    resumeState.SessionID,
 	}
-	if transfer.parallel {
+	if parallelTransfer {
 		transfer.parallelMu.Lock()
 		options.windowBytes = 0
 		options.inFlightBytes, options.activeStreams = parallelReceiverMetricsLocked(transfer)
@@ -1405,8 +1421,12 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		options.windowBytes = transfer.windowBytes
 		options.inFlightBytes = receiverInFlightBytesLocked(transfer)
 	}
-	if !transfer.parallel {
-		options.durableBytes = transfer.durableBytes
+	if !parallelTransfer {
+		if v3Transfer {
+			options.durableBytes = v3DurableBytes
+		} else {
+			options.durableBytes = resumeDurableBytes
+		}
 	}
 	if transfer.binary && !transfer.parallel {
 		options.ackTargetBytes = transfer.binaryAckTarget

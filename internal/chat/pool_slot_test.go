@@ -103,6 +103,79 @@ func TestV3WatchdogKeepsSlotWithRecentIOAndDelayedAck(t *testing.T) {
 	}
 	p.Release(s)
 }
+
+func TestV3WatchdogAllowsSlowDurabilityCheckpoint(t *testing.T) {
+	s := &PoolSlot{State: SlotTransferring, currentTransferID: "attachment"}
+	now := time.Now()
+	s.MarkSent(1024)
+	if !s.MarkProbe(now) {
+		t.Fatal("probe was not recorded")
+	}
+	if s.ProbeExpired(now.Add(9 * time.Second)) {
+		t.Fatal("slot expired during the slow durability window")
+	}
+	if !s.ProbeExpired(now.Add(10 * time.Second)) {
+		t.Fatal("slot did not expire after a full probe timeout")
+	}
+}
+
+func TestV3WatchdogProbeRemainsPendingAfterPingWrite(t *testing.T) {
+	p := NewPeerPool("peer", 1)
+	s, err := p.Acquire(context.Background(), "attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	s.SetConnection(a)
+	s.MarkSent(1)
+	now := time.Now()
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := ReadBinaryFrameV3(b, 1024)
+		readDone <- err
+	}()
+	if got := p.Watchdog(now.Add(3 * time.Second)); got != 0 {
+		t.Fatalf("probe write unexpectedly killed slot: %d", got)
+	}
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Watchdog(now.Add(12 * time.Second)); got != 0 {
+		t.Fatalf("pending probe expired during slow durability: %d", got)
+	}
+	if got := p.Watchdog(now.Add(13 * time.Second)); got != 1 {
+		t.Fatalf("dead slot was not isolated after probe timeout: %d", got)
+	}
+}
+
+func TestV3FrameReaderRepliesToPingWithoutDroppingControlFrame(t *testing.T) {
+	a, b := net.Pipe()
+	reader := newV3FrameReader(a, 1024)
+	defer reader.Close()
+	defer b.Close()
+
+	ping := BinaryFrameV3{Type: FramePoolPing, TransferID: [16]byte{1}, StreamID: 2, Sequence: 3, SessionID: [16]byte{4}, Generation: 5}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- writeV3Frame(b, ping) }()
+	pong, err := ReadBinaryFrameV3(b, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pong.Type != FramePoolPong || pong.TransferID != ping.TransferID || pong.SessionID != ping.SessionID || pong.Generation != ping.Generation {
+		t.Fatalf("unexpected pong: %+v", pong)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	queued, err := reader.Next()
+	if err != nil || queued.Type != FramePoolPing {
+		t.Fatalf("ping was not retained for batch delimiting: frame=%+v err=%v", queued, err)
+	}
+}
+
 func TestV3SlotIsolation(t *testing.T) {
 	s := &PoolSlot{State: SlotIdle, LastProgress: time.Now()}
 	if e := s.Reserve("x"); e != nil || !s.Start() {

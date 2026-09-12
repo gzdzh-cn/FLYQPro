@@ -456,6 +456,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 							break
 						}
 						if ack.Type == FramePoolPong {
+							slot.TouchIO("read")
 							continue
 						}
 						if !matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {

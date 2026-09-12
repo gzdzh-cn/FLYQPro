@@ -88,7 +88,7 @@ func canonicalTransferState(phase string) TransferState {
 	switch phase {
 	case "pending", "queued", "awaiting_acceptance", "preparing", "preparing_thumbnail", "retrying":
 		return TransferQueued
-	case "transferring", "receiving", "resuming", "verifying":
+	case "transferring", "receiving", "resuming", "verifying", "writing", "durability_sync", "checkpoint_persist", "ack_emit", "waiting_network":
 		return TransferActive
 	case "paused", "paused_local":
 		return TransferPausedLocal

@@ -151,7 +151,10 @@ func (p *PeerPool) Watchdog(now time.Time) (stalled int) {
 			}
 			continue
 		}
-		if s.ProbeExpired(now) || s.Stalled(now) && !s.ProbeNeeded(now) {
+		// A pending probe is already the liveness check. Do not use the old
+		// two-second stalled test here: a receiver may be inside fsync while the
+		// reader goroutine is still draining the socket.
+		if s.ProbeExpired(now) {
 			stalled++
 			s.Kill()
 		}

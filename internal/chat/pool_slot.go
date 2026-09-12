@@ -205,7 +205,11 @@ func (s *PoolSlot) MarkProbe(now time.Time) bool {
 func (s *PoolSlot) ProbeExpired(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return (s.State == SlotTransferring || s.State == SlotReserved) && !s.lastPingAt.IsZero() && now.Sub(s.lastPingAt) >= 2*time.Second
+	// A durable ACK can legitimately be delayed by a several-second file
+	// sync/checkpoint. Only expire a probe after a long quiet period; any read,
+	// write, ACK, or Pong clears lastPingAt through TouchIO/MarkAck.
+	const probeTimeout = 10 * time.Second
+	return (s.State == SlotTransferring || s.State == SlotReserved) && !s.lastPingAt.IsZero() && now.Sub(s.lastPingAt) >= probeTimeout
 }
 
 func (s *PoolSlot) WriteFrame(frame BinaryFrameV3) error {
@@ -213,7 +217,7 @@ func (s *PoolSlot) WriteFrame(frame BinaryFrameV3) error {
 	defer s.ioMu.Unlock()
 	s.mu.Lock()
 	conn := s.conn
-	valid := !s.terminal && s.State != SlotDead
+	valid := !s.terminal && (s.State == SlotReserved || s.State == SlotTransferring || s.State == SlotDraining)
 	s.mu.Unlock()
 	if !valid || conn == nil {
 		return net.ErrClosed
@@ -221,7 +225,15 @@ func (s *PoolSlot) WriteFrame(frame BinaryFrameV3) error {
 	if err := writeV3Frame(conn, frame); err != nil {
 		return err
 	}
-	s.TouchIO("write")
+	if frame.Type == FramePoolPing {
+		// The probe write is transport activity, but it must not clear the
+		// pending probe timestamp or the watchdog can never detect a dead peer.
+		s.mu.Lock()
+		s.lastIOAt = time.Now()
+		s.mu.Unlock()
+	} else {
+		s.TouchIO("write")
+	}
 	return nil
 }
 func (s *PoolSlot) Stalled(now time.Time) bool {
