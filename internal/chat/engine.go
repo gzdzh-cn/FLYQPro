@@ -4857,7 +4857,17 @@ func (e *Engine) MarkConversationRead(ctx context.Context, deviceID string) erro
 	if err != nil {
 		return err
 	}
-	return e.sendToPeer(peer, wireMessage{Type: "read_receipt", MessageIDs: readIDs})
+	if err := e.sendToPeer(peer, wireMessage{Type: "read_receipt", MessageIDs: readIDs}); err != nil {
+		// The local read state is already durable. Delivery of the remote receipt
+		// is best-effort and a temporarily offline peer must not fail the Wails
+		// binding that opened the conversation.
+		if transientTransferError(err) {
+			log.Printf("已读回执暂未送达: peer=%s error=%s", peer.DeviceID, redactDiagnosticError(err))
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) SendFile(ctx context.Context, deviceID, path string) (Message, error) {
@@ -5451,7 +5461,7 @@ func (e *Engine) fileControlForPeer(peer Peer, dialect ProtocolDialect) (*fileCo
 	if err != nil {
 		return nil, err
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	conn, err := dialPeerTLS(context.Background(), peer, clientTLS, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -6799,14 +6809,14 @@ func (e *Engine) sendToPeer(peer Peer, message wireMessage) error {
 }
 
 func (e *Engine) sendToPeerWithDialect(peer Peer, message wireMessage, dialect ProtocolDialect) error {
-	if peer.IP == "" || peer.Port == 0 {
+	if !peerHasDialAddress(peer) {
 		return fmt.Errorf("好友地址不可用")
 	}
 	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return err
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	conn, err := dialPeerTLS(context.Background(), peer, clientTLS, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -7043,7 +7053,7 @@ func (e *Engine) RefreshPeerAvatar(deviceID string) error {
 	if err != nil {
 		return err
 	}
-	if peer.Relation != PeerRelation || peer.FriendshipState == "removed" || peer.IP == "" || peer.Port == 0 {
+	if peer.Relation != PeerRelation || peer.FriendshipState == "removed" || !peerHasDialAddress(peer) {
 		return fmt.Errorf("好友地址不可用")
 	}
 	var lastErr error
@@ -7054,6 +7064,10 @@ func (e *Engine) RefreshPeerAvatar(deviceID string) error {
 			lastErr = err
 		}
 	}
+	if transientTransferError(lastErr) {
+		log.Printf("好友头像刷新暂不可用: peer=%s error=%s", peer.DeviceID, redactDiagnosticError(lastErr))
+		return nil
+	}
 	return lastErr
 }
 
@@ -7062,7 +7076,7 @@ func (e *Engine) refreshPeerAvatarWithDialect(peer Peer, dialect ProtocolDialect
 	if err != nil {
 		return err
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	conn, err := dialPeerTLS(context.Background(), peer, clientTLS, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -7129,14 +7143,14 @@ func (e *Engine) probePeer(peer Peer) error {
 }
 
 func (e *Engine) probePeerWithDialect(peer Peer, dialect ProtocolDialect) error {
-	if peer.IP == "" || peer.Port == 0 {
+	if !peerHasDialAddress(peer) {
 		return fmt.Errorf("好友地址不可用")
 	}
 	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return err
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", net.JoinHostPort(peer.IP, fmt.Sprint(peer.Port)), clientTLS)
+	conn, err := dialPeerTLS(context.Background(), peer, clientTLS, time.Second)
 	if err != nil {
 		return err
 	}
