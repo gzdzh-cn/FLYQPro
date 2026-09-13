@@ -5663,7 +5663,13 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			return fmt.Errorf("v3 数据传输失败: %w", err)
 		}
 		verified := true
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), streamCount: v3Streams, transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, verified: &verified})
+		completedOptions := transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), streamCount: v3Streams, activeStreams: 0, transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, metricSource: "receiver-durable", durableBytes: message.AttachmentSize, verified: &verified}
+		// EndFile is acknowledged only after the receiver has finalized the
+		// file. Publish completion for both projections so the sender's UI,
+		// which uses remote-receive as its primary progress, cannot remain at
+		// the last receiving snapshot.
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "remote-receive", "completed", completedOptions)
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, message.AttachmentSize, message.AttachmentSize, "send", "completed", completedOptions)
 		return nil
 	}
 	// File payloads are v3-only. Keeping a legacy branch here would allow a

@@ -1237,9 +1237,13 @@ function transferProgressFor(message: any): any {
     merged.peakSpeed = undefined
     merged.etaSeconds = undefined
   }
+  // A v3 sender receives the final EndFile confirmation on the local send
+  // projection. Prefer an explicit remote terminal snapshot, but allow the
+  // local terminal result to close the UI when an older peer did not emit the
+  // matching remote-receive event.
   const terminal = preferred && terminalTransferPhases.has(preferred.phase)
     ? preferred
-    : !preferred && diagnostics && terminalTransferPhases.has(diagnostics.phase) ? diagnostics : undefined
+    : diagnostics && terminalTransferPhases.has(diagnostics.phase) ? diagnostics : undefined
   if (terminal) {
     merged.phase = terminal.phase
     if (terminal.verified !== undefined) merged.verified = terminal.verified
