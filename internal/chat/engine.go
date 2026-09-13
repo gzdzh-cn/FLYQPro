@@ -3366,6 +3366,18 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		e.transferMetrics[metricKey] = metric
 	}
 	e.transferMetricsMu.Unlock()
+	// Persist checkpoint and lifecycle projections, rather than every socket
+	// progress tick. This keeps the UI recoverable without putting SQLite on the
+	// hot data path for each chunk.
+	persistSnapshot := option.checkpointSeq > 0 || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
+	if persistSnapshot {
+		if snapshot, snapshotErr := snapshotFromProgress(value); snapshotErr == nil {
+			if snapshot.State == "" {
+				snapshot.State = canonicalTransferState(phase)
+			}
+			_ = saveTransferSnapshot(context.Background(), snapshot)
+		}
+	}
 	switch direction {
 	case "send":
 		value["sent"] = transferred
@@ -6883,6 +6895,14 @@ func readFileOfferResponse(reader *wireReader, attachmentID string) (wireMessage
 }
 
 func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string, terminalOptions ...transferProgressOptions) Message {
+	// A cancel can win between the last ACK and this final callback. Re-check
+	// the managed owner so a late worker cannot resurrect a canceled transfer.
+	e.mu.RLock()
+	active := e.outgoing[message.AttachmentID]
+	e.mu.RUnlock()
+	if active != nil && active.isCanceled() {
+		status = "canceled"
+	}
 	confirmedBytes := message.AttachmentSize
 	if status != "sent" {
 		confirmedBytes = e.lastTransferBytes(message.AttachmentID, "remote-receive")

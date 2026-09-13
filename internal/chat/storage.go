@@ -953,6 +953,9 @@ func DeleteConversationRecords(ctx context.Context, peerDeviceID string) (int, i
 		return 0, 0, err
 	}
 	if err := database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`DELETE FROM transfer_snapshots WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id IN (SELECT m.message_id FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?))`, peerDeviceID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM attachments WHERE message_id IN (SELECT m.message_id FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?)`, peerDeviceID); err != nil {
 			return err
 		}
@@ -1117,6 +1120,9 @@ func UpdateMessageLocalState(ctx context.Context, messageID string, favorite boo
 }
 
 func DeleteMessageRecord(ctx context.Context, messageID string) error {
+	if err := exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
 	return exec(ctx, `DELETE FROM messages WHERE message_id=?`, messageID)
 }
 
@@ -1241,6 +1247,69 @@ func GetAttachment(ctx context.Context, id string) (Attachment, error) {
 	}
 	row := rows[0]
 	return Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, ThumbnailData: row.ThumbnailData, ThumbnailMime: row.ThumbnailMime, LocalPath: row.LocalPath, Status: row.Status}, nil
+}
+
+// saveTransferSnapshot keeps the latest UI/diagnostic projection independently
+// from the resumable .part record. Completed transfers deliberately keep this
+// snapshot so the chat bubble and details view remain useful after restart.
+func saveTransferSnapshot(ctx context.Context, snapshot TransferSnapshot) error {
+	if snapshot.AttachmentID == "" {
+		return fmt.Errorf("transfer snapshot attachment id is empty")
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return exec(ctx, `INSERT INTO transfer_snapshots(attachment_id, message_id, snapshot_json, updated_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(attachment_id) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+		snapshot.AttachmentID, snapshot.MessageID, string(payload), nowString())
+}
+
+func loadTransferSnapshot(ctx context.Context, attachmentID string) (TransferSnapshot, error) {
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshots WHERE attachment_id=? LIMIT 1`, attachmentID)
+	if err != nil {
+		return TransferSnapshot{}, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return TransferSnapshot{}, err
+	}
+	if len(rows) == 0 {
+		return TransferSnapshot{}, fmt.Errorf("transfer snapshot not found")
+	}
+	var snapshot TransferSnapshot
+	if err := json.Unmarshal([]byte(rows[0].SnapshotJSON), &snapshot); err != nil {
+		return TransferSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func listTransferSnapshots(ctx context.Context) ([]TransferSnapshot, error) {
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshots ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	items := make([]TransferSnapshot, 0, len(rows))
+	for _, row := range rows {
+		var snapshot TransferSnapshot
+		if err := json.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil && snapshot.AttachmentID != "" {
+			items = append(items, snapshot)
+		}
+	}
+	return items, nil
+}
+
+func deleteTransferSnapshot(ctx context.Context, attachmentID string) error {
+	return exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id=?`, attachmentID)
 }
 
 func parseTime(value string) time.Time { t, _ := time.Parse(time.RFC3339Nano, value); return t }

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection } from './types'
+import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection, TransferSnapshot } from './types'
 
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
 const terminalTransferPhases = new Set(['completed', 'canceled', 'cancelled', 'rejected', 'failed'])
@@ -21,12 +21,6 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     const previousGeneration = transferGeneration(previous)
     if (generation !== previousGeneration) return generation < previousGeneration
   }
-  const updatedAt = Date.parse(progress.updatedAt || '')
-  const previousUpdatedAt = Date.parse(previous.updatedAt || '')
-  if (Number.isFinite(updatedAt) && Number.isFinite(previousUpdatedAt) && updatedAt < previousUpdatedAt) return true
-  // Lifecycle events are valid without throughput counters. Their timestamp
-  // orders pause/resume transitions while the metric fields remain frozen.
-  if (lifecycleTransferPhases.has(progress.phase)) return false
   const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
   let comparable = false
   let strictlyOlder = false
@@ -57,6 +51,14 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
       persistenceTransferPhases.has(progress.phase) && ['transferring', 'receiving'].includes(previous.phase)) {
     return true
   }
+  // Backend goroutines can stamp events before delivery, so updatedAt is only
+  // a fallback after the monotonic transfer counters have been compared.
+  const updatedAt = Date.parse(progress.updatedAt || '')
+  const previousUpdatedAt = Date.parse(previous.updatedAt || '')
+  if (Number.isFinite(updatedAt) && Number.isFinite(previousUpdatedAt) && updatedAt < previousUpdatedAt) return true
+  // Lifecycle events are valid without throughput counters. They must be able
+  // to move the state while retaining the latest metric fields.
+  if (lifecycleTransferPhases.has(progress.phase)) return false
   return comparable && strictlyOlder
 }
 
@@ -215,6 +217,8 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:attachment' && !value?.conversationId) {
         Object.values(this.messages).forEach((list) => list.forEach((item) => {
           if (item.attachmentId === value.attachmentId) {
+            const terminal = this.transferHistory[item.attachmentId]
+            if (terminal && isTerminalTransfer(terminal) && !['completed', 'canceled', 'cancelled', 'rejected', 'failed'].includes(value.status)) return
             item.attachmentStatus = value.status
             if (value.localPath) item.attachmentPath = value.localPath
           }
@@ -260,6 +264,12 @@ export const useChatStore = defineStore('chat', {
           if (name === 'chat:message') this.lastMessageEvent = value
         } else {
           const next = list.slice()
+          const previous = next[index]
+          const terminal = previous.attachmentId ? this.transferHistory[previous.attachmentId] : undefined
+          const incomingStatus = value.attachmentStatus || value.status
+          if (terminal && isTerminalTransfer(terminal) && !['completed', 'canceled', 'cancelled', 'rejected', 'failed', 'sent', 'saved'].includes(incomingStatus)) {
+            return
+          }
           // Completion/status events can arrive after the asynchronous image
           // thumbnail event. Do not let an older payload with an empty preview
           // erase the thumbnail already shown in the conversation.
@@ -270,6 +280,13 @@ export const useChatStore = defineStore('chat', {
             attachmentThumbnailMime: value.attachmentThumbnailMime || next[index].attachmentThumbnailMime,
           }
           this.messages[value.conversationId] = next
+        }
+      }
+    },
+    hydrateTransferSnapshots(snapshots: TransferSnapshot[]) {
+      for (const snapshot of snapshots || []) {
+        if (snapshot?.attachmentId && snapshot.direction && snapshot.phase) {
+          this.handleEvent('transfer-progress', snapshot)
         }
       }
     },

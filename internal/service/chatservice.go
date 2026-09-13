@@ -1229,6 +1229,10 @@ func (s *ChatService) ListRecoveryTasks() []chat.TransferSnapshot {
 	return s.engine.ListRecoveryTasks()
 }
 
+func (s *ChatService) ListTransferSnapshots() []chat.TransferSnapshot {
+	return s.engine.ListTransferSnapshots()
+}
+
 func (s *ChatService) GetTransferDiagnostics(transferID string) (chat.TransferSnapshot, error) {
 	return s.engine.GetTransferDiagnostics(strings.TrimSpace(transferID))
 }

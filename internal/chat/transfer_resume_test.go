@@ -47,6 +47,39 @@ func TestTransferResumeStateRoundTripAndRangeNormalization(t *testing.T) {
 	}
 }
 
+func TestTransferSnapshotRoundTripKeepsTerminalMetrics(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	verified := true
+	want := TransferSnapshot{
+		AttachmentID:  "snapshot-attachment",
+		TransferID:    "snapshot-transfer",
+		MessageID:     "snapshot-message",
+		Direction:     "receive",
+		State:         TransferCompleted,
+		Phase:         "completed",
+		Transferred:   128,
+		DurableBytes:  128,
+		Total:         128,
+		Percent:       100,
+		Speed:         7 * 1024 * 1024,
+		ElapsedMs:     2400,
+		MetricSeq:     9,
+		CheckpointSeq: 4,
+		Verified:      &verified,
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if err := saveTransferSnapshot(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadTransferSnapshot(ctx, want.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AttachmentID != want.AttachmentID || got.State != TransferCompleted || got.DurableBytes != want.DurableBytes || got.ElapsedMs != want.ElapsedMs || got.MetricSeq != want.MetricSeq || got.Verified == nil || !*got.Verified {
+		t.Fatalf("snapshot roundtrip lost terminal metrics: got %+v", got)
+	}
+}
+
 func TestResumeIncomingAttachmentKeepsAcceptedResumingState(t *testing.T) {
 	ctx := openSharedFolderTestDatabase(t)
 	conversationID, err := EnsureConversation(ctx, "resume-peer")

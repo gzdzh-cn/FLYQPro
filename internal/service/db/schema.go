@@ -164,6 +164,13 @@ var schemaStatements = []string{
 		updated_at TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_transfer_resumes_updated ON transfer_resumes(updated_at)`,
+	`CREATE TABLE IF NOT EXISTS transfer_snapshots (
+		attachment_id TEXT PRIMARY KEY,
+		message_id TEXT NOT NULL DEFAULT '',
+		snapshot_json TEXT NOT NULL DEFAULT '{}',
+		updated_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_transfer_snapshots_updated ON transfer_snapshots(updated_at)`,
 	`CREATE TABLE IF NOT EXISTS transfer_resume_migrations (
 		id INTEGER PRIMARY KEY CHECK(id = 1),
 		status TEXT NOT NULL DEFAULT 'pending',

@@ -161,6 +161,13 @@ export interface TransferProgress {
   phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'writing' | 'durability_sync' | 'checkpoint_persist' | 'ack_emit' | 'verifying' | 'finalizing' | 'waiting_network' | 'retrying' | 'paused' | 'paused_local' | 'paused_peer' | 'paused_network_unstable' | 'resuming' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
 }
 
+export interface TransferSnapshot extends TransferProgress {
+  attachmentId: string
+  messageId?: string
+  transferId?: string
+  peerDeviceId?: string
+}
+
 export type TransferProgressByDirection = Partial<Record<TransferProgress['direction'], TransferProgress>>
 
 export interface NetworkStatus {

@@ -77,7 +77,7 @@
                   <div class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" role="button" tabindex="0" :aria-busy="imageTransferActive(message)" @click="openImage(message)" @dblclick.stop.prevent="openImage(message)" @keydown.enter.space.prevent="openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
-                    <div v-if="imageTransferActive(message)" class="image-transfer-mask" :class="{ 'is-paused': attachmentIsPaused(message) }"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span class="image-transfer-status">{{ transferProgressLabel(message) }}</span><span class="image-transfer-actions"><button type="button" class="image-transfer-details" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="attachmentActionBusy(message)" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button class="image-transfer-cancel" size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
+                    <div v-if="imageTransferActive(message)" class="image-transfer-mask" :class="{ 'is-paused': attachmentIsPaused(message) }"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span class="image-transfer-status">{{ transferProgressLabel(message) }}</span><span class="image-transfer-actions"><button type="button" class="image-transfer-details" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="false" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button class="image-transfer-cancel" size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                   </div>
                   <div v-if="attachmentNeedsDecision(message)" class="attachment-actions">
                     <a-button size="mini" type="primary" :loading="attachmentActionBusy(message)" @click.stop.prevent="acceptAttachment(message)">接收</a-button>
@@ -98,7 +98,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span class="attachment-pending-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="attachmentActionBusy(message)" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用时间 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
+                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="false" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用时间 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
@@ -531,7 +531,29 @@ function requestDeviceLabel(request: FriendRequest) { const peer = store.peers.f
 function peerDeviceLabel(peer: Peer) { return [peer.platform, peer.osVersion].filter(Boolean).join(' · ') || '未知设备' }
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches); isDark.value = Boolean(dark); const windowBackground = dark ? '#0f1115' : '#edf0f3'; document.documentElement.style.setProperty('--window-corner-bg', windowBackground); document.body.style.backgroundColor = windowBackground; if (dark) { document.body.setAttribute('arco-theme', 'dark'); document.body.classList.add('flyqpro-dark') } else { document.body.removeAttribute('arco-theme'); document.body.classList.remove('flyqpro-dark') } }
 async function refreshMyQRCode() { try { myQRCode.value = await ChatService.GetMyQRCode() } catch { myQRCode.value = '' } }
-async function load() { try { store.profile = await ChatService.GetProfile(); Object.assign(editProfile, store.profile); applyTheme(store.profile.theme); deviceInfo.value = await ChatService.GetDeviceInfo(); await refreshMyQRCode(); appVersion.value = await ChatService.GetAppVersion(); if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份'); store.setDeviceId(deviceInfo.value?.deviceId || ''); store.peers = await ChatService.ListPeers(); store.requests = await ChatService.ListFriendRequests(); store.conversations = await ChatService.ListConversations(); store.network = await ChatService.NetworkStatus(); if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false) } catch (error: any) { Message.error(error?.message || '初始化聊天服务失败') } }
+async function load() {
+  try {
+    store.profile = await ChatService.GetProfile()
+    Object.assign(editProfile, store.profile)
+    applyTheme(store.profile.theme)
+    deviceInfo.value = await ChatService.GetDeviceInfo()
+    await refreshMyQRCode()
+    appVersion.value = await ChatService.GetAppVersion()
+    if (deviceInfo.value?.identityStatus === 'hardware_identity_unavailable') Message.warning('系统安全凭据不可用，当前设备已生成新的身份')
+    store.setDeviceId(deviceInfo.value?.deviceId || '')
+    store.peers = await ChatService.ListPeers()
+    store.requests = await ChatService.ListFriendRequests()
+    store.conversations = await ChatService.ListConversations()
+    store.network = await ChatService.NetworkStatus()
+    try {
+      const [activeTransfers, recoveryTasks] = await Promise.all([ChatService.ListActiveTransfers(), ChatService.ListRecoveryTasks()])
+      store.hydrateTransferSnapshots([...(activeTransfers || []), ...(recoveryTasks || [])] as any)
+    } catch (error) { console.warn('[FlyQPro] 恢复传输快照失败', error) }
+    if (section.value === 'friends' && !activePeer.value && store.friends.length) void loadConversation(store.friends[0], false)
+  } catch (error: any) {
+    Message.error(error?.message || '初始化聊天服务失败')
+  }
+}
 type IdleWindow = Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void }
 function clearMenuWarmupTask() {
   const idleWindow = window as IdleWindow
@@ -695,11 +717,30 @@ async function loadConversation(peer: Peer, markRead: boolean, preserveViewport 
     const id = await ChatService.EnsureConversation(peer.deviceId)
     const messages = await ChatService.ListMessages(id)
     store.messages[id] = messages
+    void restoreConversationTransferSnapshots(messages)
     if (forceLatest) localStorage.removeItem(chatScrollKey(peer.deviceId))
     const shouldRestore = forceLatest || !(preserveViewport && previousPeerId === peer.deviceId && cachedMessages)
     if (shouldRestore) await restoreChatScrollPosition(peer.deviceId)
     if (markRead) await ChatService.MarkConversationRead(peer.deviceId)
   } catch { /* the conversation can still be restored from the live store */ }
+}
+async function restoreConversationTransferSnapshots(messages: any[]) {
+  const attachments = (messages || []).filter((message) => message?.attachmentId)
+  await Promise.all(attachments.map(async (message) => {
+    try {
+      const snapshot: any = await ChatService.GetTransferDiagnostics(message.attachmentId)
+      if (!snapshot || (!snapshot.attachmentId && !snapshot.transferId)) return
+      store.handleEvent('transfer-progress', {
+        ...snapshot,
+        attachmentId: snapshot.attachmentId || message.attachmentId,
+        phase: snapshot.phase || snapshot.state || 'transferring',
+        direction: snapshot.direction || (message.senderDeviceId === deviceInfo.value?.deviceId ? 'send' : 'receive'),
+        transferred: snapshot.transferred || snapshot.durableBytes || 0,
+        total: snapshot.total || message.attachmentSize || 0,
+        percent: snapshot.percent || 0,
+      })
+    } catch { /* old messages may not have a persisted transfer snapshot */ }
+  }))
 }
 async function refreshPeerAvatar(deviceId: string) {
   try { await ChatService.RefreshPeerAvatar(deviceId) } catch { /* best effort; keep the cached avatar */ }
@@ -871,6 +912,17 @@ async function appendSentMessage(message: any) {
   if (isNewActiveMessage) scheduleScrollToBottom(false, 'animated')
   await nextTick()
 }
+function queueAttachmentSend(peerId: string, file: string, image = false) {
+  const request = image ? ChatService.SendImage(peerId, file) : ChatService.SendFile(peerId, file)
+  void request.then(async (message: any) => {
+    // The backend emits the message before data I/O starts. This completion
+    // result is still applied idempotently for older Wails event timing.
+    await appendSentMessage(message)
+    notifyAttachmentResult(message)
+  }).catch((error: any) => {
+    Message.error(error?.message || '发送附件失败')
+  })
+}
 async function sendMessage() {
   // Enter can produce several key events before the asynchronous Wails call
   // returns. Claim the current draft synchronously so a rapid Enter or button
@@ -897,13 +949,10 @@ async function sendMessage() {
       await appendSentMessage(message)
     }
     for (const image of images) {
-      const message = await ChatService.SendImage(peer.deviceId, image)
-      await appendSentMessage(message)
+      queueAttachmentSend(peer.deviceId, image, true)
     }
     for (const file of files) {
-      const message = await ChatService.SendFile(peer.deviceId, file.path)
-      await appendSentMessage(message)
-      notifyAttachmentResult(message)
+      queueAttachmentSend(peer.deviceId, file.path)
     }
   } catch (error: any) {
     // Restore the consumed draft only when the user did not start composing a
@@ -1116,7 +1165,7 @@ async function pauseAttachment(message: any) {
 }
 async function resumeAttachment(message: any) {
   if (attachmentActionBusy(message)) return
-  if (attachmentPauseCommands[message.attachmentId]) return
+  if (attachmentPauseCommands[message.attachmentId] && attachmentLocalStates[message.attachmentId] !== 'paused') return
   const previousStatus = message.attachmentStatus
   const previousMessageStatus = message.status
   attachmentPauseCommands[message.attachmentId] = true
@@ -1134,13 +1183,13 @@ async function resumeAttachment(message: any) {
     message.status = previousMessageStatus || 'paused'
     Message.error(error?.message || '继续传输失败')
   } finally {
-    delete attachmentLocalStates[message.attachmentId]
     delete attachmentPauseCommands[message.attachmentId]
     delete attachmentActions[message.attachmentId]
   }
 }
 async function pauseOrResumeAttachment(message: any) {
-  if (attachmentPauseCommands[message?.attachmentId]) return
+  const localState = attachmentLocalStates[message?.attachmentId]
+  if (attachmentPauseCommands[message?.attachmentId] && localState !== 'paused') return
   if (transferCanResume(message)) return resumeAttachment(message)
   if (transferCanPause(message)) return pauseAttachment(message)
 }
@@ -1155,16 +1204,26 @@ function attachmentIsPaused(message: any): boolean {
     || ['paused', 'paused_local', 'paused_peer', 'paused_network_unstable'].includes(progress?.phase)
 }
 function transferCanPause(message: any): boolean {
+  if (attachmentLocalStates[message?.attachmentId] === 'resuming') return false
   const phase = transferProgressFor(message)?.phase
   return !attachmentPauseCommands[message?.attachmentId] && !attachmentIsPaused(message) && ['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'resuming', 'retrying', 'waiting_network'].includes(phase)
 }
 function transferCanResume(message: any): boolean {
+  const localState = attachmentLocalStates[message?.attachmentId]
+  if (localState === 'resuming') return false
+  if (localState === 'paused') return true
   const progress = transferProgressFor(message)
   return !attachmentPauseCommands[message?.attachmentId] && (attachmentIsPaused(message) || ['paused', 'paused_local', 'paused_peer', 'paused_network_unstable'].includes(progress?.phase))
 }
-function transferPrimaryActionEnabled(message: any): boolean { return !attachmentPauseCommands[message?.attachmentId] && (transferCanPause(message) || transferCanResume(message)) }
+function transferPrimaryActionEnabled(message: any): boolean {
+  const localState = attachmentLocalStates[message?.attachmentId]
+  if (localState === 'resuming') return false
+  if (localState === 'paused') return true
+  return !attachmentPauseCommands[message?.attachmentId] && (transferCanPause(message) || transferCanResume(message))
+}
 function transferPrimaryActionLabel(message: any): string {
-  if (attachmentPauseCommands[message?.attachmentId]) return attachmentLocalStates[message?.attachmentId] === 'resuming' ? '恢复中' : '继续'
+  if (attachmentLocalStates[message?.attachmentId] === 'resuming') return '恢复中'
+  if (attachmentPauseCommands[message?.attachmentId]) return '继续'
   return transferCanResume(message) ? '继续' : '暂停'
 }
 function notifyAttachmentResult(message: any) {
@@ -1218,21 +1277,21 @@ const detailProgressEta = computed(() => {
   return seconds > 0 ? formatDuration(seconds * 1000) : '暂不可估算'
 })
 const detailProgressElapsed = computed(() => formatDuration(detailProgress.value?.elapsedMs))
-const detailIsReceiver = computed(() => detailProgress.value?.direction === 'receive')
+const detailIsReceiver = computed(() => Boolean(attachmentDetailsMessage.value && attachmentDetailsMessage.value.senderDeviceId !== deviceInfo.value?.deviceId))
 const detailReceivedBytes = computed<number | undefined>(() => {
   const progress = detailProgress.value
   if (!progress) return undefined
-  const value = detailIsReceiver.value ? (progress.durableBytes ?? progress.transferred ?? progress.received) : progress.remoteReceived
+  const value = detailIsReceiver.value ? (progress.durableBytes ?? progress.transferred ?? progress.received) : (progress.remoteReceived ?? progress.transferred)
   if (value === undefined || value === null) return undefined
   return Math.max(0, Number(value || 0))
 })
-const detailSentBytes = computed(() => Math.max(0, Number(detailProgress.value?.sent ?? detailProgress.value?.transferred ?? 0)))
+const detailSentBytes = computed(() => Math.max(0, Number(detailProgress.value?.sent ?? (detailIsReceiver.value ? 0 : detailProgress.value?.transferred) ?? 0)))
 const detailTotalBytes = computed(() => Math.max(0, Number(detailProgress.value?.total || attachmentDetails.value?.fileSize || attachmentDetailsMessage.value?.attachmentSize || 0)))
 const detailNetworkThroughput = computed(() => {
   if (!detailProgress.value) return { primary: '暂未提供', secondary: '' }
   return detailIsReceiver.value
-    ? detailProgressSpeed.value
-    : detailProgressSpeed.value
+    ? formatTransferRate(Number(detailProgress.value?.speed || detailProgress.value?.windowThroughput || 0))
+    : formatTransferRate(Number(detailProgress.value?.confirmedThroughput || detailProgress.value?.speed || 0))
 })
 const detailAckLatency = computed(() => {
   if (!detailProgress.value) return '暂未提供'
@@ -1250,15 +1309,42 @@ function tuningStateLabel(state?: string) { return ({ probing: '探测中', obse
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
 const terminalTransferPhases = new Set(['completed', 'canceled', 'rejected', 'failed'])
 const senderLifecyclePhases = new Set(['queued', 'transferring', 'resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'rejected', 'failed'])
+const resumeActivePhases = new Set(['queued', 'transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'verifying', 'finalizing', 'completed', 'failed', 'canceled', 'rejected'])
 function transferProgressFor(message: any): any {
   if (!message?.attachmentId) return undefined
   const attachmentId = message.attachmentId
   const directions = store.transferProgressByDirection[attachmentId] || store.transferHistoryByDirection[attachmentId]
-  if (!directions) return store.transferProgress[attachmentId] || store.transferHistory[attachmentId]
+  if (!directions) {
+    const snapshot = { ...(store.transferProgress[attachmentId] || store.transferHistory[attachmentId] || {}) }
+    const localState = attachmentLocalStates[attachmentId]
+    if (localState === 'paused') {
+      snapshot.phase = 'paused_local'
+      snapshot.state = 'paused_local'
+    } else if (localState === 'resuming') {
+      snapshot.phase = 'resuming'
+      snapshot.state = 'active'
+    }
+    return snapshot.phase ? snapshot : undefined
+  }
   const mine = message.senderDeviceId === deviceInfo.value?.deviceId
   const preferred = mine ? directions['remote-receive'] : directions.receive
   const diagnostics = mine ? directions.send : directions.receive
-  if (!mine) return preferred || diagnostics || directions.send || directions.receive
+  const localState = attachmentLocalStates[attachmentId]
+  if (localState === 'resuming') {
+    const lifecycle = mine ? diagnostics : preferred
+    if (lifecycle && resumeActivePhases.has(lifecycle.phase)) delete attachmentLocalStates[attachmentId]
+  }
+  if (!mine) {
+    const merged = { ...(preferred || diagnostics || directions.send || directions.receive) }
+    if (localState === 'paused') {
+      merged.phase = 'paused_local'
+      merged.state = 'paused_local'
+    } else if (localState === 'resuming') {
+      merged.phase = 'resuming'
+      merged.state = 'active'
+    }
+    return merged
+  }
   // The preferred direction is the receiver-durable snapshot. Keep local
   // state/error fields for sender UX, but never let local socket metrics
   // overwrite receiver speed, bytes, or tuning parameters.
@@ -1284,6 +1370,13 @@ function transferProgressFor(message: any): any {
     merged.averageSpeed = undefined
     merged.peakSpeed = undefined
     merged.etaSeconds = undefined
+  }
+  if (localState === 'paused') {
+    merged.phase = 'paused_local'
+    merged.state = 'paused_local'
+  } else if (localState === 'resuming') {
+    merged.phase = 'resuming'
+    merged.state = 'active'
   }
   // A v3 sender receives the final EndFile confirmation on the local send
   // projection. Prefer an explicit remote terminal snapshot, but allow the
@@ -1628,6 +1721,12 @@ async function showAttachmentDetails(message: any) {
   attachmentDetails.value = attachmentDetailsFallback(message)
   attachmentDetailsVisible.value = true
   try {
+    try {
+      const snapshot: any = await ChatService.GetTransferDiagnostics(message.attachmentId)
+      if (snapshot?.attachmentId || snapshot?.transferId) {
+        store.handleEvent('transfer-progress', { ...snapshot, attachmentId: snapshot.attachmentId || message.attachmentId, phase: snapshot.phase || snapshot.state || 'transferring', direction: snapshot.direction || (message.senderDeviceId === deviceInfo.value?.deviceId ? 'send' : 'receive'), transferred: snapshot.transferred || snapshot.durableBytes || 0, total: snapshot.total || message.attachmentSize || 0, percent: snapshot.percent || 0 })
+      }
+    } catch { /* a newly queued attachment may not have a diagnostic row yet */ }
     const details = await ChatService.GetAttachmentDetails(message.attachmentId)
     if (attachmentDetailsMessage.value?.attachmentId === message.attachmentId) attachmentDetails.value = details
   } catch (error: any) {
