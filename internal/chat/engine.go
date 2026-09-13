@@ -84,6 +84,7 @@ type transferMetric struct {
 	activeElapsed    time.Duration
 	lastPhase        string
 	generation       uint64
+	metricGeneration uint64
 	peakSpeed        float64
 	smoothedSpeed    float64
 	speedSampleAt    time.Time
@@ -1437,6 +1438,7 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		retryable:           resumeState.Retryable,
 		retries:             resumeState.Retries,
 		generation:          resumeState.Generation,
+		metricGeneration:    metricGenerationOrDefault(resumeState.MetricGeneration),
 		sessionID:           resumeState.SessionID,
 		metricSource:        "receiver-durable",
 		metricSeq:           v3MetricSeq,
@@ -2361,11 +2363,16 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 		return err
 	}
 	transfer := &incomingFile{v3Done: make(chan string, 1), finalizationDone: make(chan struct{}), file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
-	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, Direction: "receive", FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, State: TransferActive, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
+	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, Direction: "receive", FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, State: TransferActive, MetricGeneration: 1, MetricStartedBytes: 0, MetricLastBytes: resumeOffset, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
 	if resumeMatches && len(resumeState.CompletedRanges) > 0 {
 		transfer.resumeState.CheckpointSeq = resumeState.CheckpointSeq
 		transfer.resumeState.SessionID = resumeState.SessionID
 		transfer.resumeState.Generation = resumeState.Generation
+		transfer.resumeState.MetricGeneration = metricGenerationOrDefault(resumeState.MetricGeneration)
+		transfer.resumeState.ElapsedMs = resumeState.ElapsedMs
+		transfer.resumeState.MetricSeq = resumeState.MetricSeq
+		transfer.resumeState.MetricStartedBytes = resumeState.MetricStartedBytes
+		transfer.resumeState.MetricLastBytes = maxInt64(resumeState.MetricLastBytes, resumeOffset)
 		transfer.resumeState.Retries = resumeState.Retries
 		transfer.resumeState.ErrorCode = resumeState.ErrorCode
 		transfer.resumeState.Retryable = resumeState.Retryable
@@ -3025,6 +3032,7 @@ func (e *Engine) recordIncomingFinalizationFailure(attachmentID string, transfer
 type transferProgressOptions struct {
 	sessionID           string
 	generation          uint64
+	metricGeneration    uint64
 	slotID              int
 	retries             int
 	errorCode           string
@@ -3076,8 +3084,16 @@ func transferPhaseCountsElapsed(phase string) bool {
 	}
 }
 
-func advanceTransferMetric(metric transferMetric, exists bool, now time.Time, transferred int64, phase string, generation uint64) (transferMetric, bool) {
-	reset := !exists || transferred < metric.lastBytes || (generation != 0 && generation != metric.generation)
+func metricGenerationOrDefault(value uint64) uint64 {
+	if value == 0 {
+		return 1
+	}
+	return value
+}
+
+func advanceTransferMetricWithLogicalGeneration(metric transferMetric, exists bool, now time.Time, transferred int64, phase string, generation, logicalGeneration uint64) (transferMetric, bool) {
+	logicalGeneration = metricGenerationOrDefault(logicalGeneration)
+	reset := !exists || (metric.metricGeneration != 0 && metric.metricGeneration != logicalGeneration)
 	if reset {
 		metric = transferMetric{
 			startedAt:        now,
@@ -3086,6 +3102,7 @@ func advanceTransferMetric(metric transferMetric, exists bool, now time.Time, tr
 			lastBytes:        transferred,
 			lastPhase:        phase,
 			generation:       generation,
+			metricGeneration: logicalGeneration,
 			speedSampleAt:    now,
 			speedSampleBytes: transferred,
 		}
@@ -3103,12 +3120,20 @@ func advanceTransferMetric(metric transferMetric, exists bool, now time.Time, tr
 		metric.speedSampleBytes = transferred
 	}
 	metric.lastAt = now
-	metric.lastBytes = transferred
+	if transferred > metric.lastBytes {
+		metric.lastBytes = transferred
+	}
 	metric.lastPhase = phase
 	if generation != 0 {
 		metric.generation = generation
 	}
 	return metric, false
+}
+
+// Keep the old helper for existing tests and callers. Network generation is
+// only used as the logical generation by legacy callers.
+func advanceTransferMetric(metric transferMetric, exists bool, now time.Time, transferred int64, phase string, generation uint64) (transferMetric, bool) {
+	return advanceTransferMetricWithLogicalGeneration(metric, exists, now, transferred, phase, generation, generation)
 }
 
 func smoothTransferSpeed(previous, sample float64, elapsed time.Duration) float64 {
@@ -3143,6 +3168,43 @@ func transferProgressPercent(transferred, total int64, phase string) int {
 		return 99
 	}
 	return percent
+}
+
+func loadPersistedTransferMetric(attachmentID, direction string, fallbackBytes int64, logicalGeneration uint64) (transferMetric, bool) {
+	snapshot, err := loadTransferSnapshotDirection(context.Background(), attachmentID, direction)
+	if err != nil {
+		if legacy, legacyErr := loadTransferSnapshot(context.Background(), attachmentID); legacyErr == nil && (legacy.Direction == "" || legacy.Direction == direction) {
+			snapshot, err = legacy, nil
+		}
+	}
+	if err != nil {
+		if state, stateErr := loadTransferResumeRecord(context.Background(), attachmentID); stateErr == nil && (direction == "receive" || direction == state.Direction) {
+			now := time.Now()
+			return transferMetric{startedAt: now, startedBytes: state.MetricStartedBytes, lastAt: now, lastBytes: maxInt64(state.MetricLastBytes, fallbackBytes), activeElapsed: time.Duration(state.ElapsedMs) * time.Millisecond, lastPhase: string(state.State), generation: state.Generation, metricGeneration: metricGenerationOrDefault(state.MetricGeneration), speedSampleAt: now, speedSampleBytes: maxInt64(state.MetricLastBytes, fallbackBytes)}, true
+		}
+		return transferMetric{}, false
+	}
+	now := time.Now()
+	lastBytes := maxInt64(snapshot.MetricLastBytes, maxInt64(snapshot.DurableBytes, maxInt64(snapshot.Transferred, fallbackBytes)))
+	startedBytes := snapshot.MetricStartedBytes
+	if startedBytes < 0 || startedBytes > lastBytes {
+		startedBytes = 0
+	}
+	return transferMetric{
+		startedAt: now, startedBytes: startedBytes, lastAt: now, lastBytes: lastBytes,
+		activeElapsed: time.Duration(snapshot.ElapsedMs) * time.Millisecond,
+		lastPhase:     snapshot.Phase, generation: snapshot.Generation,
+		metricGeneration: metricGenerationOrDefault(snapshot.MetricGeneration),
+		peakSpeed:        snapshot.PeakSpeed, smoothedSpeed: snapshot.Speed,
+		speedSampleAt: now, speedSampleBytes: lastBytes,
+	}, true
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
@@ -3186,6 +3248,18 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		value["sessionId"] = option.sessionID
 	}
 	value["generation"] = option.generation
+	logicalGeneration := option.metricGeneration
+	if logicalGeneration == 0 {
+		if persisted, err := loadTransferSnapshotDirection(context.Background(), attachmentID, direction); err == nil {
+			logicalGeneration = persisted.MetricGeneration
+		} else if persisted, err := loadTransferSnapshot(context.Background(), attachmentID); err == nil && (persisted.Direction == "" || persisted.Direction == direction) {
+			logicalGeneration = persisted.MetricGeneration
+		} else if state, stateErr := loadTransferResumeRecord(context.Background(), attachmentID); stateErr == nil {
+			logicalGeneration = state.MetricGeneration
+		}
+	}
+	logicalGeneration = metricGenerationOrDefault(logicalGeneration)
+	value["metricGeneration"] = logicalGeneration
 	if option.slotID > 0 {
 		value["slotId"] = option.slotID
 	}
@@ -3292,8 +3366,13 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	}
 	metricKey := attachmentID + "|" + direction
 	metric, ok := e.transferMetrics[metricKey]
+	if !ok {
+		if restored, restoredOK := loadPersistedTransferMetric(attachmentID, direction, transferred, logicalGeneration); restoredOK {
+			metric, ok = restored, true
+		}
+	}
 	now := time.Now()
-	metric, reset := advanceTransferMetric(metric, ok, now, transferred, phase, option.generation)
+	metric, reset := advanceTransferMetricWithLogicalGeneration(metric, ok, now, transferred, phase, option.generation, logicalGeneration)
 	var rawSpeed float64
 	if !reset && displayMetrics && transferPhaseCountsElapsed(phase) {
 		sampleStartedAt := metric.speedSampleAt
@@ -3333,16 +3412,18 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if displayMetrics && metric.peakSpeed > 0 {
 		value["peakSpeed"] = int64(metric.peakSpeed)
 	}
-	if displayMetrics && !metric.startedAt.IsZero() {
+	if !metric.startedAt.IsZero() {
 		elapsedMs := metric.activeElapsed.Milliseconds()
-		if elapsedMs > 0 {
+		value["elapsedMs"] = elapsedMs
+		value["metricStartedBytes"] = metric.startedBytes
+		value["metricLastBytes"] = metric.lastBytes
+		if displayMetrics && elapsedMs > 0 {
 			measuredBytes := transferred - metric.startedBytes
 			if measuredBytes < 0 {
 				measuredBytes = 0
 			}
 			average := float64(measuredBytes) / (float64(elapsedMs) / 1000)
 			value["averageSpeed"] = int64(average)
-			value["elapsedMs"] = elapsedMs
 			etaSpeed := metric.smoothedSpeed
 			if etaSpeed <= 0 {
 				etaSpeed = average
@@ -3369,7 +3450,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	// Persist checkpoint and lifecycle projections, rather than every socket
 	// progress tick. This keeps the UI recoverable without putting SQLite on the
 	// hot data path for each chunk.
-	persistSnapshot := option.checkpointSeq > 0 || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
+	persistSnapshot := option.checkpointSeq > 0 || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "retrying" || phase == "waiting_network" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
 	if persistSnapshot {
 		if snapshot, snapshotErr := snapshotFromProgress(value); snapshotErr == nil {
 			if snapshot.State == "" {
@@ -3377,6 +3458,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 			}
 			_ = saveTransferSnapshot(context.Background(), snapshot)
 		}
+		_ = updateTransferResumeMetric(context.Background(), attachmentID, metric.metricGeneration, metric.activeElapsed.Milliseconds(), metric.startedBytes, metric.lastBytes, option.metricSeq)
 	}
 	switch direction {
 	case "send":
@@ -5519,7 +5601,14 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 		MessageID: message.MessageID, SenderDeviceID: deviceID, Direction: "send",
 		FileName: message.AttachmentName, FileSize: message.AttachmentSize,
 		SHA256: sum, TargetPath: path, SourceMTimeNS: sourceMTimeNS,
-		TransferMode: v3TransferMode, State: TransferQueued,
+		TransferMode: v3TransferMode, State: TransferQueued, MetricGeneration: 1,
+	}
+	if saved, savedErr := loadTransferResumeState(message.AttachmentID); savedErr == nil && saved.Direction == "send" && !outgoingResumeSourceChanged(saved, sourceInfo) {
+		resumeState.MetricGeneration = metricGenerationOrDefault(saved.MetricGeneration)
+		resumeState.ElapsedMs = saved.ElapsedMs
+		resumeState.MetricSeq = saved.MetricSeq
+		resumeState.MetricStartedBytes = saved.MetricStartedBytes
+		resumeState.MetricLastBytes = saved.MetricLastBytes
 	}
 	if err := persistOutgoingResumeState(resumeState); err != nil {
 		return newTransferError(ErrSessionNotReady, true, err)

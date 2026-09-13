@@ -19,28 +19,33 @@ const (
 )
 
 type transferResumeState struct {
-	Version         int               `json:"version"`
-	TransferID      string            `json:"transferId"`
-	AttachmentID    string            `json:"attachmentId"`
-	MessageID       string            `json:"messageId"`
-	SenderDeviceID  string            `json:"senderDeviceId"`
-	Direction       string            `json:"direction"`
-	SessionID       string            `json:"sessionId"`
-	Generation      uint64            `json:"generation"`
-	CheckpointSeq   uint64            `json:"checkpointSeq"`
-	FileName        string            `json:"fileName"`
-	FileSize        int64             `json:"fileSize"`
-	SHA256          string            `json:"sha256"`
-	SourceMTimeNS   int64             `json:"sourceMtimeNs"`
-	Retries         int               `json:"retries"`
-	ErrorCode       TransferErrorCode `json:"errorCode"`
-	Retryable       bool              `json:"retryable"`
-	TempPath        string            `json:"tempPath"`
-	TargetPath      string            `json:"targetPath"`
-	TransferMode    string            `json:"transferMode"`
-	State           TransferState     `json:"state"`
-	CompletedRanges []TransferRange   `json:"completedRanges"`
-	UpdatedAt       time.Time         `json:"updatedAt"`
+	Version            int               `json:"version"`
+	TransferID         string            `json:"transferId"`
+	AttachmentID       string            `json:"attachmentId"`
+	MessageID          string            `json:"messageId"`
+	SenderDeviceID     string            `json:"senderDeviceId"`
+	Direction          string            `json:"direction"`
+	SessionID          string            `json:"sessionId"`
+	Generation         uint64            `json:"generation"`
+	MetricGeneration   uint64            `json:"metricGeneration"`
+	CheckpointSeq      uint64            `json:"checkpointSeq"`
+	MetricSeq          uint64            `json:"metricSeq"`
+	ElapsedMs          int64             `json:"elapsedMs"`
+	MetricStartedBytes int64             `json:"metricStartedBytes"`
+	MetricLastBytes    int64             `json:"metricLastBytes"`
+	FileName           string            `json:"fileName"`
+	FileSize           int64             `json:"fileSize"`
+	SHA256             string            `json:"sha256"`
+	SourceMTimeNS      int64             `json:"sourceMtimeNs"`
+	Retries            int               `json:"retries"`
+	ErrorCode          TransferErrorCode `json:"errorCode"`
+	Retryable          bool              `json:"retryable"`
+	TempPath           string            `json:"tempPath"`
+	TargetPath         string            `json:"targetPath"`
+	TransferMode       string            `json:"transferMode"`
+	State              TransferState     `json:"state"`
+	CompletedRanges    []TransferRange   `json:"completedRanges"`
+	UpdatedAt          time.Time         `json:"updatedAt"`
 }
 
 func validTransferIdentifier(value string) bool {
@@ -115,6 +120,7 @@ func saveTransferResumeState(state transferResumeState) error {
 	if state.Direction == "" {
 		state.Direction = "receive"
 	}
+	state.MetricGeneration = metricGenerationOrDefault(state.MetricGeneration)
 	// A previous build may have committed only the compatibility sidecar. Use
 	// its sequence as well so fallback-only checkpoints remain monotonic.
 	if data, readErr := os.ReadFile(path); readErr == nil {
@@ -208,7 +214,7 @@ func loadTransferResumeState(attachmentID string) (transferResumeState, error) {
 		return transferResumeState{}, fmt.Errorf("恢复状态无效: sidecar=%v; sqlite=%v", readErr, databaseErr)
 	}
 	state := sidecarState
-	if databaseErr == nil && (readErr != nil || databaseState.CheckpointSeq > sidecarState.CheckpointSeq) {
+	if databaseErr == nil && (readErr != nil || databaseState.CheckpointSeq > sidecarState.CheckpointSeq || (databaseState.CheckpointSeq == sidecarState.CheckpointSeq && databaseState.UpdatedAt.After(sidecarState.UpdatedAt))) {
 		state = databaseState
 	}
 	state.CompletedRanges = normalizeTransferRanges(state.CompletedRanges, state.FileSize)

@@ -11,44 +11,47 @@ import (
 // TransferSnapshot is the stable, transport-neutral diagnostic view exposed to
 // the desktop UI. It deliberately omits sockets and filesystem internals.
 type TransferSnapshot struct {
-	AttachmentID   string            `json:"attachmentId"`
-	TransferID     string            `json:"transferId"`
-	MessageID      string            `json:"messageId"`
-	PeerDeviceID   string            `json:"peerDeviceId"`
-	Direction      string            `json:"direction"`
-	SessionID      string            `json:"sessionId"`
-	Generation     uint64            `json:"generation"`
-	State          TransferState     `json:"state"`
-	Phase          string            `json:"phase,omitempty"`
-	Transferred    int64             `json:"transferred"`
-	DurableBytes   int64             `json:"durableBytes"`
-	Total          int64             `json:"total"`
-	Percent        int               `json:"percent"`
-	Speed          float64           `json:"speed,omitempty"`
-	AverageSpeed   float64           `json:"averageSpeed,omitempty"`
-	PeakSpeed      float64           `json:"peakSpeed,omitempty"`
-	ETAs           int64             `json:"etaSeconds,omitempty"`
-	ElapsedMs      int64             `json:"elapsedMs,omitempty"`
-	MetricSeq      uint64            `json:"metricSeq,omitempty"`
-	CheckpointSeq  uint64            `json:"checkpointSeq,omitempty"`
-	Retries        int               `json:"retries"`
-	ErrorCode      TransferErrorCode `json:"errorCode,omitempty"`
-	Retryable      bool              `json:"retryable"`
-	Verified       *bool             `json:"verified,omitempty"`
-	DiskWriteMs    int64             `json:"diskWriteMs,omitempty"`
-	AckLatencyMs   int64             `json:"ackLatencyMs,omitempty"`
-	ChunkSize      int               `json:"chunkSize,omitempty"`
-	WindowSize     int               `json:"windowSize,omitempty"`
-	WindowBytes    int64             `json:"windowBytes,omitempty"`
-	InFlightBytes  int64             `json:"inFlightBytes,omitempty"`
-	AckTargetBytes int64             `json:"ackTargetBytes,omitempty"`
-	StreamCount    int               `json:"streamCount,omitempty"`
-	ActiveStreams  int               `json:"activeStreams,omitempty"`
-	TransferMode   string            `json:"transferMode,omitempty"`
-	Transport      string            `json:"transport,omitempty"`
-	TuningState    string            `json:"tuningState,omitempty"`
-	CommittedPath  string            `json:"committedPath,omitempty"`
-	UpdatedAt      time.Time         `json:"updatedAt"`
+	AttachmentID       string            `json:"attachmentId"`
+	TransferID         string            `json:"transferId"`
+	MessageID          string            `json:"messageId"`
+	PeerDeviceID       string            `json:"peerDeviceId"`
+	Direction          string            `json:"direction"`
+	SessionID          string            `json:"sessionId"`
+	Generation         uint64            `json:"generation"`
+	MetricGeneration   uint64            `json:"metricGeneration,omitempty"`
+	State              TransferState     `json:"state"`
+	Phase              string            `json:"phase,omitempty"`
+	Transferred        int64             `json:"transferred"`
+	DurableBytes       int64             `json:"durableBytes"`
+	Total              int64             `json:"total"`
+	Percent            int               `json:"percent"`
+	Speed              float64           `json:"speed,omitempty"`
+	AverageSpeed       float64           `json:"averageSpeed,omitempty"`
+	PeakSpeed          float64           `json:"peakSpeed,omitempty"`
+	ETAs               int64             `json:"etaSeconds,omitempty"`
+	ElapsedMs          int64             `json:"elapsedMs,omitempty"`
+	MetricStartedBytes int64             `json:"metricStartedBytes,omitempty"`
+	MetricLastBytes    int64             `json:"metricLastBytes,omitempty"`
+	MetricSeq          uint64            `json:"metricSeq,omitempty"`
+	CheckpointSeq      uint64            `json:"checkpointSeq,omitempty"`
+	Retries            int               `json:"retries"`
+	ErrorCode          TransferErrorCode `json:"errorCode,omitempty"`
+	Retryable          bool              `json:"retryable"`
+	Verified           *bool             `json:"verified,omitempty"`
+	DiskWriteMs        int64             `json:"diskWriteMs,omitempty"`
+	AckLatencyMs       int64             `json:"ackLatencyMs,omitempty"`
+	ChunkSize          int               `json:"chunkSize,omitempty"`
+	WindowSize         int               `json:"windowSize,omitempty"`
+	WindowBytes        int64             `json:"windowBytes,omitempty"`
+	InFlightBytes      int64             `json:"inFlightBytes,omitempty"`
+	AckTargetBytes     int64             `json:"ackTargetBytes,omitempty"`
+	StreamCount        int               `json:"streamCount,omitempty"`
+	ActiveStreams      int               `json:"activeStreams,omitempty"`
+	TransferMode       string            `json:"transferMode,omitempty"`
+	Transport          string            `json:"transport,omitempty"`
+	TuningState        string            `json:"tuningState,omitempty"`
+	CommittedPath      string            `json:"committedPath,omitempty"`
+	UpdatedAt          time.Time         `json:"updatedAt"`
 }
 
 func snapshotFromResume(state transferResumeState) TransferSnapshot {
@@ -72,7 +75,7 @@ func snapshotFromResume(state transferResumeState) TransferSnapshot {
 			phase = "transferring"
 		}
 	}
-	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
+	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, MetricGeneration: metricGenerationOrDefault(state.MetricGeneration), State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), ElapsedMs: state.ElapsedMs, MetricSeq: state.MetricSeq, MetricStartedBytes: state.MetricStartedBytes, MetricLastBytes: state.MetricLastBytes, Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
 }
 
 func snapshotFromProgress(value map[string]any) (TransferSnapshot, error) {
@@ -111,6 +114,9 @@ func (e *Engine) ListActiveTransfers() []TransferSnapshot {
 		s.TransferID, s.MessageID, s.PeerDeviceID, s.Direction, s.Total = id, transfer.messageID, transfer.senderID, "receive", transfer.expected
 		s.Transferred, s.DurableBytes = transfer.received, transfer.durableBytes
 		s.State, s.UpdatedAt = TransferActive, time.Now().UTC()
+		if persisted, err := loadTransferSnapshotDirection(context.Background(), id, "receive"); err == nil {
+			s = mergeTransferSnapshot(persisted, s)
+		}
 		seen[id] = s
 	}
 	for id, transfer := range e.outgoing {
@@ -118,6 +124,9 @@ func (e *Engine) ListActiveTransfers() []TransferSnapshot {
 			continue
 		}
 		s := TransferSnapshot{AttachmentID: id, TransferID: id, MessageID: transfer.message.MessageID, PeerDeviceID: transfer.peerID, Direction: "send", State: TransferActive, Phase: "transferring", Total: transfer.message.AttachmentSize, Transferred: e.lastTransferBytes(id, "send"), UpdatedAt: time.Now().UTC()}
+		if persisted, err := loadTransferSnapshotDirection(context.Background(), id, "send"); err == nil {
+			s = mergeTransferSnapshot(persisted, s)
+		}
 		seen[id] = s
 	}
 	e.mu.RUnlock()
@@ -144,6 +153,18 @@ func (e *Engine) ListRecoveryTasks() []TransferSnapshot {
 }
 
 func (e *Engine) GetTransferDiagnostics(transferID string) (TransferSnapshot, error) {
+	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "send"); snapshotErr == nil {
+		return snapshot, nil
+	}
+	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "receive"); snapshotErr == nil {
+		return snapshot, nil
+	}
+	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "remote-receive"); snapshotErr == nil {
+		return snapshot, nil
+	}
+	if snapshot, snapshotErr := loadTransferSnapshot(context.Background(), transferID); snapshotErr == nil {
+		return snapshot, nil
+	}
 	for _, item := range e.ListActiveTransfers() {
 		if item.TransferID == transferID || item.AttachmentID == transferID {
 			return item, nil
@@ -157,10 +178,32 @@ func (e *Engine) GetTransferDiagnostics(transferID string) (TransferSnapshot, er
 			}
 		}
 	}
-	if snapshot, snapshotErr := loadTransferSnapshot(context.Background(), transferID); snapshotErr == nil {
-		return snapshot, nil
-	}
 	return TransferSnapshot{}, fmt.Errorf("transfer not found")
+}
+
+func mergeTransferSnapshot(primary, fallback TransferSnapshot) TransferSnapshot {
+	if primary.AttachmentID == "" {
+		return fallback
+	}
+	if primary.ElapsedMs < fallback.ElapsedMs {
+		primary.ElapsedMs = fallback.ElapsedMs
+	}
+	if primary.MetricGeneration == 0 {
+		primary.MetricGeneration = fallback.MetricGeneration
+	}
+	if primary.Total == 0 {
+		primary.Total = fallback.Total
+	}
+	if primary.Transferred < fallback.Transferred && primary.CheckpointSeq <= fallback.CheckpointSeq {
+		primary.Transferred, primary.DurableBytes = fallback.Transferred, fallback.DurableBytes
+	}
+	if primary.MessageID == "" {
+		primary.MessageID = fallback.MessageID
+	}
+	if primary.Direction == "" {
+		primary.Direction = fallback.Direction
+	}
+	return primary
 }
 
 // ListTransferSnapshots restores the latest transfer projection after a

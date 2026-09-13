@@ -80,6 +80,50 @@ func TestTransferSnapshotRoundTripKeepsTerminalMetrics(t *testing.T) {
 	}
 }
 
+func TestDirectionalTransferSnapshotsDoNotOverwriteElapsedMetrics(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	save := func(direction string, elapsed int64) {
+		t.Helper()
+		if err := saveTransferSnapshot(ctx, TransferSnapshot{
+			AttachmentID: "directional-snapshot", TransferID: "directional-snapshot", Direction: direction,
+			State: TransferActive, Phase: "receiving", Total: 100, Transferred: elapsed,
+			DurableBytes: elapsed, ElapsedMs: elapsed * 100, MetricGeneration: 2,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("send", 20)
+	save("remote-receive", 80)
+	send, err := loadTransferSnapshotDirection(ctx, "directional-snapshot", "send")
+	if err != nil || send.ElapsedMs != 2000 {
+		t.Fatalf("send snapshot was overwritten: snapshot=%+v err=%v", send, err)
+	}
+	remote, err := loadTransferSnapshotDirection(ctx, "directional-snapshot", "remote-receive")
+	if err != nil || remote.ElapsedMs != 8000 {
+		t.Fatalf("remote snapshot was overwritten: snapshot=%+v err=%v", remote, err)
+	}
+}
+
+func TestResumeSnapshotRestoresElapsedMetricFields(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	state := transferResumeState{AttachmentID: "elapsed-resume", TransferID: "elapsed-resume", Direction: "receive", FileSize: 100, State: TransferPausedLocal, MetricGeneration: 4, ElapsedMs: 3700, MetricStartedBytes: 5, MetricLastBytes: 60}
+	if err := saveTransferResumeRecord(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTransferResumeRecord(ctx, state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MetricGeneration != 4 || loaded.ElapsedMs != 3700 || loaded.MetricStartedBytes != 5 || loaded.MetricLastBytes != 60 {
+		t.Fatalf("metric fields were not persisted: %+v", loaded)
+	}
+	snapshot := snapshotFromResume(loaded)
+	if snapshot.ElapsedMs != 3700 || snapshot.MetricGeneration != 4 || snapshot.MetricLastBytes != 60 {
+		t.Fatalf("resume snapshot lost metric fields: %+v", snapshot)
+	}
+}
+
 func TestResumeIncomingAttachmentKeepsAcceptedResumingState(t *testing.T) {
 	ctx := openSharedFolderTestDatabase(t)
 	conversationID, err := EnsureConversation(ctx, "resume-peer")

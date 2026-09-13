@@ -110,6 +110,7 @@ export interface TransferProgress {
   transferId?: string
   sessionId?: string
   generation?: number
+  metricGeneration?: number
   slotId?: number
   retries?: number
   errorCode?: string
@@ -131,6 +132,8 @@ export interface TransferProgress {
   rawSpeed?: number
   etaSeconds?: number
   elapsedMs?: number
+  metricStartedBytes?: number
+  metricLastBytes?: number
   chunkSize?: number
   windowSize?: number
   windowBytes?: number

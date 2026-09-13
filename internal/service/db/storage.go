@@ -199,6 +199,11 @@ func ensureSchemaColumns(ctx context.Context, database gdb.DB) error {
 		{"transfer_resumes", "retries", "INTEGER NOT NULL DEFAULT 0"},
 		{"transfer_resumes", "error_code", "TEXT NOT NULL DEFAULT ''"},
 		{"transfer_resumes", "retryable", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "metric_generation", "INTEGER NOT NULL DEFAULT 1"},
+		{"transfer_resumes", "elapsed_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "metric_started_bytes", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "metric_last_bytes", "INTEGER NOT NULL DEFAULT 0"},
+		{"transfer_resumes", "metric_seq", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, migration := range migrations {
 		var columns []struct {

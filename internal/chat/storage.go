@@ -137,27 +137,32 @@ type attachmentMigrationRow struct {
 }
 
 type transferResumeRow struct {
-	AttachmentID    string `orm:"attachment_id"`
-	TransferID      string `orm:"transfer_id"`
-	MessageID       string `orm:"message_id"`
-	SenderDeviceID  string `orm:"sender_device_id"`
-	Direction       string `orm:"direction"`
-	SessionID       string `orm:"session_id"`
-	Generation      uint64 `orm:"generation"`
-	CheckpointSeq   uint64 `orm:"checkpoint_seq"`
-	FileName        string `orm:"file_name"`
-	FileSize        int64  `orm:"file_size"`
-	SHA256          string `orm:"sha256"`
-	SourceMTimeNS   int64  `orm:"source_mtime_ns"`
-	Retries         int    `orm:"retries"`
-	ErrorCode       string `orm:"error_code"`
-	Retryable       int    `orm:"retryable"`
-	TempPath        string `orm:"temp_path"`
-	TargetPath      string `orm:"target_path"`
-	TransferMode    string `orm:"transfer_mode"`
-	CompletedRanges string `orm:"completed_ranges"`
-	Status          string `orm:"status"`
-	UpdatedAt       string `orm:"updated_at"`
+	AttachmentID       string `orm:"attachment_id"`
+	TransferID         string `orm:"transfer_id"`
+	MessageID          string `orm:"message_id"`
+	SenderDeviceID     string `orm:"sender_device_id"`
+	Direction          string `orm:"direction"`
+	SessionID          string `orm:"session_id"`
+	Generation         uint64 `orm:"generation"`
+	MetricGeneration   uint64 `orm:"metric_generation"`
+	CheckpointSeq      uint64 `orm:"checkpoint_seq"`
+	MetricSeq          uint64 `orm:"metric_seq"`
+	ElapsedMs          int64  `orm:"elapsed_ms"`
+	MetricStartedBytes int64  `orm:"metric_started_bytes"`
+	MetricLastBytes    int64  `orm:"metric_last_bytes"`
+	FileName           string `orm:"file_name"`
+	FileSize           int64  `orm:"file_size"`
+	SHA256             string `orm:"sha256"`
+	SourceMTimeNS      int64  `orm:"source_mtime_ns"`
+	Retries            int    `orm:"retries"`
+	ErrorCode          string `orm:"error_code"`
+	Retryable          int    `orm:"retryable"`
+	TempPath           string `orm:"temp_path"`
+	TargetPath         string `orm:"target_path"`
+	TransferMode       string `orm:"transfer_mode"`
+	CompletedRanges    string `orm:"completed_ranges"`
+	Status             string `orm:"status"`
+	UpdatedAt          string `orm:"updated_at"`
 }
 
 type ConversationAttachment struct {
@@ -187,15 +192,15 @@ func saveTransferResumeRecord(ctx context.Context, state transferResumeState) er
 	if err != nil {
 		return err
 	}
-	return exec(ctx, `INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, checkpoint_seq=excluded.checkpoint_seq, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
-		state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, state.CheckpointSeq, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), nowString())
+	return exec(ctx, `INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, metric_generation=excluded.metric_generation, checkpoint_seq=excluded.checkpoint_seq, metric_seq=excluded.metric_seq, elapsed_ms=excluded.elapsed_ms, metric_started_bytes=excluded.metric_started_bytes, metric_last_bytes=excluded.metric_last_bytes, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
+		state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, metricGenerationOrDefault(state.MetricGeneration), state.CheckpointSeq, state.MetricSeq, state.ElapsedMs, state.MetricStartedBytes, state.MetricLastBytes, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), nowString())
 }
 
 func loadTransferResumeRecord(ctx context.Context, attachmentID string) (transferResumeState, error) {
 	var rows []transferResumeRow
-	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes WHERE attachment_id=? LIMIT 1`, attachmentID)
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes WHERE attachment_id=? LIMIT 1`, attachmentID)
 	if err != nil {
 		return transferResumeState{}, err
 	}
@@ -214,12 +219,12 @@ func loadTransferResumeRecord(ctx context.Context, attachmentID string) (transfe
 	if updatedAt.IsZero() {
 		return transferResumeState{}, fmt.Errorf("resume record timestamp invalid")
 	}
-	return transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, CheckpointSeq: row.CheckpointSeq, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: ranges, UpdatedAt: updatedAt}, nil
+	return transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, MetricGeneration: metricGenerationOrDefault(row.MetricGeneration), CheckpointSeq: row.CheckpointSeq, MetricSeq: row.MetricSeq, ElapsedMs: row.ElapsedMs, MetricStartedBytes: row.MetricStartedBytes, MetricLastBytes: row.MetricLastBytes, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: ranges, UpdatedAt: updatedAt}, nil
 }
 
 func listTransferResumeRecords(ctx context.Context) ([]transferResumeState, error) {
 	var rows []transferResumeRow
-	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, checkpoint_seq, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes ORDER BY updated_at DESC`)
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +241,7 @@ func listTransferResumeRecords(ctx context.Context) ([]transferResumeState, erro
 		if updatedAt.IsZero() {
 			continue
 		}
-		states = append(states, transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, CheckpointSeq: row.CheckpointSeq, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: normalizeTransferRanges(ranges, row.FileSize), UpdatedAt: updatedAt})
+		states = append(states, transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, MetricGeneration: metricGenerationOrDefault(row.MetricGeneration), CheckpointSeq: row.CheckpointSeq, MetricSeq: row.MetricSeq, ElapsedMs: row.ElapsedMs, MetricStartedBytes: row.MetricStartedBytes, MetricLastBytes: row.MetricLastBytes, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: normalizeTransferRanges(ranges, row.FileSize), UpdatedAt: updatedAt})
 	}
 	return states, nil
 }
@@ -276,6 +281,10 @@ func markTransferResumeTerminalWithRanges(ctx context.Context, attachmentID stri
 
 func updateTransferResumeStatus(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
 	return exec(ctx, `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, updated_at=? WHERE attachment_id=?`, string(state), string(code), boolInt(retryable), nowString(), attachmentID)
+}
+
+func updateTransferResumeMetric(ctx context.Context, attachmentID string, metricGeneration uint64, elapsedMs, startedBytes, lastBytes int64, metricSeq uint64) error {
+	return exec(ctx, `UPDATE transfer_resumes SET metric_generation=?, elapsed_ms=?, metric_started_bytes=?, metric_last_bytes=?, metric_seq=?, updated_at=? WHERE attachment_id=?`, metricGenerationOrDefault(metricGeneration), elapsedMs, startedBytes, lastBytes, metricSeq, nowString(), attachmentID)
 }
 
 func EnsureDefaults(ctx context.Context, defaultPath string) error {
@@ -1256,14 +1265,58 @@ func saveTransferSnapshot(ctx context.Context, snapshot TransferSnapshot) error 
 	if snapshot.AttachmentID == "" {
 		return fmt.Errorf("transfer snapshot attachment id is empty")
 	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	return exec(ctx, `INSERT INTO transfer_snapshots(attachment_id, message_id, snapshot_json, updated_at)
+	if err := exec(ctx, `INSERT INTO transfer_snapshots(attachment_id, message_id, snapshot_json, updated_at)
 		VALUES(?, ?, ?, ?)
 		ON CONFLICT(attachment_id) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
-		snapshot.AttachmentID, snapshot.MessageID, string(payload), nowString())
+		snapshot.AttachmentID, snapshot.MessageID, string(payload), nowString()); err != nil {
+		return err
+	}
+	return saveTransferSnapshotDirection(ctx, snapshot)
+}
+
+func saveTransferSnapshotDirection(ctx context.Context, snapshot TransferSnapshot) error {
+	if snapshot.AttachmentID == "" {
+		return fmt.Errorf("transfer snapshot attachment id is empty")
+	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return exec(ctx, `INSERT INTO transfer_snapshot_directions(attachment_id, direction, message_id, snapshot_json, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(attachment_id, direction) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+		snapshot.AttachmentID, snapshot.Direction, snapshot.MessageID, string(payload), nowString())
+}
+
+func loadTransferSnapshotDirection(ctx context.Context, attachmentID, direction string) (TransferSnapshot, error) {
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshot_directions WHERE attachment_id=? AND direction=? LIMIT 1`, attachmentID, direction)
+	if err != nil {
+		return TransferSnapshot{}, err
+	}
+	if err := result.Structs(&rows); err != nil || len(rows) == 0 {
+		if err != nil {
+			return TransferSnapshot{}, err
+		}
+		return TransferSnapshot{}, fmt.Errorf("directional transfer snapshot not found")
+	}
+	var snapshot TransferSnapshot
+	if err := json.Unmarshal([]byte(rows[0].SnapshotJSON), &snapshot); err != nil {
+		return TransferSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func loadTransferSnapshot(ctx context.Context, attachmentID string) (TransferSnapshot, error) {
@@ -1288,6 +1341,22 @@ func loadTransferSnapshot(ctx context.Context, attachmentID string) (TransferSna
 }
 
 func listTransferSnapshots(ctx context.Context) ([]TransferSnapshot, error) {
+	var directionalRows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	directionalResult, directionalErr := query(ctx, `SELECT snapshot_json FROM transfer_snapshot_directions ORDER BY updated_at DESC`)
+	items := make([]TransferSnapshot, 0)
+	seen := make(map[string]struct{})
+	if directionalErr == nil && directionalResult.Structs(&directionalRows) == nil {
+		for _, row := range directionalRows {
+			var snapshot TransferSnapshot
+			if json.Unmarshal([]byte(row.SnapshotJSON), &snapshot) == nil && snapshot.AttachmentID != "" {
+				key := snapshot.AttachmentID + "|" + snapshot.Direction
+				seen[key] = struct{}{}
+				items = append(items, snapshot)
+			}
+		}
+	}
 	var rows []struct {
 		SnapshotJSON string `orm:"snapshot_json"`
 	}
@@ -1298,18 +1367,23 @@ func listTransferSnapshots(ctx context.Context) ([]TransferSnapshot, error) {
 	if err := result.Structs(&rows); err != nil {
 		return nil, err
 	}
-	items := make([]TransferSnapshot, 0, len(rows))
 	for _, row := range rows {
 		var snapshot TransferSnapshot
 		if err := json.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil && snapshot.AttachmentID != "" {
-			items = append(items, snapshot)
+			key := snapshot.AttachmentID + "|" + snapshot.Direction
+			if _, exists := seen[key]; !exists {
+				items = append(items, snapshot)
+			}
 		}
 	}
 	return items, nil
 }
 
 func deleteTransferSnapshot(ctx context.Context, attachmentID string) error {
-	return exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id=?`, attachmentID)
+	if err := exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id=?`, attachmentID); err != nil {
+		return err
+	}
+	return exec(ctx, `DELETE FROM transfer_snapshot_directions WHERE attachment_id=?`, attachmentID)
 }
 
 func parseTime(value string) time.Time { t, _ := time.Parse(time.RFC3339Nano, value); return t }

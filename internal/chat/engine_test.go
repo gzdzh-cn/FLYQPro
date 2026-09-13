@@ -291,6 +291,35 @@ func TestTransferMetricCountsOnlyEffectiveTransferPhases(t *testing.T) {
 	}
 }
 
+func TestTransferMetricKeepsElapsedAcrossPauseAndByteRegression(t *testing.T) {
+	base := time.Unix(200, 0)
+	metric, reset := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 7, 3)
+	if !reset {
+		t.Fatal("initial metric was not created")
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(4*time.Second), 40, "transferring", 7, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(9*time.Second), 40, "paused_local", 99, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(20*time.Second), 20, "resuming", 101, 3)
+	if metric.activeElapsed != 4*time.Second {
+		t.Fatalf("pause or byte regression changed elapsed time: got %s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(22*time.Second), 40, "receiving", 102, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(24*time.Second), 60, "receiving", 103, 3)
+	if metric.activeElapsed != 6*time.Second || metric.metricGeneration != 3 {
+		t.Fatalf("resume did not continue the logical metric: %+v", metric)
+	}
+}
+
+func TestTransferMetricOnlyNewLogicalGenerationResets(t *testing.T) {
+	base := time.Unix(300, 0)
+	metric, _ := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 1, 4)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(3*time.Second), 10, "receiving", 2, 4)
+	metric, reset := advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(4*time.Second), 0, "queued", 3, 5)
+	if !reset || metric.activeElapsed != 0 || metric.metricGeneration != 5 {
+		t.Fatalf("new logical generation did not reset metric: %+v reset=%v", metric, reset)
+	}
+}
+
 func TestPauseAttachmentFromPeerStopsOutgoingTransfer(t *testing.T) {
 	engine := NewEngine()
 	transfer := &outgoingTransfer{

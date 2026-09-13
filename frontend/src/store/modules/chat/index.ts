@@ -14,8 +14,17 @@ function transferGeneration(progress?: TransferProgress) {
   return progress?.generation === undefined ? 0 : Number(progress.generation)
 }
 
+function metricGeneration(progress?: TransferProgress) {
+  return progress?.metricGeneration === undefined ? 0 : Number(progress.metricGeneration)
+}
+
 function progressIsOlder(progress: TransferProgress, previous?: TransferProgress) {
   if (!previous) return false
+  if (progress.metricGeneration !== undefined && previous.metricGeneration !== undefined) {
+    const generation = metricGeneration(progress)
+    const previousGeneration = metricGeneration(previous)
+    if (generation !== previousGeneration) return generation < previousGeneration
+  }
   if (progress.generation !== undefined && previous.generation !== undefined) {
     const generation = transferGeneration(progress)
     const previousGeneration = transferGeneration(previous)
@@ -60,6 +69,21 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
   // to move the state while retaining the latest metric fields.
   if (lifecycleTransferPhases.has(progress.phase)) return false
   return comparable && strictlyOlder
+}
+
+function mergeMonotonicProgress(previous: TransferProgress | undefined, incoming: TransferProgress): TransferProgress {
+  const next = { ...(previous || {}), ...incoming } as TransferProgress
+  const sameMetricGeneration = !previous || previous.metricGeneration === undefined || incoming.metricGeneration === undefined || metricGeneration(previous) === metricGeneration(incoming)
+  if (sameMetricGeneration && previous?.elapsedMs !== undefined && (next.elapsedMs === undefined || Number(next.elapsedMs) < Number(previous.elapsedMs))) {
+    next.elapsedMs = previous.elapsedMs
+  }
+  if (sameMetricGeneration && previous?.metricStartedBytes !== undefined && next.metricStartedBytes === undefined) {
+    next.metricStartedBytes = previous.metricStartedBytes
+  }
+  if (sameMetricGeneration && previous?.metricLastBytes !== undefined && (next.metricLastBytes === undefined || Number(next.metricLastBytes) < Number(previous.metricLastBytes))) {
+    next.metricLastBytes = previous.metricLastBytes
+  }
+  return next
 }
 
 function requestTime(request: FriendRequest) {
@@ -193,9 +217,10 @@ export const useChatStore = defineStore('chat', {
           }
           const previous = activeDirections[progress.direction] || historyDirections[progress.direction]
           if (progressIsOlder(progress, previous)) return
-          const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
+          const previousDirection = historyDirections[progress.direction] || activeDirections[progress.direction]
+          const directionSnapshot = mergeMonotonicProgress(previousDirection, progress)
           const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
-          const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }
+          const snapshot = mergeMonotonicProgress({ ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId] }, progress)
           if (isTerminalTransfer(progress)) {
             this.transferHistory[attachmentId] = snapshot
             this.transferHistoryByDirection[attachmentId] = directions
