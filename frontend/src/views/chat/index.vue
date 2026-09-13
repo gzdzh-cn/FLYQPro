@@ -1324,6 +1324,12 @@ function transferProgressFor(message: any): any {
       snapshot.phase = 'resuming'
       snapshot.state = 'active'
     }
+    if (['sent', 'completed', 'saved'].includes(message.attachmentStatus)) {
+      snapshot.phase = 'completed'
+      snapshot.state = 'completed'
+      snapshot.transferred = snapshot.total || message.attachmentSize || snapshot.transferred || 0
+      snapshot.remoteReceived = snapshot.transferred
+    }
     return snapshot.phase ? snapshot : undefined
   }
   const mine = message.senderDeviceId === deviceInfo.value?.deviceId
@@ -1382,11 +1388,22 @@ function transferProgressFor(message: any): any {
   // projection. Prefer an explicit remote terminal snapshot, but allow the
   // local terminal result to close the UI when an older peer did not emit the
   // matching remote-receive event.
-  const terminal = preferred && terminalTransferPhases.has(preferred.phase)
-    ? preferred
-    : diagnostics && terminalTransferPhases.has(diagnostics.phase) ? diagnostics : undefined
+  const terminal = [preferred, diagnostics, directions.receive, directions.send]
+    .find((candidate: any) => candidate && terminalTransferPhases.has(candidate.phase))
+  const messageCompleted = ['sent', 'completed', 'saved'].includes(message.attachmentStatus)
+  if (messageCompleted || terminal?.phase === 'completed') {
+    merged.phase = 'completed'
+    merged.state = 'completed'
+    const total = Number(merged.total || message.attachmentSize || 0)
+    if (total > 0) {
+      merged.transferred = total
+      merged.remoteReceived = total
+      merged.received = total
+      merged.durableBytes = total
+    }
+  }
   if (terminal) {
-    merged.phase = terminal.phase
+    if (!messageCompleted) merged.phase = terminal.phase
     if (terminal.verified !== undefined) merged.verified = terminal.verified
   }
   return merged

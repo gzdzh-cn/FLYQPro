@@ -510,13 +510,14 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 			averageSpeed, peakSpeed := transfer.v3AverageSpeed, transfer.v3PeakSpeed
 			streamCount := len(transfer.v3Streams)
 			transfer.v3Mu.Unlock()
+			elapsedMs, metricGeneration := e.transferMetricSnapshot(attachmentID, "receive")
 			acceptedChunkSize := defaultTransferChunkSize
 			for _, frame := range pending {
 				if len(frame.Payload) > acceptedChunkSize {
 					acceptedChunkSize = len(frame.Payload)
 				}
 			}
-			snapshot := TransferMetricsSnapshotV1{MetricSeq: metricSeq, CheckpointSeq: checkpointSeq, DurableBytes: durable, Speed: rate, AverageSpeed: averageSpeed, PeakSpeed: peakSpeed, DiskWriteMs: lastCheckpointDuration.Milliseconds(), AckLatencyMs: elapsed.Milliseconds(), ChunkSize: acceptedChunkSize, WindowSize: len(pending), WindowBytes: pendingBytes, AckTargetBytes: batchLimit, StreamCount: streamCount, ActiveStreams: streamCount}
+			snapshot := TransferMetricsSnapshotV1{MetricSeq: metricSeq, MetricGeneration: metricGeneration, CheckpointSeq: checkpointSeq, DurableBytes: durable, ElapsedMs: elapsedMs, Speed: rate, AverageSpeed: averageSpeed, PeakSpeed: peakSpeed, DiskWriteMs: lastCheckpointDuration.Milliseconds(), AckLatencyMs: elapsed.Milliseconds(), ChunkSize: acceptedChunkSize, WindowSize: len(pending), WindowBytes: pendingBytes, AckTargetBytes: batchLimit, StreamCount: streamCount, ActiveStreams: streamCount}
 			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "transferring", transferProgressOptions{
 				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes, activeStreams: snapshot.ActiveStreams, streamCount: snapshot.StreamCount,
 				transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
@@ -622,7 +623,11 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 					return newTransferError(result.ErrorCode, result.Retryable, fmt.Errorf("v3 transfer failed: %s", status))
 				}
 			}
-			return ack(frame, false, nil)
+			transfer.v3Mu.Lock()
+			metricSeq, checkpointSeq := transfer.v3MetricSeq, transfer.v3DurableVersion
+			transfer.v3Mu.Unlock()
+			elapsedMs, metricGeneration := e.transferMetricSnapshot(attachmentID, "receive")
+			return ack(frame, false, &TransferMetricsSnapshotV1{MetricSeq: metricSeq, MetricGeneration: metricGeneration, CheckpointSeq: checkpointSeq, DurableBytes: durableBytes(), ElapsedMs: elapsedMs})
 		}
 		if err := consume(frame); err != nil {
 			_ = ack(frame, true, nil)

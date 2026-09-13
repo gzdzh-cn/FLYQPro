@@ -3030,45 +3030,46 @@ func (e *Engine) recordIncomingFinalizationFailure(attachmentID string, transfer
 }
 
 type transferProgressOptions struct {
-	sessionID           string
-	generation          uint64
-	metricGeneration    uint64
-	slotID              int
-	retries             int
-	errorCode           string
-	retryable           bool
-	chunkSize           int
-	windowSize          int
-	windowBytes         int64
-	streamCount         int
-	activeStreams       int
-	streamID            int
-	streamOffset        int64
-	streamLength        int64
-	inFlightBytes       int64
-	ackTargetBytes      int64
-	socketWriteMs       int64
-	ackWaitMs           int64
-	confirmedThroughput float64
-	ackLatency          time.Duration
-	diskWriteMs         int64
-	durableBytes        int64
-	windowThroughput    float64
-	transferMode        string
-	displayLocalMetrics bool
-	transport           string
-	protocol            string
-	tuningState         string
-	tuningReason        string
-	goodSamples         int
-	badSamples          int
-	verified            *bool
-	metricSource        string
-	metricSeq           uint64
-	checkpointSeq       uint64
-	localSendSpeed      float64
-	averageSpeed        float64
-	peakSpeed           float64
+	sessionID              string
+	generation             uint64
+	metricGeneration       uint64
+	slotID                 int
+	retries                int
+	errorCode              string
+	retryable              bool
+	chunkSize              int
+	windowSize             int
+	windowBytes            int64
+	streamCount            int
+	activeStreams          int
+	streamID               int
+	streamOffset           int64
+	streamLength           int64
+	inFlightBytes          int64
+	ackTargetBytes         int64
+	socketWriteMs          int64
+	ackWaitMs              int64
+	confirmedThroughput    float64
+	ackLatency             time.Duration
+	diskWriteMs            int64
+	durableBytes           int64
+	windowThroughput       float64
+	transferMode           string
+	displayLocalMetrics    bool
+	transport              string
+	protocol               string
+	tuningState            string
+	tuningReason           string
+	goodSamples            int
+	badSamples             int
+	verified               *bool
+	metricSource           string
+	authoritativeElapsedMs int64
+	metricSeq              uint64
+	checkpointSeq          uint64
+	localSendSpeed         float64
+	averageSpeed           float64
+	peakSpeed              float64
 }
 
 const transferSpeedSmoothingWindow = 1500 * time.Millisecond
@@ -3205,6 +3206,19 @@ func maxInt64(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+func (e *Engine) transferMetricSnapshot(attachmentID, direction string) (elapsedMs int64, metricGeneration uint64) {
+	e.transferMetricsMu.Lock()
+	defer e.transferMetricsMu.Unlock()
+	metric, ok := e.transferMetrics[attachmentID+"|"+direction]
+	if !ok {
+		if snapshot, err := loadTransferSnapshotDirection(context.Background(), attachmentID, direction); err == nil {
+			return snapshot.ElapsedMs, metricGenerationOrDefault(snapshot.MetricGeneration)
+		}
+		return 0, 0
+	}
+	return metric.activeElapsed.Milliseconds(), metric.metricGeneration
 }
 
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
@@ -3373,6 +3387,9 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	}
 	now := time.Now()
 	metric, reset := advanceTransferMetricWithLogicalGeneration(metric, ok, now, transferred, phase, option.generation, logicalGeneration)
+	if option.authoritativeElapsedMs > metric.activeElapsed.Milliseconds() {
+		metric.activeElapsed = time.Duration(option.authoritativeElapsedMs) * time.Millisecond
+	}
 	var rawSpeed float64
 	if !reset && displayMetrics && transferPhaseCountsElapsed(phase) {
 		sampleStartedAt := metric.speedSampleAt

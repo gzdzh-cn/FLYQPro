@@ -3,7 +3,7 @@ package chat
 import "testing"
 
 func TestTransferMetricsSnapshotRoundTrip(t *testing.T) {
-	want := TransferMetricsSnapshotV1{MetricSeq: 3, CheckpointSeq: 9, DurableBytes: 4096, Speed: 1234.5, AverageSpeed: 1200, PeakSpeed: 2000, DiskWriteMs: 7, AckLatencyMs: 11, ChunkSize: 512 * 1024, WindowSize: 8, WindowBytes: 4 * 1024 * 1024, AckTargetBytes: 4 * 1024 * 1024, StreamCount: 2, ActiveStreams: 2}
+	want := TransferMetricsSnapshotV1{MetricSeq: 3, MetricGeneration: 2, CheckpointSeq: 9, DurableBytes: 4096, ElapsedMs: 3500, Speed: 1234.5, AverageSpeed: 1200, PeakSpeed: 2000, DiskWriteMs: 7, AckLatencyMs: 11, ChunkSize: 512 * 1024, WindowSize: 8, WindowBytes: 4 * 1024 * 1024, AckTargetBytes: 4 * 1024 * 1024, StreamCount: 2, ActiveStreams: 2}
 	payload, err := encodeTransferMetricsSnapshot(want)
 	if err != nil {
 		t.Fatal(err)

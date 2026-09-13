@@ -215,6 +215,8 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		options.localSendSpeed = rate
 		if sample.metrics != nil {
 			options.metricSource = "receiver-durable"
+			options.metricGeneration = sample.metrics.MetricGeneration
+			options.authoritativeElapsedMs = sample.metrics.ElapsedMs
 			options.metricSeq = sample.metrics.MetricSeq
 			options.checkpointSeq = sample.metrics.CheckpointSeq
 			options.durableBytes = sample.metrics.DurableBytes
@@ -541,8 +543,18 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 		}
 		return newTransferError(ErrFinalizeIOFailed, true, fmt.Errorf("receiver returned an invalid finalization error"))
 	}
-	if !matchesV3Reply(reply, end, FrameEndFile) || reply.ChunkHash != digest {
+	if !(matchesV3Reply(reply, end, FrameEndFile) || matchesV3ReplyWithPayload(reply, end, FrameEndFile)) || reply.ChunkHash != digest {
 		return fmt.Errorf("v3 receiver did not confirm file verification")
+	}
+	if metricsEnabled && len(reply.Payload) > 0 {
+		if snapshot, decodeErr := decodeTransferMetricsSnapshot(reply.Payload); decodeErr == nil {
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, snapshot.DurableBytes, message.AttachmentSize, "remote-receive", "receiving", transferProgressOptions{
+				metricSource: "receiver-durable", metricGeneration: snapshot.MetricGeneration, authoritativeElapsedMs: snapshot.ElapsedMs,
+				metricSeq: snapshot.MetricSeq, checkpointSeq: snapshot.CheckpointSeq, durableBytes: snapshot.DurableBytes,
+				confirmedThroughput: snapshot.Speed, averageSpeed: snapshot.AverageSpeed, peakSpeed: snapshot.PeakSpeed,
+				transferMode: v3TransferMode, displayLocalMetrics: true,
+			})
+		}
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return nil

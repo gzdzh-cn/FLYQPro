@@ -9,20 +9,22 @@ import (
 // Keeping the snapshot in the binary frame payload avoids a second control
 // channel and gives both sides one authoritative receive-side measurement.
 type TransferMetricsSnapshotV1 struct {
-	MetricSeq      uint64  `json:"metricSeq"`
-	CheckpointSeq  uint64  `json:"checkpointSeq"`
-	DurableBytes   int64   `json:"durableBytes"`
-	Speed          float64 `json:"speed"`
-	AverageSpeed   float64 `json:"averageSpeed"`
-	PeakSpeed      float64 `json:"peakSpeed"`
-	DiskWriteMs    int64   `json:"diskWriteMs"`
-	AckLatencyMs   int64   `json:"ackLatencyMs"`
-	ChunkSize      int     `json:"chunkSize"`
-	WindowSize     int     `json:"windowSize"`
-	WindowBytes    int64   `json:"windowBytes"`
-	AckTargetBytes int64   `json:"ackTargetBytes"`
-	StreamCount    int     `json:"streamCount"`
-	ActiveStreams  int     `json:"activeStreams"`
+	MetricSeq        uint64  `json:"metricSeq"`
+	MetricGeneration uint64  `json:"metricGeneration,omitempty"`
+	CheckpointSeq    uint64  `json:"checkpointSeq"`
+	DurableBytes     int64   `json:"durableBytes"`
+	ElapsedMs        int64   `json:"elapsedMs,omitempty"`
+	Speed            float64 `json:"speed"`
+	AverageSpeed     float64 `json:"averageSpeed"`
+	PeakSpeed        float64 `json:"peakSpeed"`
+	DiskWriteMs      int64   `json:"diskWriteMs"`
+	AckLatencyMs     int64   `json:"ackLatencyMs"`
+	ChunkSize        int     `json:"chunkSize"`
+	WindowSize       int     `json:"windowSize"`
+	WindowBytes      int64   `json:"windowBytes"`
+	AckTargetBytes   int64   `json:"ackTargetBytes"`
+	StreamCount      int     `json:"streamCount"`
+	ActiveStreams    int     `json:"activeStreams"`
 }
 
 func encodeTransferMetricsSnapshot(snapshot TransferMetricsSnapshotV1) ([]byte, error) {
