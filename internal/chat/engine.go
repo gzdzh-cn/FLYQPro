@@ -389,6 +389,8 @@ type incomingFile struct {
 	v3LastSpeed         float64
 	v3AverageSpeed      float64
 	v3PeakSpeed         float64
+	v3LastDiskWriteMs   int64
+	v3LastAckLatencyMs  int64
 	v3Done              chan string
 	v3CheckpointMu      sync.Mutex
 	v3Checkpoint        *v3Checkpoint
@@ -1419,6 +1421,8 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 	v3LastSpeed := transfer.v3LastSpeed
 	v3AverageSpeed := transfer.v3AverageSpeed
 	v3PeakSpeed := transfer.v3PeakSpeed
+	v3LastDiskWriteMs := transfer.v3LastDiskWriteMs
+	v3LastAckLatencyMs := transfer.v3LastAckLatencyMs
 	transfer.v3Mu.Unlock()
 	parallelTransfer := transfer.parallel
 	transfer.resumeMu.Lock()
@@ -1447,6 +1451,8 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		windowThroughput:    v3LastSpeed,
 		averageSpeed:        v3AverageSpeed,
 		peakSpeed:           v3PeakSpeed,
+		diskWriteMs:         v3LastDiskWriteMs,
+		ackLatency:          time.Duration(v3LastAckLatencyMs) * time.Millisecond,
 	}
 	if parallelTransfer {
 		transfer.parallelMu.Lock()

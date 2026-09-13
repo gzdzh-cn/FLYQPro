@@ -133,7 +133,7 @@
             <div class="attachment-details-section">
               <h4>状态</h4>
               <div class="attachment-details-grid">
-                <p><span>当前速度</span><strong class="attachment-details-rate"><span>{{ detailProgressSpeed.primary }}</span><small v-if="detailProgressSpeed.secondary">{{ detailProgressSpeed.secondary }}</small></strong></p>
+                <p><span>接收端速度</span><strong class="attachment-details-rate"><span>{{ detailProgressSpeed.primary }}</span><small v-if="detailProgressSpeed.secondary">{{ detailProgressSpeed.secondary }}</small></strong></p>
                 <p><span>平均速度</span><strong class="attachment-details-rate"><span>{{ detailProgressAverageSpeed.primary }}</span><small v-if="detailProgressAverageSpeed.secondary">{{ detailProgressAverageSpeed.secondary }}</small></strong></p>
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
@@ -141,7 +141,7 @@
                 <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailDisplayPhase(detailProgress)) }}</strong></p>
                 <p v-if="detailProgress?.errorCode"><span>失败原因</span><strong>{{ transferErrorLabel(detailProgress.errorCode) }} · {{ transferRetryLabel(detailProgress) }}</strong></p>
                 <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
-                <p><span>{{ detailIsReceiver ? '已落盘容量' : '对方已确认' }}</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }}</strong></p>
+                <p><span>已持久化</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }}</strong></p>
                 <p><span>总容量</span><strong>{{ formatMetricBytes(detailTotalBytes) }}</strong></p>
               </div>
             </div>
@@ -151,11 +151,13 @@
                 <p><span title="当前传输窗口使用的分块大小和窗口块数">分块 / 窗口</span><strong>{{ detailProgress?.chunkSize ? formatBytes(detailProgress.chunkSize) : detailProgress ? '兼容模式' : '暂未提供' }} · {{ detailProgress?.windowSize ? `${detailProgress.windowSize} 块` : detailProgress ? '逐块确认' : '暂未提供' }}</strong></p>
                 <p><span title="当前窗口内已经写入或发送的数据量">窗口数据量</span><strong>{{ detailProgress?.windowBytes !== undefined ? formatMetricBytes(detailProgress.windowBytes) : '暂未提供' }}</strong></p>
                 <p><span title="已处理但尚未纳入最新确认的数据量">在途数据</span><strong>{{ detailProgress?.inFlightBytes !== undefined ? formatMetricBytes(detailProgress.inFlightBytes) : (detailIsReceiver ? '接收端暂未提供' : '暂未提供') }}</strong></p>
-                <p><span title="接收设备实际写入文件的吞吐速度">{{ detailIsReceiver ? '接收吞吐' : '累计确认速度' }}</span><strong class="attachment-details-rate"><span>{{ detailNetworkThroughput.primary }}</span><small v-if="detailNetworkThroughput.secondary">{{ detailNetworkThroughput.secondary }}</small></strong></p>
+                <p v-if="!detailIsReceiver"><span>本地发送速度</span><strong class="attachment-details-rate"><span>{{ detailLocalSendSpeed.primary }}</span><small v-if="detailLocalSendSpeed.secondary">{{ detailLocalSendSpeed.secondary }}</small></strong></p>
                 <p><span title="接收端达到该字节数后发送一次确认">确认批量</span><strong>{{ detailProgress?.ackTargetBytes ? formatBytes(detailProgress.ackTargetBytes) : detailProgress ? '逐窗口确认' : '暂未提供' }}</strong></p>
                 <p><span>确认延迟</span><strong>{{ detailAckLatency }}</strong></p>
                 <p><span>调优状态</span><strong>{{ detailTuningState }}</strong></p>
-                <p><span>写盘耗时</span><strong>{{ detailProgress?.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : detailProgress ? '正在测量' : '暂未提供' }}</strong></p>
+                <p><span>磁盘同步耗时</span><strong>{{ detailProgress?.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : detailProgress ? '暂未提供' : '暂未提供' }}</strong></p>
+                <p><span>checkpoint 序号</span><strong>{{ detailProgress?.checkpointSeq !== undefined ? detailProgress.checkpointSeq : '暂未提供' }}</strong></p>
+                <p v-if="detailIsReceiver"><span>接收确认状态</span><strong>{{ detailProgress?.metricSource === 'receiver-durable' ? '已持久化确认' : '等待接收确认' }}</strong></p>
                 <p><span>通道 / 模式</span><strong>{{ detailProgress?.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress?.transferMode) }}</strong></p>
                 <p><span>并行数据流</span><strong>{{ detailProgress?.streamCount ? `${detailProgress.activeStreams || detailProgress.streamCount} / ${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
               </div>
@@ -1258,44 +1260,67 @@ function formatSpeed(value: number) {
 }
 function formatTransferRate(value?: number): { primary: string; secondary: string } {
   const bytes = Number(value || 0)
-  if (!(bytes > 0)) return { primary: '正在测量', secondary: '' }
+  if (!(bytes > 0)) return { primary: '暂未提供', secondary: '' }
   return { primary: `${formatSpeed(bytes)}/s`, secondary: '' }
 }
 function formatDuration(value?: number) { const seconds = Math.max(0, Math.round(Number(value || 0) / 1000)); if (!seconds) return '正在测量'; const minutes = Math.floor(seconds / 60); return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒` }
+function projectTransferProgress(progress: any, message: any): any {
+  if (!progress) return progress
+  const projected = { ...progress }
+  const receiverMetricsAvailable = (
+    projected.metricSource === 'receiver-durable' || ['receive', 'remote-receive'].includes(projected.direction)
+  ) && (
+    Number(projected.metricSeq || 0) > 0 || Number(projected.checkpointSeq || 0) > 0 ||
+    Number(projected.durableBytes || 0) > 0 || Number(projected.speed || 0) > 0
+  )
+  const mine = message?.senderDeviceId === deviceInfo.value?.deviceId
+  const primaryBytes = mine
+    ? Number(projected.remoteReceived ?? projected.durableBytes ?? projected.transferred ?? 0)
+    : Number(projected.durableBytes ?? projected.received ?? projected.transferred ?? 0)
+  projected.primarySpeed = receiverMetricsAvailable
+    ? Number(projected.speed || projected.confirmedThroughput || projected.windowThroughput || 0)
+    : 0
+  projected.primaryBytes = Math.max(0, primaryBytes)
+  projected.primaryElapsedMs = projected.elapsedMs
+  projected.receiverMetricsAvailable = receiverMetricsAvailable
+  projected.roleDiagnostics = {
+    localSendSpeed: Number(projected.localSendSpeed || 0),
+    ackLatencyMs: projected.ackLatencyMs,
+    diskWriteMs: projected.diskWriteMs,
+    checkpointSeq: projected.checkpointSeq,
+    activeStreams: projected.activeStreams,
+  }
+  return projected
+}
 function authoritativeSpeed(progress: any): number {
-  return Number(progress?.speed || progress?.confirmedThroughput || progress?.windowThroughput || 0)
+  return Number(progress?.primarySpeed || 0)
 }
 const detailProgressSpeed = computed(() => formatTransferRate(authoritativeSpeed(detailProgress.value)))
-const detailProgressAverageSpeed = computed(() => formatTransferRate(Number(detailProgress.value?.averageSpeed || authoritativeSpeed(detailProgress.value))))
-const detailProgressPeakSpeed = computed(() => formatTransferRate(Number(detailProgress.value?.peakSpeed || authoritativeSpeed(detailProgress.value))))
+const detailProgressAverageSpeed = computed(() => formatTransferRate(detailProgress.value?.receiverMetricsAvailable ? Number(detailProgress.value?.averageSpeed || authoritativeSpeed(detailProgress.value)) : 0))
+const detailProgressPeakSpeed = computed(() => formatTransferRate(detailProgress.value?.receiverMetricsAvailable ? Number(detailProgress.value?.peakSpeed || authoritativeSpeed(detailProgress.value)) : 0))
 const detailProgressEta = computed(() => {
   const progress = detailProgress.value
   if (!progress) return '暂不可估算'
-  const speed = Number(progress.etaSeconds > 0 ? 0 : (progress.speed || progress.averageSpeed || authoritativeSpeed(progress)))
-  const remaining = Math.max(0, Number((progress.total || detailTotalBytes.value) - (progress.transferred || 0)))
+  const speed = Number(progress.etaSeconds > 0 ? 0 : (authoritativeSpeed(progress) || (progress.receiverMetricsAvailable ? progress.averageSpeed : 0)))
+  const remaining = Math.max(0, Number((progress.total || detailTotalBytes.value) - (progress.primaryBytes ?? progress.transferred ?? 0)))
   const seconds = progress.etaSeconds > 0 ? progress.etaSeconds : (speed > 0 && remaining > 0 ? Math.ceil(remaining / speed) : 0)
   return seconds > 0 ? formatDuration(seconds * 1000) : '暂不可估算'
 })
-const detailProgressElapsed = computed(() => formatDuration(detailProgress.value?.elapsedMs))
+const detailProgressElapsed = computed(() => detailProgress.value?.primaryElapsedMs === undefined ? '暂未提供' : formatDuration(detailProgress.value.primaryElapsedMs))
 const detailIsReceiver = computed(() => Boolean(attachmentDetailsMessage.value && attachmentDetailsMessage.value.senderDeviceId !== deviceInfo.value?.deviceId))
 const detailReceivedBytes = computed<number | undefined>(() => {
   const progress = detailProgress.value
   if (!progress) return undefined
-  const value = detailIsReceiver.value ? (progress.durableBytes ?? progress.transferred ?? progress.received) : (progress.remoteReceived ?? progress.transferred)
+  const value = progress.primaryBytes ?? (detailIsReceiver.value ? (progress.durableBytes ?? progress.transferred ?? progress.received) : (progress.remoteReceived ?? progress.transferred))
   if (value === undefined || value === null) return undefined
   return Math.max(0, Number(value || 0))
 })
 const detailSentBytes = computed(() => Math.max(0, Number(detailProgress.value?.sent ?? (detailIsReceiver.value ? 0 : detailProgress.value?.transferred) ?? 0)))
 const detailTotalBytes = computed(() => Math.max(0, Number(detailProgress.value?.total || attachmentDetails.value?.fileSize || attachmentDetailsMessage.value?.attachmentSize || 0)))
-const detailNetworkThroughput = computed(() => {
-  if (!detailProgress.value) return { primary: '暂未提供', secondary: '' }
-  return detailIsReceiver.value
-    ? formatTransferRate(Number(detailProgress.value?.speed || detailProgress.value?.windowThroughput || 0))
-    : formatTransferRate(Number(detailProgress.value?.confirmedThroughput || detailProgress.value?.speed || 0))
-})
+const detailLocalSendSpeed = computed(() => formatTransferRate(Number(detailProgress.value?.roleDiagnostics?.localSendSpeed || 0)))
 const detailAckLatency = computed(() => {
   if (!detailProgress.value) return '暂未提供'
-  return detailIsReceiver.value ? '接收端不适用' : (detailProgress.value.ackLatencyMs ? `${detailProgress.value.ackLatencyMs} ms` : '正在测量')
+  return detailIsReceiver.value ? '接收端不适用' : (detailProgress.value.ackLatencyMs ? `${detailProgress.value.ackLatencyMs} ms` : '暂未提供')
 })
 const detailTuningState = computed(() => {
   if (!detailProgress.value) return '暂未提供'
@@ -1330,7 +1355,7 @@ function transferProgressFor(message: any): any {
       snapshot.transferred = snapshot.total || message.attachmentSize || snapshot.transferred || 0
       snapshot.remoteReceived = snapshot.transferred
     }
-    return snapshot.phase ? snapshot : undefined
+    return snapshot.phase ? projectTransferProgress(snapshot, message) : undefined
   }
   const mine = message.senderDeviceId === deviceInfo.value?.deviceId
   const preferred = mine ? directions['remote-receive'] : directions.receive
@@ -1349,7 +1374,7 @@ function transferProgressFor(message: any): any {
       merged.phase = 'resuming'
       merged.state = 'active'
     }
-    return merged
+    return projectTransferProgress(merged, message)
   }
   // The preferred direction is the receiver-durable snapshot. Keep local
   // state/error fields for sender UX, but never let local socket metrics
@@ -1364,7 +1389,7 @@ function transferProgressFor(message: any): any {
     merged.errorCode = diagnostics.errorCode || merged.errorCode
     merged.retryable = diagnostics.retryable ?? merged.retryable
     merged.retries = diagnostics.retries ?? merged.retries
-    merged.localSendSpeed = authoritativeSpeed(diagnostics)
+    merged.localSendSpeed = Number(diagnostics.localSendSpeed || diagnostics.speed || diagnostics.confirmedThroughput || diagnostics.windowThroughput || 0)
   }
   // The send direction owns lifecycle controls. A receiver-durable snapshot
   // may provide bytes and speed, but it must never hide a local pause/resume.
@@ -1406,14 +1431,13 @@ function transferProgressFor(message: any): any {
     if (!messageCompleted) merged.phase = terminal.phase
     if (terminal.verified !== undefined) merged.verified = terminal.verified
   }
-  return merged
+  return projectTransferProgress(merged, message)
 }
 function attachmentTransfer(details: any): any { return details?.attachmentId ? transferProgressFor(attachmentDetailsMessage.value) : undefined }
 function transferProgressTransferred(message: any): number {
   const progress = transferProgressFor(message)
   if (!progress) return 0
-  if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived ?? progress.sent ?? progress.transferred ?? 0
-  return progress.durableBytes ?? progress.received ?? progress.transferred ?? 0
+  return progress.primaryBytes ?? (message.senderDeviceId === deviceInfo.value?.deviceId ? progress.remoteReceived ?? progress.sent ?? progress.transferred ?? 0 : progress.durableBytes ?? progress.received ?? progress.transferred ?? 0)
 }
 function transferProgressPercent(message: any): number {
   const progress = transferProgressFor(message)
@@ -1435,6 +1459,7 @@ function transferSpeedLabel(message: any): string {
   const speed = authoritativeSpeed(progress)
   if (speed > 0) return `${formatSpeed(speed)}/s`
   if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'finalizing'].includes(progress?.phase)) return transferPhaseLabel(progress.phase)
+  if (message.senderDeviceId === deviceInfo.value?.deviceId && progress?.receiverMetricsAvailable === false) return '等待接收端确认'
   return '正在测量'
 }
 function detailDisplayPhase(progress: any): string | undefined {
@@ -1469,7 +1494,7 @@ function transferProgressLabel(message: any): string {
 }
 function transferElapsedLabel(message: any): string {
   const progress = transferProgressFor(message)
-  return progress?.elapsedMs ? formatDuration(progress.elapsedMs) : '正在测量'
+  return progress?.primaryElapsedMs ? formatDuration(progress.primaryElapsedMs) : '正在测量'
 }
 function transferEtaLabel(message: any): string {
   const progress = transferProgressFor(message)
@@ -1477,7 +1502,7 @@ function transferEtaLabel(message: any): string {
   if (progress?.phase === 'awaiting_acceptance') return '接收后开始'
   if (progress?.phase === 'queued') return '前序完成后开始'
   if (progress?.phase === 'retrying' || progress?.phase === 'paused' || progress?.phase === 'waiting_network') return '网络恢复后继续'
-  const speed = Number(progress?.speed || progress?.averageSpeed || authoritativeSpeed(progress))
+  const speed = Number(authoritativeSpeed(progress) || (progress?.receiverMetricsAvailable ? progress?.averageSpeed : 0))
   const transferred = transferProgressTransferred(message)
   const total = Number(progress?.total || message?.attachmentSize || 0)
   const seconds = progress?.etaSeconds > 0 ? progress.etaSeconds : (speed > 0 && total > transferred ? Math.ceil((total - transferred) / speed) : 0)

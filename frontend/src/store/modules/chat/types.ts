@@ -160,6 +160,18 @@ export interface TransferProgress {
   sent?: number
   received?: number
   remoteReceived?: number
+  /** Unified receiver-durable projection used by bubble and detail views. */
+  primarySpeed?: number
+  primaryBytes?: number
+  primaryElapsedMs?: number
+  receiverMetricsAvailable?: boolean
+  roleDiagnostics?: {
+    localSendSpeed?: number
+    ackLatencyMs?: number
+    diskWriteMs?: number
+    checkpointSeq?: number
+    activeStreams?: number
+  }
   direction: 'send' | 'receive' | 'remote-receive'
   phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'writing' | 'durability_sync' | 'checkpoint_persist' | 'ack_emit' | 'verifying' | 'finalizing' | 'waiting_network' | 'retrying' | 'paused' | 'paused_local' | 'paused_peer' | 'paused_network_unstable' | 'resuming' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
 }

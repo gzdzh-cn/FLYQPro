@@ -316,6 +316,7 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 		transfer.v3Mu.Unlock()
 	}()
 	var lastCheckpointDuration time.Duration
+	var lastMetrics TransferMetricsSnapshotV1
 	deferCheckpoint := false
 	metricsEnabled := false
 	e.mu.RLock()
@@ -506,6 +507,8 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 				}
 			}
 			transfer.v3LastSpeed = rate
+			transfer.v3LastDiskWriteMs = lastCheckpointDuration.Milliseconds()
+			transfer.v3LastAckLatencyMs = elapsed.Milliseconds()
 			metricSeq := transfer.v3MetricSeq
 			averageSpeed, peakSpeed := transfer.v3AverageSpeed, transfer.v3PeakSpeed
 			streamCount := len(transfer.v3Streams)
@@ -518,6 +521,7 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 				}
 			}
 			snapshot := TransferMetricsSnapshotV1{MetricSeq: metricSeq, MetricGeneration: metricGeneration, CheckpointSeq: checkpointSeq, DurableBytes: durable, ElapsedMs: elapsedMs, Speed: rate, AverageSpeed: averageSpeed, PeakSpeed: peakSpeed, DiskWriteMs: lastCheckpointDuration.Milliseconds(), AckLatencyMs: elapsed.Milliseconds(), ChunkSize: acceptedChunkSize, WindowSize: len(pending), WindowBytes: pendingBytes, AckTargetBytes: batchLimit, StreamCount: streamCount, ActiveStreams: streamCount}
+			lastMetrics = snapshot
 			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "transferring", transferProgressOptions{
 				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes, activeStreams: snapshot.ActiveStreams, streamCount: snapshot.StreamCount,
 				transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
@@ -625,9 +629,31 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 			}
 			transfer.v3Mu.Lock()
 			metricSeq, checkpointSeq := transfer.v3MetricSeq, transfer.v3DurableVersion
+			lastSpeed, averageSpeed, peakSpeed := transfer.v3LastSpeed, transfer.v3AverageSpeed, transfer.v3PeakSpeed
+			lastDiskWriteMs, lastAckLatencyMs := transfer.v3LastDiskWriteMs, transfer.v3LastAckLatencyMs
 			transfer.v3Mu.Unlock()
 			elapsedMs, metricGeneration := e.transferMetricSnapshot(attachmentID, "receive")
-			return ack(frame, false, &TransferMetricsSnapshotV1{MetricSeq: metricSeq, MetricGeneration: metricGeneration, CheckpointSeq: checkpointSeq, DurableBytes: durableBytes(), ElapsedMs: elapsedMs})
+			lastMetrics.MetricSeq = metricSeq
+			lastMetrics.MetricGeneration = metricGeneration
+			lastMetrics.CheckpointSeq = checkpointSeq
+			lastMetrics.DurableBytes = durableBytes()
+			lastMetrics.ElapsedMs = elapsedMs
+			if lastMetrics.Speed == 0 {
+				lastMetrics.Speed = lastSpeed
+			}
+			if lastMetrics.AverageSpeed == 0 {
+				lastMetrics.AverageSpeed = averageSpeed
+			}
+			if lastMetrics.PeakSpeed == 0 {
+				lastMetrics.PeakSpeed = peakSpeed
+			}
+			if lastMetrics.DiskWriteMs == 0 {
+				lastMetrics.DiskWriteMs = lastDiskWriteMs
+			}
+			if lastMetrics.AckLatencyMs == 0 {
+				lastMetrics.AckLatencyMs = lastAckLatencyMs
+			}
+			return ack(frame, false, &lastMetrics)
 		}
 		if err := consume(frame); err != nil {
 			_ = ack(frame, true, nil)

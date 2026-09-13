@@ -224,6 +224,8 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			options.windowThroughput = sample.metrics.Speed
 			options.averageSpeed = sample.metrics.AverageSpeed
 			options.peakSpeed = sample.metrics.PeakSpeed
+			options.diskWriteMs = sample.metrics.DiskWriteMs
+			options.ackLatency = time.Duration(sample.metrics.AckLatencyMs) * time.Millisecond
 			options.chunkSize = sample.metrics.ChunkSize
 			options.windowSize = sample.metrics.WindowSize
 			options.windowBytes = sample.metrics.WindowBytes
@@ -552,6 +554,9 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 				metricSource: "receiver-durable", metricGeneration: snapshot.MetricGeneration, authoritativeElapsedMs: snapshot.ElapsedMs,
 				metricSeq: snapshot.MetricSeq, checkpointSeq: snapshot.CheckpointSeq, durableBytes: snapshot.DurableBytes,
 				confirmedThroughput: snapshot.Speed, averageSpeed: snapshot.AverageSpeed, peakSpeed: snapshot.PeakSpeed,
+				diskWriteMs: snapshot.DiskWriteMs, ackLatency: time.Duration(snapshot.AckLatencyMs) * time.Millisecond,
+				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes,
+				ackTargetBytes: snapshot.AckTargetBytes, streamCount: snapshot.StreamCount, activeStreams: snapshot.ActiveStreams,
 				transferMode: v3TransferMode, displayLocalMetrics: true,
 			})
 		}
