@@ -3,6 +3,7 @@ import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message,
 
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
 const terminalTransferPhases = new Set(['completed', 'canceled', 'cancelled', 'rejected', 'failed'])
+const persistenceTransferPhases = new Set(['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'])
 
 function isTerminalTransfer(progress?: TransferProgress) {
   return Boolean(progress && (terminalTransferPhases.has(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')))
@@ -20,6 +21,8 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     if (generation !== previousGeneration) return generation < previousGeneration
   }
   const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
+  let comparable = false
+  let strictlyOlder = false
   for (const field of orderedFields) {
     const currentValue = progress[field]
     const previousValue = previous[field]
@@ -27,10 +30,27 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     const currentNumber = Number(currentValue)
     const previousNumber = Number(previousValue)
     if (Number.isFinite(currentNumber) && Number.isFinite(previousNumber) && currentNumber !== previousNumber) {
-      return currentNumber < previousNumber
+      comparable = true
+      if (currentNumber > previousNumber) return false
+      strictlyOlder = true
     }
   }
-  return false
+  // A phase-only event can arrive after a metric snapshot through the Wails
+  // event queue. It must not erase the snapshot's speed/bytes just because it
+  // has no metric sequence of its own.
+  if (previous.metricSeq !== undefined && progress.metricSeq === undefined) {
+    const currentDurable = Number(progress.durableBytes ?? progress.transferred ?? 0)
+    const previousDurable = Number(previous.durableBytes ?? previous.transferred ?? 0)
+    const currentCheckpoint = Number(progress.checkpointSeq ?? 0)
+    const previousCheckpoint = Number(previous.checkpointSeq ?? 0)
+    if (currentDurable <= previousDurable && currentCheckpoint <= previousCheckpoint) return true
+  }
+  if (progress.metricSeq !== undefined && previous.metricSeq !== undefined &&
+      Number(progress.metricSeq) === Number(previous.metricSeq) &&
+      persistenceTransferPhases.has(progress.phase) && ['transferring', 'receiving'].includes(previous.phase)) {
+    return true
+  }
+  return comparable && strictlyOlder
 }
 
 function requestTime(request: FriendRequest) {

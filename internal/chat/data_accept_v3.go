@@ -452,11 +452,12 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 				transfer.v3Mu.Lock()
 				durable := transfer.durableBytes
 				transfer.v3Mu.Unlock()
-				phaseOptions := transferProgressOptions{
-					sessionID: fmt.Sprintf("%x", first.SessionID), generation: first.Generation,
-					transferMode: v3TransferMode, transport: "TLS13/TCP-v3",
-					metricSource: "receiver-durable", durableBytes: durable,
-				}
+				phaseOptions := receiverProgressOptions(transfer, nil)
+				phaseOptions.sessionID = fmt.Sprintf("%x", first.SessionID)
+				phaseOptions.generation = first.Generation
+				phaseOptions.transferMode = v3TransferMode
+				phaseOptions.transport = "TLS13/TCP-v3"
+				phaseOptions.durableBytes = durable
 				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "durability_sync", phaseOptions)
 				started := time.Now()
 				if err := commitV3Checkpoint(transfer, versionAfter); err != nil {
@@ -466,6 +467,11 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 				transfer.v3Mu.Lock()
 				durable = transfer.durableBytes
 				transfer.v3Mu.Unlock()
+				phaseOptions = receiverProgressOptions(transfer, nil)
+				phaseOptions.sessionID = fmt.Sprintf("%x", first.SessionID)
+				phaseOptions.generation = first.Generation
+				phaseOptions.transferMode = v3TransferMode
+				phaseOptions.transport = "TLS13/TCP-v3"
 				phaseOptions.durableBytes = durable
 				phaseOptions.diskWriteMs = lastCheckpointDuration.Milliseconds()
 				phaseOptions.checkpointSeq = versionAfter
@@ -499,6 +505,7 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 					transfer.v3PeakSpeed = rate
 				}
 			}
+			transfer.v3LastSpeed = rate
 			metricSeq := transfer.v3MetricSeq
 			averageSpeed, peakSpeed := transfer.v3AverageSpeed, transfer.v3PeakSpeed
 			streamCount := len(transfer.v3Streams)

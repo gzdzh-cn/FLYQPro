@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -15,6 +16,35 @@ func commitVerifiedV3File(source, target string, size int64, sum string) error {
 	persistence := currentTransferPersistenceIO()
 	if err := persistence.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
+	}
+	// EndFile may be retried after the destination was committed but before
+	// metadata persistence completed. Treat an already committed, matching
+	// destination as success. This is especially important on Windows where
+	// Rename cannot replace an existing file and returns ACCESS_DENIED.
+	if targetInfo, statErr := os.Stat(target); statErr == nil {
+		if targetInfo.Size() != size {
+			return fmt.Errorf("destination exists with unexpected size")
+		}
+		input, openErr := persistence.Open(target)
+		if openErr != nil {
+			return openErr
+		}
+		digest := sha256.New()
+		_, copyErr := io.Copy(digest, input)
+		closeErr := input.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if !strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), sum) {
+			return fmt.Errorf("destination exists with different SHA-256")
+		}
+		if source != target {
+			_ = persistence.Remove(source)
+		}
+		return syncCommittedV3Directory(filepath.Dir(target))
 	}
 	if err := renameV3WithRetry(persistence, source, target); err == nil {
 		// The source was synced and closed before this function is called. On

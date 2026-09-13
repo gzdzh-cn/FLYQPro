@@ -1,7 +1,12 @@
 package chat
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -46,5 +51,29 @@ func TestV3FrameReaderCloseUnblocksRead(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("reader remained blocked after close")
+	}
+}
+
+func TestCommitVerifiedV3FileAcceptsAlreadyCommittedDestination(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "payload.part")
+	target := filepath.Join(root, "payload.bin")
+	payload := []byte("already committed payload")
+	sum := sha256.Sum256(payload)
+	if err := os.WriteFile(source, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitVerifiedV3File(source, target, int64(len(payload)), hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("matching committed destination was not idempotent: %v", err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source part was not cleaned after idempotent commit: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("destination changed after idempotent commit: %v %q", err, got)
 	}
 }

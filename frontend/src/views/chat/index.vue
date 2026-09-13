@@ -138,7 +138,7 @@
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
                 <p><span>已耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
-                <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailProgress?.phase) }}</strong></p>
+                <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailDisplayPhase(detailProgress)) }}</strong></p>
                 <p v-if="detailProgress?.errorCode"><span>失败原因</span><strong>{{ transferErrorLabel(detailProgress.errorCode) }} · {{ transferRetryLabel(detailProgress) }}</strong></p>
                 <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
                 <p><span>{{ detailIsReceiver ? '已落盘容量' : '对方已确认' }}</span><strong>{{ detailReceivedBytes === undefined ? '暂未提供' : formatMetricBytes(detailReceivedBytes) }}</strong></p>
@@ -1269,9 +1269,18 @@ function transferSpeedLabel(message: any): string {
   if (progress?.phase === 'paused') return '等待设备上线'
   if (progress?.phase === 'waiting_network') return '等待网络恢复'
   if (progress?.phase === 'verifying') return '正在校验 SHA-256'
-  if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'finalizing'].includes(progress?.phase)) return transferPhaseLabel(progress.phase)
   const speed = authoritativeSpeed(progress)
-  return speed ? `${formatSpeed(speed)}/s` : '正在测量'
+  if (speed > 0) return `${formatSpeed(speed)}/s`
+  if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'finalizing'].includes(progress?.phase)) return transferPhaseLabel(progress.phase)
+  return '正在测量'
+}
+function detailDisplayPhase(progress: any): string | undefined {
+  const phase = progress?.phase
+  if (!phase) return phase
+  if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'].includes(phase)) {
+    return progress.direction === 'remote-receive' ? 'remote-receive' : 'receiving'
+  }
+  return phase
 }
 function transferProgressLabel(message: any): string {
   const progress = transferProgressFor(message)
@@ -1287,7 +1296,8 @@ function transferProgressLabel(message: any): string {
   if (progress.phase === 'paused') return '等待恢复'
   if (progress.phase === 'waiting_network') return '等待网络恢复'
   if (progress.phase === 'verifying') return '校验中'
-  if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'finalizing'].includes(progress.phase)) return transferPhaseLabel(progress.phase)
+  if (['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'].includes(progress.phase)) return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方接收中' : '接收中'
+  if (progress.phase === 'finalizing') return transferPhaseLabel(progress.phase)
   if (progress.phase === 'completed') return message.senderDeviceId === deviceInfo.value?.deviceId ? '对方已接收' : '接收完成'
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return '发送中'
   return '接收中'
