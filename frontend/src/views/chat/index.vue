@@ -98,7 +98,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span class="attachment-pending-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="attachmentActionBusy(message)" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
+                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="attachmentActionBusy(message)" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用时间 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
@@ -137,7 +137,7 @@
                 <p><span>平均速度</span><strong class="attachment-details-rate"><span>{{ detailProgressAverageSpeed.primary }}</span><small v-if="detailProgressAverageSpeed.secondary">{{ detailProgressAverageSpeed.secondary }}</small></strong></p>
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
-                <p><span>已耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
+                <p><span>已用时间</span><strong>{{ detailProgressElapsed }}</strong></p>
                 <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailDisplayPhase(detailProgress)) }}</strong></p>
                 <p v-if="detailProgress?.errorCode"><span>失败原因</span><strong>{{ transferErrorLabel(detailProgress.errorCode) }} · {{ transferRetryLabel(detailProgress) }}</strong></p>
                 <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
@@ -1126,8 +1126,8 @@ async function resumeAttachment(message: any) {
   delete attachmentActions[message.attachmentId]
   try {
     await ChatService.ResumeAttachment(message.attachmentId)
-    message.attachmentStatus = 'pending'
-    message.status = 'pending'
+    message.attachmentStatus = 'resuming'
+    message.status = 'resuming'
   } catch (error: any) {
     attachmentLocalStates[message.attachmentId] = 'paused'
     message.attachmentStatus = previousStatus || 'paused'
@@ -1178,7 +1178,11 @@ function notifyAttachmentResult(message: any) {
     default: Message.info('文件正在等待对方接收')
   }
 }
-function attachmentNeedsDecision(message: any): boolean { return !attachmentIsPaused(message) && message?.senderDeviceId !== deviceInfo.value?.deviceId && message?.attachmentStatus === 'pending' }
+function attachmentNeedsDecision(message: any): boolean {
+  if (attachmentIsPaused(message) || message?.senderDeviceId === deviceInfo.value?.deviceId || message?.attachmentStatus !== 'pending') return false
+  const phase = transferProgressFor(message)?.phase
+  return !phase || ['pending', 'awaiting_acceptance'].includes(phase)
+}
 function attachmentAwaitingAcceptance(message: any): boolean {
   if (attachmentIsPaused(message) || message?.senderDeviceId !== deviceInfo.value?.deviceId || !['pending', 'preparing_thumbnail'].includes(message?.attachmentStatus)) return false
   const progress = transferProgressFor(message)
@@ -1245,6 +1249,7 @@ function transferDirectionLabel(direction?: string) { return ({ send: '发送', 
 function tuningStateLabel(state?: string) { return ({ probing: '探测中', observing: '接收端监测', accelerating: '加速中', stable: '稳定', backing_off: '降速恢复' } as Record<string, string>)[state || ''] || state || '兼容模式' }
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
 const terminalTransferPhases = new Set(['completed', 'canceled', 'rejected', 'failed'])
+const senderLifecyclePhases = new Set(['queued', 'transferring', 'resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'rejected', 'failed'])
 function transferProgressFor(message: any): any {
   if (!message?.attachmentId) return undefined
   const attachmentId = message.attachmentId
@@ -1269,8 +1274,12 @@ function transferProgressFor(message: any): any {
     merged.retries = diagnostics.retries ?? merged.retries
     merged.localSendSpeed = authoritativeSpeed(diagnostics)
   }
-  if (!preferred && diagnostics) merged.phase = diagnostics.phase
-  if (diagnostics?.phase === 'paused') {
+  // The send direction owns lifecycle controls. A receiver-durable snapshot
+  // may provide bytes and speed, but it must never hide a local pause/resume.
+  if (diagnostics && (!preferred || senderLifecyclePhases.has(diagnostics.phase))) {
+    merged.phase = diagnostics.phase
+  }
+  if (diagnostics && ['paused', 'paused_local', 'paused_peer', 'paused_network_unstable'].includes(diagnostics.phase)) {
     merged.speed = undefined
     merged.averageSpeed = undefined
     merged.peakSpeed = undefined
@@ -1350,11 +1359,6 @@ function transferProgressLabel(message: any): string {
 }
 function transferElapsedLabel(message: any): string {
   const progress = transferProgressFor(message)
-  if (attachmentIsPaused(message)) return '已暂停'
-  if (progress?.phase === 'awaiting_acceptance') return '等待接收'
-  if (progress?.phase === 'queued') return '等待传输槽位'
-  if (progress?.phase === 'retrying') return '自动重连'
-  if (progress?.phase === 'paused') return '等待上线'
   return progress?.elapsedMs ? formatDuration(progress.elapsedMs) : '正在测量'
 }
 function transferEtaLabel(message: any): string {

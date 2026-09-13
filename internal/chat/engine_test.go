@@ -259,6 +259,62 @@ func TestTransferProgressPercentRequiresCompletedPhaseFor100(t *testing.T) {
 	}
 }
 
+func TestTransferMetricCountsOnlyEffectiveTransferPhases(t *testing.T) {
+	base := time.Unix(100, 0)
+	metric, reset := advanceTransferMetric(transferMetric{}, false, base, 10, "queued", 1)
+	if !reset || metric.activeElapsed != 0 {
+		t.Fatalf("initial metric = %+v reset=%v", metric, reset)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(time.Second), 10, "transferring", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(3*time.Second), 30, "receiving", 1)
+	if metric.activeElapsed != 2*time.Second {
+		t.Fatalf("active elapsed = %s, want 2s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(8*time.Second), 30, "paused_local", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(12*time.Second), 30, "retrying", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(15*time.Second), 30, "resuming", 1)
+	if metric.activeElapsed != 2*time.Second {
+		t.Fatalf("excluded phases changed elapsed to %s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(16*time.Second), 30, "writing", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(19*time.Second), 60, "durability_sync", 1)
+	if metric.activeElapsed != 5*time.Second {
+		t.Fatalf("durable transfer elapsed = %s, want 5s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(25*time.Second), 60, "finalizing", 1)
+	if metric.activeElapsed != 5*time.Second {
+		t.Fatalf("finalization changed elapsed to %s", metric.activeElapsed)
+	}
+	metric, reset = advanceTransferMetric(metric, true, base.Add(30*time.Second), 0, "queued", 2)
+	if !reset || metric.activeElapsed != 0 || metric.generation != 2 {
+		t.Fatalf("new generation did not reset metric: %+v reset=%v", metric, reset)
+	}
+}
+
+func TestPauseAttachmentFromPeerStopsOutgoingTransfer(t *testing.T) {
+	engine := NewEngine()
+	transfer := &outgoingTransfer{
+		message: Message{MessageID: "message", AttachmentID: "attachment", AttachmentSize: 100},
+		peerID:  "peer",
+		pause:   make(chan struct{}),
+		data:    make(map[int]*wireSession),
+	}
+	engine.outgoing[transfer.message.AttachmentID] = transfer
+	engine.pauseAttachmentFromPeer(transfer.message.AttachmentID, transfer.peerID)
+	select {
+	case <-transfer.pause:
+	default:
+		t.Fatal("peer pause did not stop outgoing transfer")
+	}
+	engine.pauseAttachmentFromPeer(transfer.message.AttachmentID, transfer.peerID)
+	engine.transferMetricsMu.Lock()
+	metric := engine.transferMetrics[transfer.message.AttachmentID+"|send"]
+	engine.transferMetricsMu.Unlock()
+	if metric.lastPhase != "paused_peer" {
+		t.Fatalf("peer pause phase = %q", metric.lastPhase)
+	}
+}
+
 func TestEmitTransferProgressPrefersConfirmedRemoteSpeed(t *testing.T) {
 	engine := NewEngine()
 	engine.emitTransferProgress("message", "attachment", "peer", 0, 100, "remote-receive", "receiving")

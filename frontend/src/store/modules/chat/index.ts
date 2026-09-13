@@ -4,6 +4,7 @@ import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message,
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
 const terminalTransferPhases = new Set(['completed', 'canceled', 'cancelled', 'rejected', 'failed'])
 const persistenceTransferPhases = new Set(['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'])
+const lifecycleTransferPhases = new Set(['queued', 'resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'cancelled', 'rejected', 'failed'])
 
 function isTerminalTransfer(progress?: TransferProgress) {
   return Boolean(progress && (terminalTransferPhases.has(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')))
@@ -20,6 +21,12 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     const previousGeneration = transferGeneration(previous)
     if (generation !== previousGeneration) return generation < previousGeneration
   }
+  const updatedAt = Date.parse(progress.updatedAt || '')
+  const previousUpdatedAt = Date.parse(previous.updatedAt || '')
+  if (Number.isFinite(updatedAt) && Number.isFinite(previousUpdatedAt) && updatedAt < previousUpdatedAt) return true
+  // Lifecycle events are valid without throughput counters. Their timestamp
+  // orders pause/resume transitions while the metric fields remain frozen.
+  if (lifecycleTransferPhases.has(progress.phase)) return false
   const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
   let comparable = false
   let strictlyOlder = false

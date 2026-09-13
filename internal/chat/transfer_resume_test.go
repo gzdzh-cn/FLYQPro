@@ -47,6 +47,49 @@ func TestTransferResumeStateRoundTripAndRangeNormalization(t *testing.T) {
 	}
 }
 
+func TestResumeIncomingAttachmentKeepsAcceptedResumingState(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	conversationID, err := EnsureConversation(ctx, "resume-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := Message{
+		MessageID:        "resume-incoming-message",
+		ConversationID:   conversationID,
+		SenderDeviceID:   "resume-peer",
+		Kind:             "file",
+		Content:          "resume.bin",
+		Status:           "paused",
+		CreatedAt:        nowString(),
+		AttachmentID:     "resume-incoming-attachment",
+		AttachmentName:   "resume.bin",
+		AttachmentSize:   128,
+		AttachmentStatus: "paused",
+	}
+	if err := SaveMessage(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, FileSize: message.AttachmentSize, Status: "paused"}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	engine.identity.DeviceID = "local-device"
+	resumed, err := engine.ResumeAttachment(ctx, message.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Status != "resuming" || resumed.AttachmentStatus != "resuming" {
+		t.Fatalf("resume returned initial-offer state: %+v", resumed)
+	}
+	stored, err := GetMessage(ctx, message.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "resuming" || stored.AttachmentStatus != "resuming" {
+		t.Fatalf("resume persisted initial-offer state: %+v", stored)
+	}
+}
+
 func TestTransferResumeStateRejectsExpiredAndMismatchedIdentity(t *testing.T) {
 	openSharedFolderTestDatabase(t)
 	state := transferResumeState{AttachmentID: "attachment-2", MessageID: "message", SenderDeviceID: "sender", FileSize: 10, SHA256: "hash"}
