@@ -201,7 +201,7 @@ func TestFinalCommitRenameFailurePreservesPart(t *testing.T) {
 	}
 }
 
-func TestFinalCommitTargetSyncFailureReportsFailureAfterAtomicRename(t *testing.T) {
+func TestFinalCommitDoesNotSyncReadOnlyTargetAfterAtomicRename(t *testing.T) {
 	root := t.TempDir()
 	finalPath := filepath.Join(root, "target-sync.bin")
 	w, err := NewRangeWriterV3(finalPath, 4)
@@ -222,8 +222,8 @@ func TestFinalCommitTargetSyncFailureReportsFailureAfterAtomicRename(t *testing.
 			return nil
 		},
 	})
-	if err := w.Complete(hash[:]); err == nil {
-		t.Fatal("target sync failure was ignored")
+	if err := w.Complete(hash[:]); err != nil {
+		t.Fatalf("atomic commit should not reopen target for Sync: %v", err)
 	}
 	if got, err := os.ReadFile(finalPath); err != nil || string(got) != "data" {
 		t.Fatalf("atomic destination was not retained after sync failure: %v %q", err, got)

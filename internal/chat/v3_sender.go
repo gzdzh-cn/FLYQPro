@@ -534,6 +534,13 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			break
 		}
 	}
+	if matchesV3ReplyWithPayload(reply, end, FrameChunkNack) {
+		if result, decodeErr := decodeV3FinalizationError(reply.Payload); decodeErr == nil {
+			cause := fmt.Errorf("receiver finalization failed: %s", result.ErrorCode)
+			return newTransferError(result.ErrorCode, result.Retryable, cause)
+		}
+		return newTransferError(ErrFinalizeIOFailed, true, fmt.Errorf("receiver returned an invalid finalization error"))
+	}
 	if !matchesV3Reply(reply, end, FrameEndFile) || reply.ChunkHash != digest {
 		return fmt.Errorf("v3 receiver did not confirm file verification")
 	}

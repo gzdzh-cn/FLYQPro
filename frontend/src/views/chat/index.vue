@@ -1121,7 +1121,7 @@ async function pauseOrResumeAttachment(message: any) {
 function attachmentActionBusy(message: any): boolean { return Boolean(message?.attachmentId && attachmentActions[message.attachmentId]) }
 function transferCanPause(message: any): boolean {
   const phase = transferProgressFor(message)?.phase
-  return ['transferring', 'receiving', 'remote-receive', 'resuming', 'retrying'].includes(phase)
+  return ['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'resuming', 'retrying', 'waiting_network'].includes(phase)
 }
 function transferCanResume(message: any): boolean {
   return transferProgressFor(message)?.phase === 'paused'
@@ -1251,7 +1251,7 @@ function transferProgressTransferred(message: any): number {
   const progress = transferProgressFor(message)
   if (!progress) return 0
   if (message.senderDeviceId === deviceInfo.value?.deviceId) return progress.remoteReceived ?? progress.sent ?? progress.transferred ?? 0
-  return progress.received ?? progress.transferred ?? 0
+  return progress.durableBytes ?? progress.received ?? progress.transferred ?? 0
 }
 function transferProgressPercent(message: any): number {
   const progress = transferProgressFor(message)

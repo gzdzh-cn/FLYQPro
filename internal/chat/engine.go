@@ -44,6 +44,7 @@ type Engine struct {
 	done                    chan struct{}
 	peers                   map[string]Peer
 	incoming                map[string]*incomingFile
+	pausingIncoming         map[string]*incomingPause
 	pendingIncoming         map[string]*pendingIncomingOffer
 	outgoing                map[string]*outgoingTransfer
 	preparing               map[string]*preparingAttachment
@@ -373,9 +374,16 @@ type incomingFile struct {
 	v3Mu                sync.Mutex
 	v3Ranges            []ByteRange
 	v3Streams           map[uint16]*v3StreamState
+	v3Readers           map[uint16]*v3FrameReader
 	v3SessionID         [16]byte
 	v3Generation        uint64
 	v3Finalizing        bool
+	v3Paused            bool
+	v3MetricSeq         uint64
+	v3MetricAt          time.Time
+	v3MetricBytes       int64
+	v3AverageSpeed      float64
+	v3PeakSpeed         float64
 	v3Done              chan string
 	v3CheckpointMu      sync.Mutex
 	v3Checkpoint        *v3Checkpoint
@@ -393,6 +401,12 @@ type incomingFile struct {
 	finalizationDone    chan struct{}
 	finalizationStarted bool
 	finalizationStatus  string
+	finalizationResult  v3FinalizationError
+	finalizationCause   error
+}
+
+type incomingPause struct {
+	done chan struct{}
 }
 
 // v3StreamState tracks one dedicated binary data connection. File completion
@@ -632,7 +646,7 @@ func binaryTransferID(value string) [16]byte {
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), fileControls: make(map[string]*fileControlConnection)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pausingIncoming: make(map[string]*incomingPause), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), fileControls: make(map[string]*fileControlConnection)}
 }
 
 func configureTCPConnection(conn net.Conn) {
@@ -2448,13 +2462,61 @@ func persistIncomingResume(transfer *incomingFile) error {
 }
 
 func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
+	if pause := e.startIncomingPause(attachmentID, reason); pause != nil {
+		<-pause.done
+	}
+}
+
+func (e *Engine) pauseIncomingFileAsync(attachmentID, reason string) {
+	_ = e.startIncomingPause(attachmentID, reason)
+}
+
+func (e *Engine) startIncomingPause(attachmentID, reason string) *incomingPause {
 	e.mu.Lock()
 	transfer := e.incoming[attachmentID]
 	delete(e.incoming, attachmentID)
-	e.mu.Unlock()
 	if transfer == nil {
-		return
+		e.mu.Unlock()
+		return nil
 	}
+	if e.pausingIncoming == nil {
+		e.pausingIncoming = make(map[string]*incomingPause)
+	}
+	pause := &incomingPause{done: make(chan struct{})}
+	e.pausingIncoming[attachmentID] = pause
+	e.mu.Unlock()
+	transfer.v3Mu.Lock()
+	if transfer.v3Paused {
+		transfer.v3Mu.Unlock()
+		close(pause.done)
+		return pause
+	}
+	transfer.v3Paused = true
+	readers := make([]*v3FrameReader, 0, len(transfer.v3Readers))
+	for _, reader := range transfer.v3Readers {
+		readers = append(readers, reader)
+	}
+	transfer.v3Mu.Unlock()
+	// Closing the readers first makes a user pause independent of a blocked
+	// network read. The durable range snapshot is completed in the worker below.
+	for _, reader := range readers {
+		if reader != nil {
+			reader.Close()
+		}
+	}
+	go e.finishIncomingPause(transfer, attachmentID, reason)
+	return pause
+}
+
+func (e *Engine) finishIncomingPause(transfer *incomingFile, attachmentID, reason string) {
+	defer func() {
+		e.mu.Lock()
+		if pause := e.pausingIncoming[attachmentID]; pause != nil {
+			delete(e.pausingIncoming, attachmentID)
+			close(pause.done)
+		}
+		e.mu.Unlock()
+	}()
 	transfer.v3IOMu.Lock()
 	defer transfer.v3IOMu.Unlock()
 	if transfer.file == nil {
@@ -2466,8 +2528,12 @@ func (e *Engine) pauseIncomingFile(attachmentID, reason string) {
 		transfer.parallelMu.Unlock()
 	}
 	closeParallelSessions(transfer)
+	transfer.resumeMu.Lock()
 	transfer.resumeState.State = TransferPausedLocal
-	_ = persistIncomingResume(transfer)
+	transfer.resumeMu.Unlock()
+	if err := persistIncomingResume(transfer); err != nil {
+		log.Printf("文件接收暂停状态保存失败: attachment=%s error=%s", attachmentID, redactDiagnosticError(err))
+	}
 	if transfer.parallel {
 		transfer.resumeMu.Lock()
 		offset := contiguousTransferOffset(transfer.resumeState.CompletedRanges, transfer.expected)
@@ -2688,6 +2754,16 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 	return status
 }
 
+func (transfer *incomingFile) finalizationSnapshot() v3FinalizationError {
+	transfer.finalizationMu.Lock()
+	defer transfer.finalizationMu.Unlock()
+	result := transfer.finalizationResult
+	if result.Version == 0 {
+		result = v3FinalizationError{Version: v3FinalizationErrorVersion, Status: transfer.finalizationStatus, ErrorCode: ErrFinalizeIOFailed, Retryable: true}
+	}
+	return result
+}
+
 func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingFile) string {
 	transfer.v3Mu.Lock()
 	received := transfer.received
@@ -2845,6 +2921,9 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 	received = transfer.received
 	transfer.v3Mu.Unlock()
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "completed", receiverProgressOptions(transfer, &verified))
+	transfer.finalizationMu.Lock()
+	transfer.finalizationResult = v3FinalizationError{Version: v3FinalizationErrorVersion, Status: "completed", Verified: true, DurableBytes: transfer.durableBytes, CommittedPath: localPath}
+	transfer.finalizationMu.Unlock()
 	if transfer.v3Done != nil {
 		transfer.v3Done <- "completed"
 	}
@@ -2882,11 +2961,16 @@ func (e *Engine) recordIncomingFinalizationFailure(attachmentID string, transfer
 	if cause != nil {
 		reason = fmt.Sprintf("%s: %s", code, redactDiagnosticText(cause.Error()))
 	}
+	log.Printf("文件最终化失败: attachment=%s code=%s retryable=%t verified=%t path=%s reason=%s", attachmentID, code, retryable, verified, redactDiagnosticText(localPath), redactDiagnosticText(reason))
 	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": "failed", "localPath": localPath, "reason": reason})
 	transfer.v3Mu.Lock()
 	received := transfer.received
 	transfer.v3Mu.Unlock()
 	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", transferProgressOptions{verified: &verified, errorCode: string(code), retryable: retryable, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
+	transfer.finalizationMu.Lock()
+	transfer.finalizationResult = v3FinalizationError{Version: v3FinalizationErrorVersion, Status: "failed", ErrorCode: code, Retryable: retryable, Verified: verified, DurableBytes: transfer.durableBytes, CommittedPath: localPath}
+	transfer.finalizationCause = cause
+	transfer.finalizationMu.Unlock()
 	if transfer.v3Done != nil {
 		transfer.v3Done <- "failed"
 	}
@@ -3500,7 +3584,7 @@ func (e *Engine) PauseAttachment(attachmentID string) error {
 				_ = writeWire(session.conn, wireMessage{Type: "file_pause", AttachmentID: attachmentID, Status: "paused"})
 			}(transfer.session)
 		}
-		e.pauseIncomingFile(attachmentID, "USER_PAUSED")
+		e.pauseIncomingFileAsync(attachmentID, "USER_PAUSED")
 		return nil
 	}
 	if offer != nil {
@@ -3515,6 +3599,16 @@ func (e *Engine) PauseAttachment(attachmentID string) error {
 // an incoming task it changes the local state back to pending; the sender's
 // next offer will reuse the same resume state.
 func (e *Engine) ResumeAttachment(ctx context.Context, attachmentID string) (Message, error) {
+	e.mu.RLock()
+	pause := e.pausingIncoming[attachmentID]
+	e.mu.RUnlock()
+	if pause != nil {
+		select {
+		case <-pause.done:
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+		}
+	}
 	attachment, err := GetAttachment(ctx, attachmentID)
 	if err != nil {
 		return Message{}, err
@@ -4866,7 +4960,13 @@ func (e *Engine) sendFile(ctx context.Context, deviceID, path, relativePath stri
 		if errors.Is(prepareErr, errAttachmentCanceled) {
 			status = "canceled"
 		}
-		result := e.finishAttachmentSend(ctx, message, status)
+		terminalOptions := transferProgressOptions{}
+		if status == "failed" {
+			code, retryable := transferErrorInfo(err)
+			terminalOptions.errorCode = string(code)
+			terminalOptions.retryable = retryable
+		}
+		result := e.finishAttachmentSend(ctx, message, status, terminalOptions)
 		if status == "canceled" {
 			return result, nil
 		}
@@ -6565,7 +6665,7 @@ func readFileOfferResponse(reader *wireReader, attachmentID string) (wireMessage
 	}
 }
 
-func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string) Message {
+func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, status string, terminalOptions ...transferProgressOptions) Message {
 	confirmedBytes := message.AttachmentSize
 	if status != "sent" {
 		confirmedBytes = e.lastTransferBytes(message.AttachmentID, "remote-receive")
@@ -6591,9 +6691,19 @@ func (e *Engine) finishAttachmentSend(ctx context.Context, message Message, stat
 		verified := status == "sent"
 		peerID := strings.TrimPrefix(message.ConversationID, "conv-")
 		if status != "sent" {
-			e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "remote-receive", phase, transferProgressOptions{transferMode: binaryTransferMode, verified: &verified})
+			options := transferProgressOptions{transferMode: binaryTransferMode, verified: &verified}
+			if len(terminalOptions) > 0 {
+				options.errorCode = terminalOptions[0].errorCode
+				options.retryable = terminalOptions[0].retryable
+			}
+			e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "remote-receive", phase, options)
 		}
-		e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "send", phase, transferProgressOptions{verified: &verified})
+		options := transferProgressOptions{verified: &verified}
+		if len(terminalOptions) > 0 {
+			options.errorCode = terminalOptions[0].errorCode
+			options.retryable = terminalOptions[0].retryable
+		}
+		e.emitTransferProgress(message.MessageID, message.AttachmentID, peerID, confirmedBytes, message.AttachmentSize, "send", phase, options)
 	}
 	return message
 }

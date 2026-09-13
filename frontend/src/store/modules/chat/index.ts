@@ -12,6 +12,27 @@ function transferGeneration(progress?: TransferProgress) {
   return progress?.generation === undefined ? 0 : Number(progress.generation)
 }
 
+function progressIsOlder(progress: TransferProgress, previous?: TransferProgress) {
+  if (!previous) return false
+  if (progress.generation !== undefined && previous.generation !== undefined) {
+    const generation = transferGeneration(progress)
+    const previousGeneration = transferGeneration(previous)
+    if (generation !== previousGeneration) return generation < previousGeneration
+  }
+  const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
+  for (const field of orderedFields) {
+    const currentValue = progress[field]
+    const previousValue = previous[field]
+    if (currentValue === undefined || previousValue === undefined) continue
+    const currentNumber = Number(currentValue)
+    const previousNumber = Number(previousValue)
+    if (Number.isFinite(currentNumber) && Number.isFinite(previousNumber) && currentNumber !== previousNumber) {
+      return currentNumber < previousNumber
+    }
+  }
+  return false
+}
+
 function requestTime(request: FriendRequest) {
   const updated = Date.parse(request.updatedAt || '')
   const created = Date.parse(request.createdAt || '')
@@ -132,17 +153,17 @@ export const useChatStore = defineStore('chat', {
           const existingTerminal = this.transferHistory[attachmentId]
           if (existingTerminal && isTerminalTransfer(existingTerminal)) {
             const startsRetry = ['queued', 'retrying', 'resuming'].includes(progress.phase)
-            if (!startsRetry && transferGeneration(progress) <= transferGeneration(existingTerminal)) return
-            if (startsRetry || transferGeneration(progress) > transferGeneration(existingTerminal)) {
+            const comparableGeneration = progress.generation !== undefined && existingTerminal.generation !== undefined
+            const newerGeneration = comparableGeneration && transferGeneration(progress) > transferGeneration(existingTerminal)
+            if (!startsRetry && comparableGeneration && transferGeneration(progress) <= transferGeneration(existingTerminal)) return
+            if (startsRetry || newerGeneration) {
               delete this.transferHistory[attachmentId]
               delete this.transferHistoryByDirection[attachmentId]
               historyDirections = {}
             }
           }
           const previous = activeDirections[progress.direction] || historyDirections[progress.direction]
-          if (previous && transferGeneration(progress) < transferGeneration(previous)) return
-          const sameGeneration = previous ? transferGeneration(progress) === transferGeneration(previous) : true
-          if (sameGeneration && progress.metricSeq !== undefined && previous?.metricSeq !== undefined && progress.metricSeq < previous.metricSeq) return
+          if (progressIsOlder(progress, previous)) return
           const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
           const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
           const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }

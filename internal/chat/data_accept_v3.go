@@ -298,17 +298,23 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 	if transfer.v3Streams == nil {
 		transfer.v3Streams = make(map[uint16]*v3StreamState)
 	}
+	if transfer.v3Readers == nil {
+		transfer.v3Readers = make(map[uint16]*v3FrameReader)
+	}
 	stream := transfer.v3Streams[first.StreamID]
 	if stream == nil {
 		stream = &v3StreamState{}
 		transfer.v3Streams[first.StreamID] = stream
 	}
+	transfer.v3Readers[first.StreamID] = reader
 	transfer.v3Mu.Unlock()
-	progressStarted := time.Now()
-	lastProgressAt := progressStarted
-	transfer.v3Mu.Lock()
-	lastProgressBytes := transfer.received
-	transfer.v3Mu.Unlock()
+	defer func() {
+		transfer.v3Mu.Lock()
+		if transfer.v3Readers[first.StreamID] == reader {
+			delete(transfer.v3Readers, first.StreamID)
+		}
+		transfer.v3Mu.Unlock()
+	}()
 	var lastCheckpointDuration time.Duration
 	deferCheckpoint := false
 	metricsEnabled := false
@@ -317,8 +323,6 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 		metricsEnabled = hasCapability(peer.Capabilities, ackBatchCapability) && hasCapability(peer.Capabilities, transferMetricsCapability)
 	}
 	e.mu.RUnlock()
-	var metricSeq uint64
-
 	ack := func(frame BinaryFrameV3, nack bool, snapshot *TransferMetricsSnapshotV1) error {
 		typ := FrameChunkAck
 		if frame.Type == FrameEndFile {
@@ -336,6 +340,19 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 			ackFrame.Payload, ackFrame.Length = payload, uint32(len(payload))
 		}
 		return reader.WriteFrame(ackFrame)
+	}
+	nackWithError := func(frame BinaryFrameV3, result v3FinalizationError) error {
+		payload, err := encodeV3FinalizationError(result)
+		if err != nil {
+			return err
+		}
+		ackFrame := BinaryFrameV3{Type: FrameChunkNack, TransferID: frame.TransferID, StreamID: frame.StreamID, Sequence: frame.Sequence, Offset: frame.Offset, ChunkHash: frame.ChunkHash, SessionID: frame.SessionID, Generation: frame.Generation, Payload: payload, Length: uint32(len(payload))}
+		return reader.WriteFrame(ackFrame)
+	}
+	durableBytes := func() int64 {
+		transfer.v3Mu.Lock()
+		defer transfer.v3Mu.Unlock()
+		return transfer.durableBytes
 	}
 	consume := func(frame BinaryFrameV3) error {
 		transfer.v3IOMu.RLock()
@@ -433,51 +450,68 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 			versionAfter := func() uint64 { transfer.v3Mu.Lock(); defer transfer.v3Mu.Unlock(); return transfer.v3WrittenVersion }()
 			if versionAfter > versionBefore {
 				transfer.v3Mu.Lock()
-				received, durable := transfer.received, transfer.durableBytes
+				durable := transfer.durableBytes
 				transfer.v3Mu.Unlock()
 				phaseOptions := transferProgressOptions{
 					sessionID: fmt.Sprintf("%x", first.SessionID), generation: first.Generation,
 					transferMode: v3TransferMode, transport: "TLS13/TCP-v3",
 					metricSource: "receiver-durable", durableBytes: durable,
 				}
-				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "durability_sync", phaseOptions)
+				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "durability_sync", phaseOptions)
 				started := time.Now()
 				if err := commitV3Checkpoint(transfer, versionAfter); err != nil {
 					return err
 				}
 				lastCheckpointDuration = time.Since(started)
 				transfer.v3Mu.Lock()
-				received, durable = transfer.received, transfer.durableBytes
+				durable = transfer.durableBytes
 				transfer.v3Mu.Unlock()
 				phaseOptions.durableBytes = durable
 				phaseOptions.diskWriteMs = lastCheckpointDuration.Milliseconds()
 				phaseOptions.checkpointSeq = versionAfter
-				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "checkpoint_persist", phaseOptions)
+				e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "checkpoint_persist", phaseOptions)
 			}
 			transfer.v3Mu.Lock()
-			received := transfer.received
-			checkpointSeq := transfer.v3WrittenVersion
-			transfer.v3Mu.Unlock()
-			metricSeq++
+			durable := transfer.durableBytes
+			checkpointSeq := transfer.v3DurableVersion
 			now := time.Now()
-			elapsed := now.Sub(lastProgressAt)
+			metricAt, metricBytes := transfer.v3MetricAt, transfer.v3MetricBytes
+			if metricAt.IsZero() {
+				metricAt, metricBytes = now, durable
+			}
+			elapsed := now.Sub(metricAt)
 			if elapsed <= 0 {
 				elapsed = time.Millisecond
 			}
-			rate := float64(received-lastProgressBytes) / elapsed.Seconds()
+			rate := float64(durable-metricBytes) / elapsed.Seconds()
 			if rate < 0 {
 				rate = 0
 			}
-			lastProgressAt, lastProgressBytes = now, received
+			transfer.v3MetricSeq++
+			transfer.v3MetricAt, transfer.v3MetricBytes = now, durable
+			if rate > 0 {
+				if transfer.v3AverageSpeed == 0 {
+					transfer.v3AverageSpeed = rate
+				} else {
+					transfer.v3AverageSpeed = transfer.v3AverageSpeed*0.75 + rate*0.25
+				}
+				if rate > transfer.v3PeakSpeed {
+					transfer.v3PeakSpeed = rate
+				}
+			}
+			metricSeq := transfer.v3MetricSeq
+			averageSpeed, peakSpeed := transfer.v3AverageSpeed, transfer.v3PeakSpeed
+			streamCount := len(transfer.v3Streams)
+			transfer.v3Mu.Unlock()
 			acceptedChunkSize := defaultTransferChunkSize
 			for _, frame := range pending {
 				if len(frame.Payload) > acceptedChunkSize {
 					acceptedChunkSize = len(frame.Payload)
 				}
 			}
-			snapshot := TransferMetricsSnapshotV1{MetricSeq: metricSeq, CheckpointSeq: checkpointSeq, DurableBytes: received, Speed: rate, AverageSpeed: rate, PeakSpeed: rate, DiskWriteMs: lastCheckpointDuration.Milliseconds(), AckLatencyMs: elapsed.Milliseconds(), ChunkSize: acceptedChunkSize, WindowSize: len(pending), WindowBytes: pendingBytes, AckTargetBytes: batchLimit, StreamCount: 1, ActiveStreams: 1}
-			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "transferring", transferProgressOptions{
-				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes, activeStreams: 1, streamCount: 1,
+			snapshot := TransferMetricsSnapshotV1{MetricSeq: metricSeq, CheckpointSeq: checkpointSeq, DurableBytes: durable, Speed: rate, AverageSpeed: averageSpeed, PeakSpeed: peakSpeed, DiskWriteMs: lastCheckpointDuration.Milliseconds(), AckLatencyMs: elapsed.Milliseconds(), ChunkSize: acceptedChunkSize, WindowSize: len(pending), WindowBytes: pendingBytes, AckTargetBytes: batchLimit, StreamCount: streamCount, ActiveStreams: streamCount}
+			e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, durable, transfer.expected, "receive", "transferring", transferProgressOptions{
+				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes, activeStreams: snapshot.ActiveStreams, streamCount: snapshot.StreamCount,
 				transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
 				confirmedThroughput: snapshot.Speed, windowThroughput: snapshot.Speed, diskWriteMs: snapshot.DiskWriteMs, durableBytes: snapshot.DurableBytes,
 				averageSpeed: snapshot.AverageSpeed, peakSpeed: snapshot.PeakSpeed,
@@ -517,6 +551,12 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 		if frame.TransferID != first.TransferID || frame.StreamID != first.StreamID || frame.SessionID != first.SessionID || frame.Generation != first.Generation {
 			return fmt.Errorf("v3 frame identity mismatch")
 		}
+		transfer.v3Mu.Lock()
+		paused := transfer.v3Paused
+		transfer.v3Mu.Unlock()
+		if paused {
+			return errAttachmentCanceled
+		}
 		if frame.Type != FrameChunkData && pendingBytes > 0 {
 			if err := flush(); err != nil {
 				return err
@@ -536,14 +576,19 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 		}
 		if frame.Type == FrameEndFile {
 			if err := flush(); err != nil {
-				_ = ack(frame, true, nil)
+				code, retryable := transferErrorInfo(err)
+				if code == "" {
+					code, retryable = ErrFinalizeSyncFailed, true
+				}
+				_ = nackWithError(frame, v3FinalizationError{Status: "failed", ErrorCode: code, Retryable: retryable, DurableBytes: durableBytes()})
 				return err
 			}
 			transfer.v3IOMu.Lock()
 			defer transfer.v3IOMu.Unlock()
 			if !strings.EqualFold(hex.EncodeToString(frame.ChunkHash[:]), transfer.sha256) {
-				_ = ack(frame, true, nil)
-				return fmt.Errorf("v3 final SHA-256 mismatch")
+				err := newTransferError(ErrChecksumMismatch, false, fmt.Errorf("v3 final SHA-256 mismatch"))
+				_ = nackWithError(frame, v3FinalizationError{Status: "failed", ErrorCode: ErrChecksumMismatch, Retryable: false, DurableBytes: durableBytes()})
+				return err
 			}
 			transfer.v3Mu.Lock()
 			stream.ended = true
@@ -562,8 +607,12 @@ func (e *Engine) receiveV3TransferWithReader(conn net.Conn, reader *v3FrameReade
 				transfer.v3Done <- "completed"
 			} else if complete {
 				if status := e.finishIncomingFile(attachmentID); status != "completed" {
-					_ = ack(frame, true, nil)
-					return fmt.Errorf("v3 transfer failed: %s", status)
+					result := transfer.finalizationSnapshot()
+					if result.Status == "" {
+						result.Status = status
+					}
+					_ = nackWithError(frame, result)
+					return newTransferError(result.ErrorCode, result.Retryable, fmt.Errorf("v3 transfer failed: %s", status))
 				}
 			}
 			return ack(frame, false, nil)

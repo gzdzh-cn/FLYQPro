@@ -16,8 +16,11 @@ func commitVerifiedV3File(source, target string, size int64, sum string) error {
 	if err := persistence.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
-	if err := persistence.Rename(source, target); err == nil {
-		return syncCommittedV3File(target)
+	if err := renameV3WithRetry(persistence, source, target); err == nil {
+		// The source was synced and closed before this function is called. On
+		// Windows reopening the destination read-only and calling Sync can fail
+		// with ERROR_ACCESS_DENIED, even though the atomic commit succeeded.
+		return syncCommittedV3Directory(filepath.Dir(target))
 	}
 	input, err := persistence.Open(source)
 	if err != nil {
@@ -45,10 +48,10 @@ func commitVerifiedV3File(source, target string, size int64, sum string) error {
 	if err != nil {
 		return err
 	}
-	if err := persistence.Rename(temporary, target); err != nil {
+	if err := renameV3WithRetry(persistence, temporary, target); err != nil {
 		return err
 	}
-	if err := syncCommittedV3File(target); err != nil {
+	if err := syncCommittedV3Directory(filepath.Dir(target)); err != nil {
 		return err
 	}
 	// The verified destination is committed even if cleaning the source fails.
@@ -57,18 +60,9 @@ func commitVerifiedV3File(source, target string, size int64, sum string) error {
 }
 
 func syncCommittedV3File(path string) error {
-	persistence := currentTransferPersistenceIO()
-	file, err := persistence.Open(path)
-	if err != nil {
-		return err
-	}
-	err = persistence.SyncFile(file)
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return persistence.SyncDirectory(filepath.Dir(path))
+	return syncCommittedV3Directory(filepath.Dir(path))
+}
+
+func syncCommittedV3Directory(directory string) error {
+	return currentTransferPersistenceIO().SyncDirectory(directory)
 }
