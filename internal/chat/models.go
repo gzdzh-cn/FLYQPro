@@ -39,8 +39,14 @@ const (
 	ErrFriendshipRequired  TransferErrorCode = "FRIENDSHIP_REQUIRED"
 	ErrSessionNotReady     TransferErrorCode = "SESSION_NOT_READY"
 	ErrChunkVerifyFailed   TransferErrorCode = "CHUNK_VERIFY_FAILED"
+	ErrChecksumMismatch    TransferErrorCode = "CHECKSUM_MISMATCH"
 	ErrSourceFileChanged   TransferErrorCode = "SOURCE_FILE_CHANGED"
 	ErrInsufficientStorage TransferErrorCode = "INSUFFICIENT_DISK_SPACE"
+	ErrFinalizeSyncFailed  TransferErrorCode = "FINALIZE_SYNC_FAILED"
+	ErrDestinationCommit   TransferErrorCode = "DESTINATION_COMMIT_FAILED"
+	ErrResumePersistFailed TransferErrorCode = "RESUME_PERSIST_FAILED"
+	ErrAttachmentPersist   TransferErrorCode = "ATTACHMENT_PERSIST_FAILED"
+	ErrFinalizeIOFailed    TransferErrorCode = "FINALIZE_IO_FAILED"
 )
 
 func classifyTransferError(reason string) TransferErrorCode {
@@ -57,6 +63,9 @@ func classifyTransferError(reason string) TransferErrorCode {
 	case strings.Contains(reason, "SESSION"):
 		return ErrSessionNotReady
 	case strings.Contains(reason, "CHUNK") || strings.Contains(reason, "CHECKSUM") || strings.Contains(reason, "SHA"):
+		if strings.Contains(reason, "CHECKSUM") || strings.Contains(reason, "SHA") {
+			return ErrChecksumMismatch
+		}
 		return ErrChunkVerifyFailed
 	case strings.Contains(reason, "SOURCE"):
 		return ErrSourceFileChanged
@@ -88,7 +97,7 @@ func canonicalTransferState(phase string) TransferState {
 	switch phase {
 	case "pending", "queued", "awaiting_acceptance", "preparing", "preparing_thumbnail", "retrying":
 		return TransferQueued
-	case "transferring", "receiving", "resuming", "verifying", "writing", "durability_sync", "checkpoint_persist", "ack_emit", "waiting_network":
+	case "transferring", "receiving", "resuming", "verifying", "finalizing", "writing", "durability_sync", "checkpoint_persist", "ack_emit", "waiting_network":
 		return TransferActive
 	case "paused", "paused_local":
 		return TransferPausedLocal

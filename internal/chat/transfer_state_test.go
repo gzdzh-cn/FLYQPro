@@ -39,7 +39,7 @@ func TestClassifyTransferError(t *testing.T) {
 		"DEVICE_NOT_TRUSTED":   ErrDeviceNotTrusted,
 		"FRIENDSHIP_REQUIRED":  ErrFriendshipRequired,
 		"SESSION_NOT_READY":    ErrSessionNotReady,
-		"CHECKSUM_MISMATCH":    ErrChunkVerifyFailed,
+		"CHECKSUM_MISMATCH":    ErrChecksumMismatch,
 		"SOURCE_CHANGED":       ErrSourceFileChanged,
 		"INSUFFICIENT_STORAGE": ErrInsufficientStorage,
 	}

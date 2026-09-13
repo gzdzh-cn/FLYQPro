@@ -242,7 +242,19 @@ func listTransferResumeRecords(ctx context.Context) ([]transferResumeState, erro
 }
 
 func markTransferResumeTerminal(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
-	if err := exec(ctx, `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, completed_ranges='[]', updated_at=? WHERE attachment_id=?`, string(state), string(code), boolInt(retryable), nowString(), attachmentID); err != nil {
+	return markTransferResumeTerminalWithRanges(ctx, attachmentID, state, code, retryable, false)
+}
+
+// markTransferResumeTerminalWithRanges keeps verified ranges for a retryable
+// finalization failure, so recovery can retry the finalization without
+// retransmitting the file.
+func markTransferResumeTerminalWithRanges(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable, preserveRanges bool) error {
+	query := `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, updated_at=? WHERE attachment_id=?`
+	args := []any{string(state), string(code), boolInt(retryable), nowString(), attachmentID}
+	if !preserveRanges {
+		query = `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, completed_ranges='[]', updated_at=? WHERE attachment_id=?`
+	}
+	if err := exec(ctx, query, args...); err != nil {
 		return err
 	}
 	if state == TransferCompleted {
@@ -256,7 +268,9 @@ func markTransferResumeTerminal(ctx context.Context, attachmentID string, state 
 		return nil
 	}
 	record.State, record.ErrorCode, record.Retryable = state, code, retryable
-	record.CompletedRanges = nil
+	if !preserveRanges {
+		record.CompletedRanges = nil
+	}
 	return saveTransferResumeState(record)
 }
 

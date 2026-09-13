@@ -158,7 +158,7 @@ export interface TransferProgress {
   received?: number
   remoteReceived?: number
   direction: 'send' | 'receive' | 'remote-receive'
-  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
+  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'writing' | 'durability_sync' | 'checkpoint_persist' | 'ack_emit' | 'verifying' | 'finalizing' | 'waiting_network' | 'retrying' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
 }
 
 export type TransferProgressByDirection = Partial<Record<TransferProgress['direction'], TransferProgress>>

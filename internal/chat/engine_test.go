@@ -247,6 +247,18 @@ func TestSmoothTransferSpeedLimitsWindowJumps(t *testing.T) {
 	}
 }
 
+func TestTransferProgressPercentRequiresCompletedPhaseFor100(t *testing.T) {
+	if got := transferProgressPercent(100, 100, "transferring"); got != 99 {
+		t.Fatalf("active full transfer percent = %d, want 99", got)
+	}
+	if got := transferProgressPercent(100, 100, "finalizing"); got != 99 {
+		t.Fatalf("finalizing full transfer percent = %d, want 99", got)
+	}
+	if got := transferProgressPercent(100, 100, "completed"); got != 100 {
+		t.Fatalf("completed transfer percent = %d, want 100", got)
+	}
+}
+
 func TestEmitTransferProgressPrefersConfirmedRemoteSpeed(t *testing.T) {
 	engine := NewEngine()
 	engine.emitTransferProgress("message", "attachment", "peer", 0, 100, "remote-receive", "receiving")

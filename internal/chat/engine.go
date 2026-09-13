@@ -389,6 +389,10 @@ type incomingFile struct {
 	resumeCommitted     int64
 	durableBytes        int64
 	resumeMu            sync.Mutex
+	finalizationMu      sync.Mutex
+	finalizationDone    chan struct{}
+	finalizationStarted bool
+	finalizationStatus  string
 }
 
 // v3StreamState tracks one dedicated binary data connection. File completion
@@ -2318,7 +2322,7 @@ func (e *Engine) beginIncomingFileWithMode(message Message, attachment Attachmen
 		_ = os.Remove(tempPath)
 		return err
 	}
-	transfer := &incomingFile{v3Done: make(chan string, 1), file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
+	transfer := &incomingFile{v3Done: make(chan string, 1), finalizationDone: make(chan struct{}), file: file, tempPath: tempPath, attachmentID: attachment.AttachmentID, messageID: message.MessageID, senderID: senderID, fileName: attachment.FileName, mimeType: attachment.MimeType, expected: attachment.FileSize, received: resumeOffset, lastProgress: resumeOffset, sha256: attachment.SHA256, targetPath: targetPath, session: session, windowSize: 1, chunkSize: defaultTransferChunkSize, parallel: parallel, transferToken: transferToken, resumeOffset: resumeOffset, resumeCommitted: resumeOffset, durableBytes: resumeOffset}
 	transfer.resumeState = transferResumeState{TransferID: attachment.AttachmentID, AttachmentID: attachment.AttachmentID, MessageID: message.MessageID, SenderDeviceID: senderID, Direction: "receive", FileName: attachment.FileName, FileSize: attachment.FileSize, SHA256: attachment.SHA256, TempPath: tempPath, TargetPath: targetPath, TransferMode: binaryTransferMode, State: TransferActive, CompletedRanges: []TransferRange{{Offset: 0, Length: resumeOffset}}}
 	if resumeMatches && len(resumeState.CompletedRanges) > 0 {
 		transfer.resumeState.CheckpointSeq = resumeState.CheckpointSeq
@@ -2506,6 +2510,15 @@ func (e *Engine) cleanupAttachmentSession(session *wireSession) {
 	incoming := make([]*incomingFile, 0)
 	for id, transfer := range e.incoming {
 		if transfer.session == session {
+			transfer.finalizationMu.Lock()
+			finalizing := transfer.finalizationStarted
+			transfer.finalizationMu.Unlock()
+			// EndFile has already transferred ownership to the finalizer. A
+			// control/session disconnect must not close its file underneath a
+			// hash, commit, or metadata persistence operation.
+			if finalizing {
+				continue
+			}
 			delete(e.incoming, id)
 			incoming = append(incoming, transfer)
 		}
@@ -2633,40 +2646,86 @@ func closeParallelSessions(transfer *incomingFile) {
 }
 
 func (e *Engine) finishIncomingFile(attachmentID string) string {
-	// EndFile may be retransmitted after the sender loses the first ACK. A
-	// completed attachment is already atomically committed; acknowledge the
-	// duplicate without reopening the .part file or rewriting the destination.
+	// EndFile can be retransmitted after the sender loses the first ACK. Keep
+	// one finalization owner and let duplicate callers reuse its result.
 	if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil &&
 		attachment.Status == "saved" && attachment.LocalPath != "" {
 		return "completed"
 	}
-	e.mu.Lock()
+	e.mu.RLock()
 	transfer := e.incoming[attachmentID]
-	delete(e.incoming, attachmentID)
-	e.mu.Unlock()
+	e.mu.RUnlock()
 	if transfer == nil {
 		return "failed"
 	}
-	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", "verifying", receiverProgressOptions(transfer, nil))
+	transfer.finalizationMu.Lock()
+	if transfer.finalizationDone == nil {
+		transfer.finalizationDone = make(chan struct{})
+	}
+	if transfer.finalizationStarted {
+		done := transfer.finalizationDone
+		transfer.finalizationMu.Unlock()
+		<-done
+		transfer.finalizationMu.Lock()
+		status := transfer.finalizationStatus
+		transfer.finalizationMu.Unlock()
+		return status
+	}
+	transfer.finalizationStarted = true
+	done := transfer.finalizationDone
+	transfer.finalizationMu.Unlock()
+
+	status := e.finishIncomingFileOnce(attachmentID, transfer)
+	e.mu.Lock()
+	if e.incoming[attachmentID] == transfer {
+		delete(e.incoming, attachmentID)
+	}
+	e.mu.Unlock()
+	transfer.finalizationMu.Lock()
+	transfer.finalizationStatus = status
+	close(done)
+	transfer.finalizationMu.Unlock()
+	return status
+}
+
+func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingFile) string {
+	transfer.v3Mu.Lock()
+	received := transfer.received
+	transfer.v3Mu.Unlock()
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "verifying", receiverProgressOptions(transfer, nil))
+
+	code := ErrFinalizeIOFailed
+	retryable := true
+	verified := false
+	finalizeErr := error(nil)
 	parallelValid := true
 	v3Valid := true
 	transfer.v3Mu.Lock()
 	if transfer.v3Streams != nil {
 		v3Valid = transfer.expected == 0 || (len(transfer.v3Ranges) == 1 && transfer.v3Ranges[0].Start == 0 && transfer.v3Ranges[0].End == transfer.expected && transfer.received == transfer.expected)
+		if !v3Valid {
+			finalizeErr = fmt.Errorf("v3 ranges are incomplete")
+		}
 	}
 	transfer.v3Mu.Unlock()
 	if v3Valid && transfer.v3Streams != nil {
-		if syncTransferFile(transfer.file) != nil {
+		if err := syncTransferFile(transfer.file); err != nil {
 			v3Valid = false
+			code = ErrFinalizeSyncFailed
+			finalizeErr = err
 		} else {
 			digest := sha256.New()
 			hashFile, err := os.Open(transfer.tempPath)
 			if err == nil {
 				_, err = io.Copy(digest, hashFile)
-				_ = hashFile.Close()
+				closeErr := hashFile.Close()
+				if err == nil {
+					err = closeErr
+				}
 			}
 			if err != nil {
 				v3Valid = false
+				finalizeErr = err
 			} else {
 				transfer.digest = digest
 			}
@@ -2683,58 +2742,77 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		}
 		parallelValid = parallelValid && covered == transfer.expected && transfer.parallelWritten == transfer.expected
 		transfer.parallelMu.Unlock()
-		if parallelValid {
-			parallelValid = syncTransferFile(transfer.file) == nil
-			if parallelValid {
-				digest := sha256.New()
-				hashFile, err := os.Open(transfer.tempPath)
+		if !parallelValid {
+			code = ErrFinalizeIOFailed
+			finalizeErr = fmt.Errorf("parallel ranges are incomplete")
+		} else if err := syncTransferFile(transfer.file); err != nil {
+			parallelValid = false
+			code = ErrFinalizeSyncFailed
+			finalizeErr = err
+		} else {
+			digest := sha256.New()
+			hashFile, err := os.Open(transfer.tempPath)
+			if err == nil {
+				_, err = io.Copy(digest, hashFile)
+				closeErr := hashFile.Close()
 				if err == nil {
-					_, err = io.Copy(digest, hashFile)
-					_ = hashFile.Close()
+					err = closeErr
 				}
-				if err != nil {
-					parallelValid = false
-				} else {
-					transfer.digest = digest
-				}
+			}
+			if err != nil {
+				parallelValid = false
+				finalizeErr = err
+			} else {
+				transfer.digest = digest
 			}
 		}
 	}
-	flushErr := error(nil)
-	if transfer.writer != nil {
-		flushErr = transfer.writer.Flush()
+	if finalizeErr == nil && transfer.digest != nil {
+		if !strings.EqualFold(hex.EncodeToString(transfer.digest.Sum(nil)), transfer.sha256) {
+			code = ErrChecksumMismatch
+			retryable = false
+			finalizeErr = fmt.Errorf("SHA-256 mismatch")
+		} else {
+			verified = true
+		}
 	}
-	closeErr := transfer.file.Close()
-	valid := flushErr == nil && closeErr == nil && parallelValid && v3Valid && transfer.digest != nil && hex.EncodeToString(transfer.digest.Sum(nil)) == transfer.sha256 && transfer.received == transfer.expected
-	status := "pending"
+	if transfer.writer != nil {
+		if err := transfer.writer.Flush(); err != nil && finalizeErr == nil {
+			finalizeErr = err
+			code = ErrFinalizeIOFailed
+		}
+	}
+	if transfer.file != nil {
+		if err := transfer.file.Close(); err != nil && finalizeErr == nil {
+			finalizeErr = err
+			code = ErrFinalizeIOFailed
+		}
+	}
+	transfer.v3Mu.Lock()
+	received = transfer.received
+	transfer.v3Mu.Unlock()
+	valid := finalizeErr == nil && parallelValid && v3Valid && verified && received == transfer.expected
 	localPath := transfer.tempPath
 	if valid && transfer.targetPath != "" && !e.IsAttachmentMigrationActive() {
-		localPath = transfer.targetPath
-		if commitVerifiedV3File(transfer.tempPath, localPath, transfer.expected, transfer.sha256) == nil {
-			status = "saved"
-		} else {
-			status = "failed"
-			localPath = ""
+		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "finalizing", transferProgressOptions{verified: &verified, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
+		if err := commitVerifiedV3File(transfer.tempPath, transfer.targetPath, transfer.expected, transfer.sha256); err != nil {
+			code = ErrDestinationCommit
+			finalizeErr = err
+			retryable = true
 			valid = false
+			if _, statErr := os.Stat(transfer.targetPath); statErr == nil {
+				localPath = transfer.targetPath
+			}
+		} else {
+			localPath = transfer.targetPath
 		}
+	} else if valid {
+		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "finalizing", transferProgressOptions{verified: &verified, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
 	}
 	if !valid {
-		status = "failed"
-		localPath = ""
+		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, code, retryable, verified, finalizeErr)
 	}
-	if valid {
-		if err := markTransferResumeTerminal(context.Background(), attachmentID, TransferCompleted, "", false); err != nil {
-			valid = false
-			status = "failed"
-			localPath = ""
-		}
-	} else {
-		_ = markTransferResumeTerminal(context.Background(), attachmentID, TransferFailed, classifyTransferError("SHA-256 mismatch"), false)
-	}
-	// Keep the .part and terminal sidecar for verification or commit errors,
-	// but invalidate completed ranges so corrupt content is never skipped.
-	// Successful completion is the only path that removes the sidecar.
-	removeTransferResumeArtifacts(attachmentID, false, valid)
+
 	attachmentMime := transfer.mimeType
 	if attachmentMime == "" {
 		attachmentMime = mime.TypeByExtension(filepath.Ext(transfer.fileName))
@@ -2743,28 +2821,74 @@ func (e *Engine) finishIncomingFile(attachmentID string) string {
 		attachmentMime = "application/octet-stream"
 	}
 	attachment, _ := GetAttachment(context.Background(), attachmentID)
-	_ = SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: attachmentMime, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, LocalPath: localPath, Status: status})
-	messageStatus := "sent"
-	if !valid {
-		messageStatus = "failed"
+	if err := SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: attachmentMime, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, LocalPath: localPath, Status: "saved"}); err != nil {
+		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrAttachmentPersist, true, verified, err)
 	}
+	if err := exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "sent", transfer.messageID); err != nil {
+		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrAttachmentPersist, true, verified, err)
+	}
+	if err := markTransferResumeTerminalWithRanges(context.Background(), attachmentID, TransferCompleted, "", false, false); err != nil {
+		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrResumePersistFailed, true, verified, err)
+	}
+	removeTransferResumeArtifacts(attachmentID, false, true)
 	if messageRecord, messageErr := GetMessage(context.Background(), transfer.messageID); messageErr == nil {
-		messageRecord.Status = messageStatus
+		messageRecord.Status = "sent"
 		messageRecord.AttachmentMime = attachmentMime
 		messageRecord.AttachmentThumbnail = attachment.ThumbnailData
 		messageRecord.AttachmentThumbnailMime = attachment.ThumbnailMime
-		messageRecord.AttachmentStatus = status
+		messageRecord.AttachmentStatus = "saved"
 		messageRecord.AttachmentPath = localPath
 		e.emit("chat:message", messageRecord)
 	}
-	_ = exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, messageStatus, transfer.messageID)
-	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": status, "localPath": localPath, "valid": valid})
-	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, transfer.received, transfer.expected, "receive", map[bool]string{true: "completed", false: "failed"}[valid], receiverProgressOptions(transfer, &valid))
+	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": "saved", "localPath": localPath, "valid": true})
+	transfer.v3Mu.Lock()
+	received = transfer.received
+	transfer.v3Mu.Unlock()
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "completed", receiverProgressOptions(transfer, &verified))
 	if transfer.v3Done != nil {
-		transfer.v3Done <- map[bool]string{true: "completed", false: "failed"}[valid]
+		transfer.v3Done <- "completed"
 	}
-	if valid {
-		return "completed"
+	return "completed"
+}
+
+func (e *Engine) recordIncomingFinalizationFailure(attachmentID string, transfer *incomingFile, localPath string, code TransferErrorCode, retryable, verified bool, cause error) string {
+	transfer.resumeMu.Lock()
+	transfer.resumeState.State = TransferFailed
+	transfer.resumeState.ErrorCode = code
+	transfer.resumeState.Retryable = retryable
+	transfer.resumeMu.Unlock()
+	preserveRanges := retryable && code != ErrChecksumMismatch
+	if err := markTransferResumeTerminalWithRanges(context.Background(), attachmentID, TransferFailed, code, retryable, preserveRanges); err != nil {
+		code = ErrResumePersistFailed
+		retryable = true
+		transfer.resumeMu.Lock()
+		transfer.resumeState.ErrorCode = code
+		transfer.resumeState.Retryable = retryable
+		transfer.resumeMu.Unlock()
+	}
+	attachment, _ := GetAttachment(context.Background(), attachmentID)
+	attachmentErr := SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: transfer.mimeType, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, LocalPath: localPath, Status: "failed"})
+	if attachmentErr != nil && code != ErrResumePersistFailed {
+		code = ErrAttachmentPersist
+		retryable = true
+		_ = markTransferResumeTerminalWithRanges(context.Background(), attachmentID, TransferFailed, code, retryable, true)
+	}
+	if err := exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "failed", transfer.messageID); err != nil && code != ErrResumePersistFailed {
+		code = ErrAttachmentPersist
+		retryable = true
+		_ = markTransferResumeTerminalWithRanges(context.Background(), attachmentID, TransferFailed, code, retryable, true)
+	}
+	reason := string(code)
+	if cause != nil {
+		reason = fmt.Sprintf("%s: %s", code, redactDiagnosticText(cause.Error()))
+	}
+	e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": transfer.messageID, "fileName": transfer.fileName, "status": "failed", "localPath": localPath, "reason": reason})
+	transfer.v3Mu.Lock()
+	received := transfer.received
+	transfer.v3Mu.Unlock()
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", transferProgressOptions{verified: &verified, errorCode: string(code), retryable: retryable, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
+	if transfer.v3Done != nil {
+		transfer.v3Done <- "failed"
 	}
 	return "failed"
 }
@@ -2831,6 +2955,23 @@ func smoothTransferSpeed(previous, sample float64, elapsed time.Duration) float6
 	return previous + alpha*(sample-previous)
 }
 
+func transferProgressPercent(transferred, total int64, phase string) int {
+	if total <= 0 {
+		return 0
+	}
+	if transferred < 0 {
+		transferred = 0
+	}
+	if transferred > total {
+		transferred = total
+	}
+	percent := int(transferred * 100 / total)
+	if phase != "completed" && percent >= 100 {
+		return 99
+	}
+	return percent
+}
+
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
 	if transferred < 0 {
 		transferred = 0
@@ -2838,10 +2979,7 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if total > 0 && transferred > total {
 		transferred = total
 	}
-	percent := 0
-	if total > 0 {
-		percent = int(transferred * 100 / total)
-	}
+	percent := transferProgressPercent(transferred, total, phase)
 	value := map[string]any{
 		"eventVersion": 1,
 		"messageId":    messageID,

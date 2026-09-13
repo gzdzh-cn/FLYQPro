@@ -2,6 +2,15 @@ import { defineStore } from 'pinia'
 import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection } from './types'
 
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
+const terminalTransferPhases = new Set(['completed', 'canceled', 'cancelled', 'rejected', 'failed'])
+
+function isTerminalTransfer(progress?: TransferProgress) {
+  return Boolean(progress && (terminalTransferPhases.has(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')))
+}
+
+function transferGeneration(progress?: TransferProgress) {
+  return progress?.generation === undefined ? 0 : Number(progress.generation)
+}
 
 function requestTime(request: FriendRequest) {
   const updated = Date.parse(request.updatedAt || '')
@@ -119,20 +128,25 @@ export const useChatStore = defineStore('chat', {
         if (progress?.attachmentId) {
           const attachmentId = progress.attachmentId
           const activeDirections = this.transferProgressByDirection[attachmentId] || {}
-          const historyDirections = this.transferHistoryByDirection[attachmentId] || {}
-          // Receiver-durable metrics are monotonic per session generation. A
-          // delayed ACK/event must never roll the UI back to an older speed or
-          // byte count. Status/error fields may still arrive from the local
-          // direction, but metric snapshots are accepted only in order.
+          let historyDirections = this.transferHistoryByDirection[attachmentId] || {}
+          const existingTerminal = this.transferHistory[attachmentId]
+          if (existingTerminal && isTerminalTransfer(existingTerminal)) {
+            const startsRetry = ['queued', 'retrying', 'resuming'].includes(progress.phase)
+            if (!startsRetry && transferGeneration(progress) <= transferGeneration(existingTerminal)) return
+            if (startsRetry || transferGeneration(progress) > transferGeneration(existingTerminal)) {
+              delete this.transferHistory[attachmentId]
+              delete this.transferHistoryByDirection[attachmentId]
+              historyDirections = {}
+            }
+          }
           const previous = activeDirections[progress.direction] || historyDirections[progress.direction]
-          const sameGeneration = previous && progress.generation !== undefined && previous.generation !== undefined
-            ? previous.generation === progress.generation
-            : true
+          if (previous && transferGeneration(progress) < transferGeneration(previous)) return
+          const sameGeneration = previous ? transferGeneration(progress) === transferGeneration(previous) : true
           if (sameGeneration && progress.metricSeq !== undefined && previous?.metricSeq !== undefined && progress.metricSeq < previous.metricSeq) return
           const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
           const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
           const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }
-          if (['completed', 'canceled', 'cancelled', 'rejected', 'failed'].includes(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')) {
+          if (isTerminalTransfer(progress)) {
             this.transferHistory[attachmentId] = snapshot
             this.transferHistoryByDirection[attachmentId] = directions
             delete this.transferProgress[attachmentId]
