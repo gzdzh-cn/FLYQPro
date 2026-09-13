@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"os"
 	"runtime"
@@ -72,9 +73,24 @@ func configureWindowsAppIdentity() {
 }
 
 func configureWindowsTaskbar(_ *application.App, _ *application.WebviewWindow) func() {
-	if err := installWindowsJumpList(); err != nil {
-		log.Printf("设置 Windows 任务栏菜单失败: %v", err)
-	}
+	// Explorer and the taskbar COM classes are not guaranteed to be ready
+	// before Wails enters its event loop. Install the optional Jump List after
+	// startup and retry briefly; failure must not affect the main window.
+	go func() {
+		delays := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second}
+		var lastErr error
+		for _, delay := range delays {
+			time.Sleep(delay)
+			if err := installWindowsJumpList(); err == nil {
+				return
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr != nil && !isOptionalJumpListError(lastErr) {
+			log.Printf("设置 Windows 任务栏菜单失败: %v", lastErr)
+		}
+	}()
 	return func() {}
 }
 
@@ -110,13 +126,18 @@ func windowsTaskbarWndProcInterceptor() func(hwnd uintptr, msg uint32, wParam, l
 		}
 		go func() {
 			time.Sleep(time.Second)
-			if err := installWindowsJumpList(); err != nil {
+			if err := installWindowsJumpList(); err != nil && !isOptionalJumpListError(err) {
 				log.Printf("任务栏重启后重新设置菜单失败: %v", err)
 			}
 			taskbarReloadPending.Store(false)
 		}()
 		return 0, false
 	}
+}
+
+func isOptionalJumpListError(err error) bool {
+	var oleErr *ole.OleError
+	return errors.As(err, &oleErr) && oleErr.Code() == uintptr(0x80040154) // REGDB_E_CLASSNOTREG
 }
 
 func installWindowsJumpList() error {

@@ -1132,6 +1132,12 @@ func DeleteMessageRecord(ctx context.Context, messageID string) error {
 	if err := exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
 		return err
 	}
+	if err := exec(ctx, `DELETE FROM transfer_snapshot_directions WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
+	if err := exec(ctx, `DELETE FROM transfer_resumes WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
 	return exec(ctx, `DELETE FROM messages WHERE message_id=?`, messageID)
 }
 

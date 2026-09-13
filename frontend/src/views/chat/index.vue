@@ -65,16 +65,17 @@
           <a-button type="text" aria-label="好友资料" title="好友资料" @pointerdown.prevent.stop="togglePeerInfo" @keydown.enter.space.prevent="togglePeerInfo"><icon-more /></a-button>
         </header>
         <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
-        <div class="message-scroll" ref="messageScroll" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick">
+        <div class="message-scroll" ref="messageScroll" :class="{ 'is-drag-selecting': dragSelectActive }" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick" @dragstart.prevent>
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" v-memo="[message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), expandedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.metricSeq, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId) }">
+          <div v-for="message in activeMessages" v-memo="[selectionMode, message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), expandedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.metricSeq, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" :data-message-id="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId), 'selection-active': selectionMode }" @pointerdown.stop="beginDragSelection($event, message)" @pointermove="updateDragSelection" @pointerup="finishDragSelection" @pointercancel="cancelDragSelection" @lostpointercapture="finishDragSelection" @click="handleMessageClick($event, message)">
+            <button v-if="selectionMode" type="button" class="message-select-toggle" :class="{ checked: selectedMessageIds.has(message.messageId) }" :aria-pressed="selectedMessageIds.has(message.messageId)" :aria-label="selectedMessageIds.has(message.messageId) ? '取消选择消息' : '选择消息'" @click.stop="toggleMessageSelection(message)"><span /></button>
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
             <div class="message-bubble" :class="{ 'text-bubble': message.kind !== 'file', 'attachment-bubble': message.kind === 'file', 'image-attachment-bubble': message.kind === 'file' && isImageMessage(message), 'is-favorite': message.isFavorite }" @contextmenu.prevent.stop="openMessageMenu($event, message)">
               <div v-if="message.quoteContent" class="message-quote">{{ message.quoteContent }}</div>
               <template v-if="message.kind === 'file'">
                 <template v-if="isImageMessage(message)">
-                  <div class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" role="button" tabindex="0" :aria-busy="imageTransferActive(message)" @click="openImage(message)" @dblclick.stop.prevent="openImage(message)" @keydown.enter.space.prevent="openImage(message)">
+                  <div class="image-message" :class="{ 'is-transferring': imageTransferActive(message) }" role="button" tabindex="0" :aria-busy="imageTransferActive(message)" @click.stop="selectionMode ? toggleMessageSelection(message) : openImage(message)" @dblclick.stop.prevent="selectionMode ? toggleMessageSelection(message) : openImage(message)" @keydown.enter.space.prevent="selectionMode ? toggleMessageSelection(message) : openImage(message)">
                     <img v-if="messagePreviews[message.messageId]" :src="messagePreviews[message.messageId]" />
                     <span v-else class="image-pending-placeholder">图片 {{ message.attachmentName || message.content }}</span>
                     <div v-if="imageTransferActive(message)" class="image-transfer-mask" :class="{ 'is-paused': attachmentIsPaused(message) }"><span class="image-progress-ring" :style="imageProgressRingStyle(message)"><strong>{{ transferProgressPercent(message) }}%</strong></span><span class="image-transfer-status">{{ transferProgressLabel(message) }}</span><span class="image-transfer-actions"><button type="button" class="image-transfer-details" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="false" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button class="image-transfer-cancel" size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
@@ -116,13 +117,13 @@
             <button @click="copyTextMessage(messageMenu.message)">复制</button><button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button @click="quoteMessage(messageMenu.message)">引用</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
           </template>
           <template v-else-if="messageMenu.message && isImageMessage(messageMenu.message)">
-            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="copyImageMessage(messageMenu.message)">复制</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openImage(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
+            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="copyImageMessage(messageMenu.message)">复制</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openImage(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button @click="quoteMessage(messageMenu.message)">引用</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
           </template>
           <template v-else-if="messageMenu.message">
-            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openAttachment(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
+            <button @click="forwardMessage(messageMenu.message)">转发</button><button @click="toggleFavorite(messageMenu.message)">{{ messageMenu.message.isFavorite ? '取消收藏' : '收藏' }}</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="saveAttachmentCopy(messageMenu.message)">另存为</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="openAttachment(messageMenu.message)">打开</button><button :disabled="!attachmentHasLocalFile(messageMenu.message)" @click="revealAttachment(messageMenu.message)">打开所在文件夹</button><button @click="enterMultiSelect(messageMenu.message)">多选</button><button @click="quoteMessage(messageMenu.message)">引用</button><button class="danger" @click="deleteMessage(messageMenu.message)">删除</button>
           </template>
         </div>
-        <div v-if="selectionMode" class="selection-toolbar"><strong>已选 {{ selectedMessageIds.size }} 条</strong><a-button size="small" @click="batchFavorite">收藏</a-button><a-button size="small" @click="batchForward">转发</a-button><a-button size="small" status="danger" @click="batchDelete">删除</a-button><a-button size="small" @click="exitMultiSelect">取消</a-button></div>
+        <div v-if="selectionMode" class="selection-toolbar"><strong>已选 {{ selectedMessageIds.size }} 条</strong><a-button size="small" @click="toggleSelectAll">{{ allMessagesSelected ? '取消全选' : '全选' }}</a-button><a-button size="small" @click="batchFavorite">收藏</a-button><a-button size="small" @click="batchForward">转发</a-button><a-button size="small" status="danger" :disabled="!selectedMessageIds.size" @click="batchDelete">删除</a-button><a-button size="small" @click="exitMultiSelect">取消</a-button></div>
         <a-modal v-model:visible="attachmentDetailsVisible" title="附件传输详情" :footer="false" :width="'min(680px, calc(100vw - 32px))'" modal-class="attachment-details-modal" :mask="true" :render-to-body="true" :mask-style="{ backgroundColor: isDark ? 'rgba(0, 0, 0, .36)' : 'rgba(20, 32, 52, .18)', backdropFilter: 'blur(1px)' }">
           <div v-if="attachmentDetails" class="attachment-details">
             <div class="attachment-details-hero">
@@ -159,7 +160,7 @@
                 <p><span>checkpoint 序号</span><strong>{{ detailProgress?.checkpointSeq !== undefined ? detailProgress.checkpointSeq : '暂未提供' }}</strong></p>
                 <p v-if="detailIsReceiver"><span>接收确认状态</span><strong>{{ detailProgress?.metricSource === 'receiver-durable' ? '已持久化确认' : '等待接收确认' }}</strong></p>
                 <p><span>通道 / 模式</span><strong>{{ detailProgress?.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress?.transferMode) }}</strong></p>
-                <p><span>并行数据流</span><strong>{{ detailProgress?.streamCount ? `${detailProgress.activeStreams || detailProgress.streamCount} / ${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
+                <p><span>并行数据流</span><strong>{{ detailProgress?.streamCount !== undefined && detailProgress.streamCount > 0 ? `${detailProgress.activeStreams !== undefined ? detailProgress.activeStreams : detailProgress.streamCount} / ${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
               </div>
               <p v-if="detailProgress?.tuningReason" class="attachment-details-reason" :title="detailProgress.tuningReason">{{ detailProgress.tuningReason }}</p>
             </div>
@@ -185,11 +186,23 @@
             </div>
           </div>
         </a-modal>
+        <a-modal v-model:visible="messageDeleteConfirm.visible" title="删除消息" :footer="false" :mask-closable="false" @cancel="closeMessageDeleteConfirm">
+          <div class="clear-conversation-content">
+            <p>确定删除 {{ messageDeleteConfirm.messageIds.length }} 条消息吗？</p>
+            <p class="clear-conversation-hint">发送方的原始文件不会被删除。删除接收方本地文件前需要明确确认。</p>
+            <div class="clear-conversation-actions">
+              <a-button :disabled="messageDeleteConfirm.busy" @click="closeMessageDeleteConfirm">取消</a-button>
+              <a-button :disabled="messageDeleteConfirm.busy" @click="confirmMessageDelete(false)">仅删除消息</a-button>
+              <a-button status="danger" :loading="messageDeleteConfirm.busy" @click="confirmMessageDelete(true)">删除消息及本地附件</a-button>
+            </div>
+          </div>
+        </a-modal>
         <div class="horizontal-resizer" @pointerdown="startResize('composer', $event)" title="调整输入框高度" />
         <footer class="composer" :class="{ 'composer-disabled': !activePeerCanSend }" :style="{ height: `${composerTotalHeight}px` }">
           <div class="composer-tools"><button class="emoji-toggle" title="表情" :disabled="!activePeerCanSend" @mousedown.prevent.stop="emojiOpen = !emojiOpen" @keydown.enter.space.prevent="emojiOpen = !emojiOpen"><icon-face-smile-fill /></button><button title="附件" :disabled="!activePeerCanSend" @mousedown.prevent.stop="pickFile" @keydown.enter.space.prevent="pickFile"><icon-folder /></button><button title="打开好友共享盘" :disabled="!activePeerCanSend" @mousedown.prevent.stop="openFriendSharedDrive" @keydown.enter.space.prevent="openFriendSharedDrive"><icon-cloud /></button></div>
           <div class="emoji-panel" :class="{ 'is-open': emojiOpen }" :aria-hidden="!emojiOpen" @pointerdown.stop><button v-for="emoji in emojis" :key="emoji" @pointerdown.prevent.stop="selectEmoji(emoji)" @keydown.enter.prevent.stop="selectEmoji(emoji)">{{ emoji }}</button></div>
           <div v-if="pendingFiles.length || pendingImages.length" class="pending-files" :style="{ height: `${pendingComposerListHeight}px` }"><div v-for="(file, index) in pendingFiles" :key="file.id" class="pending-file"><icon-file /><span :title="file.path">{{ file.name }}</span><small>{{ formatBytes(file.size) }}</small><button type="button" title="移除文件" @click="pendingFiles.splice(index, 1)"><icon-close /></button></div><div v-for="(image, index) in pendingImages" :key="image" class="pending-image"><img :src="image" /><button @click="pendingImages.splice(index, 1)"><icon-close /></button></div></div>
+          <div v-if="quoteMessageId" class="composer-quote" role="status"><div><strong>引用消息 · {{ quoteKindLabel }}</strong><span>{{ quoteContent }}</span></div><button type="button" aria-label="取消引用" title="取消引用" @click="clearQuote"><icon-close /></button></div>
           <div class="composer-editor">
             <textarea ref="composerInput" v-model="draft" :disabled="!activePeerCanSend" :placeholder="composerPlaceholder" @focus="handleComposerFocus" @pointerdown="markActiveRead" @paste="handlePaste" @keydown.enter.exact.prevent.stop="sendMessage" />
           </div>
@@ -307,6 +320,7 @@ const friendSearch = ref('')
 const draft = ref('')
 const quoteMessageId = ref('')
 const quoteContent = ref('')
+const quoteKindLabel = ref('文本')
 const sendingMessage = ref(false)
 const showPeerInfo = ref(false)
 const selfAvatarPreviewVisible = ref(false)
@@ -367,8 +381,23 @@ const messageMenu = reactive<{ visible: boolean; x: number; y: number; message?:
 const peerMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
 const contactMenu = reactive<{ visible: boolean; x: number; y: number; peer?: Peer }>({ visible: false, x: 0, y: 0 })
 const deleteConfirm = reactive<{ visible: boolean; kind: 'hide' | 'remove'; x: number; y: number; peer?: Peer; deleteLocalFiles: boolean }>({ visible: false, kind: 'hide', x: 0, y: 0, deleteLocalFiles: false })
+const messageDeleteConfirm = reactive<{ visible: boolean; messageIds: string[]; busy: boolean }>({ visible: false, messageIds: [], busy: false })
 const selectionMode = ref(false)
 const selectedMessageIds = reactive(new Set<string>())
+const dragSelectActive = ref(false)
+const dragSelectStarted = ref(false)
+const dragSelectAnchorId = ref('')
+const dragSelectCurrentId = ref('')
+const dragSelectStartX = ref(0)
+const dragSelectStartY = ref(0)
+const dragSelectPointerId = ref<number | null>(null)
+const dragSelectChanged = ref(false)
+const dragSelectLastX = ref(0)
+const dragSelectLastY = ref(0)
+const dragSelectElement = ref<HTMLElement>()
+const suppressNextMessageClick = ref(false)
+let suppressMessageClickTimer = 0
+let dragAutoScrollFrame = 0
 const expandedMessageIds = reactive(new Set<string>())
 const collapsedMessageMaxUnits = 360
 const collapsedMessageMaxLines = 8
@@ -461,6 +490,8 @@ const totalUnreadCount = computed(() => {
 })
 const appBadgeCount = computed(() => totalUnreadCount.value + store.pendingRequests.length)
 const activeMessages = computed(() => activePeer.value ? store.messages[`conv-${activePeer.value.deviceId}`] || [] : [])
+const allMessagesSelected = computed(() => activeMessages.value.length > 0 && activeMessages.value.every((message) => selectedMessageIds.has(message.messageId)))
+const messageIndexById = computed(() => new Map(activeMessages.value.map((message, index) => [message.messageId, index])))
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? (store.transferProgress[message.attachmentId] || store.transferHistory[message.attachmentId]) : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
 const migrationPercent = computed(() => store.attachmentMigration.total ? Math.min(100, Math.round(store.attachmentMigration.current / store.attachmentMigration.total * 100)) : 0)
@@ -937,11 +968,13 @@ async function sendMessage() {
   const files = [...pendingFiles.value]
   const quotedMessageId = quoteMessageId.value
   const quotedContent = quoteContent.value
+  const quotedKindLabel = quoteKindLabel.value
   if (!content && !images.length && !files.length) return
   sendingMessage.value = true
   draft.value = ''
   quoteMessageId.value = ''
   quoteContent.value = ''
+  quoteKindLabel.value = '文本'
   pendingImages.value = []
   pendingFiles.value = []
   scrollToBottom()
@@ -963,6 +996,7 @@ async function sendMessage() {
       draft.value = content
       quoteMessageId.value = quotedMessageId
       quoteContent.value = quotedContent
+      quoteKindLabel.value = quotedKindLabel
       pendingImages.value = images
       pendingFiles.value = files
     }
@@ -1777,17 +1811,234 @@ async function showAttachmentDetails(message: any) {
   }
 }
 async function toggleFavorite(message: any) { closeMessageMenu(); const next = !message.isFavorite; try { await ChatService.SetMessageFavorite(message.messageId, next); message.isFavorite = next; Message.success(next ? '已收藏' : '已取消收藏') } catch (error: any) { Message.error(error?.message || '收藏失败') } }
+function dragSelectionBlockedTarget(target: EventTarget | null): boolean {
+  const element = target instanceof Element ? target : null
+  if (!element) return false
+  if (element.closest('button, a, input, textarea, select, .message-context-menu, .transfer-progress-actions, .image-transfer-actions, .attachment-actions, .attachment-pending, .attachment-complete-actions, .message-retry')) return true
+  // The image surface is keyboard-accessible and therefore has role=button,
+  // but it is still a valid drag-selection starting point. Its nested actions
+  // are filtered above.
+  if (element.closest('.image-message')) return false
+  return Boolean(element.closest('[role="button"]'))
+}
+function selectMessageRange(anchorId: string, targetId: string) {
+  const anchorIndex = messageIndexById.value.get(anchorId)
+  const targetIndex = messageIndexById.value.get(targetId)
+  if (anchorIndex === undefined || targetIndex === undefined) return
+  const first = Math.min(anchorIndex, targetIndex)
+  const last = Math.max(anchorIndex, targetIndex)
+  let changed = false
+  for (let index = first; index <= last; index++) {
+    const messageId = activeMessages.value[index]?.messageId
+    if (messageId && !selectedMessageIds.has(messageId)) {
+      selectedMessageIds.add(messageId)
+      changed = true
+    }
+  }
+  if (changed) dragSelectChanged.value = true
+}
+function messageIdAtPoint(clientX: number, clientY: number): string {
+  const target = document.elementFromPoint(clientX, clientY)
+  const row = target?.closest<HTMLElement>('.message-line[data-message-id]')
+  return row?.dataset.messageId || ''
+}
+function updateDragSelectionTarget(clientX: number, clientY: number) {
+  if (!dragSelectActive.value) return
+  const messageId = messageIdAtPoint(clientX, clientY)
+  if (!messageId || messageId === dragSelectCurrentId.value) return
+  dragSelectCurrentId.value = messageId
+  selectMessageRange(dragSelectAnchorId.value, messageId)
+}
+function stopDragAutoScroll() {
+  if (!dragAutoScrollFrame) return
+  cancelAnimationFrame(dragAutoScrollFrame)
+  dragAutoScrollFrame = 0
+}
+function startDragAutoScroll() {
+  if (dragAutoScrollFrame || !dragSelectActive.value) return
+  const tick = () => {
+    dragAutoScrollFrame = 0
+    if (!dragSelectActive.value || !messageScroll.value) return
+    const element = messageScroll.value
+    const rect = element.getBoundingClientRect()
+    const edge = 48
+    let direction = 0
+    let distance = 0
+    if (dragSelectLastY.value < rect.top + edge) {
+      direction = -1
+      distance = Math.max(0, rect.top + edge - dragSelectLastY.value)
+    } else if (dragSelectLastY.value > rect.bottom - edge) {
+      direction = 1
+      distance = Math.max(0, dragSelectLastY.value - (rect.bottom - edge))
+    }
+    if (direction !== 0) {
+      const speed = Math.min(22, Math.max(2, distance * 0.35))
+      const before = element.scrollTop
+      element.scrollTop += direction * speed
+      if (element.scrollTop !== before) updateDragSelectionTarget(dragSelectLastX.value, dragSelectLastY.value)
+      dragAutoScrollFrame = requestAnimationFrame(tick)
+    }
+  }
+  dragAutoScrollFrame = requestAnimationFrame(tick)
+}
+function beginDragSelection(event: PointerEvent, message: any) {
+  if (event.button !== 0 || event.pointerType !== 'mouse' || dragSelectionBlockedTarget(event.target)) return
+  cancelAutoScroll()
+  markActiveRead()
+  dragSelectStarted.value = true
+  dragSelectActive.value = false
+  dragSelectChanged.value = false
+  dragSelectAnchorId.value = message.messageId
+  dragSelectCurrentId.value = message.messageId
+  dragSelectStartX.value = event.clientX
+  dragSelectStartY.value = event.clientY
+  dragSelectLastX.value = event.clientX
+  dragSelectLastY.value = event.clientY
+  dragSelectPointerId.value = event.pointerId
+  dragSelectElement.value = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined
+  dragSelectElement.value?.setPointerCapture(event.pointerId)
+}
+function updateDragSelection(event: PointerEvent) {
+  if (!dragSelectStarted.value || dragSelectPointerId.value !== event.pointerId) return
+  dragSelectLastX.value = event.clientX
+  dragSelectLastY.value = event.clientY
+  if (!dragSelectActive.value) {
+    const movedX = event.clientX - dragSelectStartX.value
+    const movedY = event.clientY - dragSelectStartY.value
+    if (Math.hypot(movedX, movedY) <= 6) return
+    dragSelectActive.value = true
+    selectionMode.value = true
+    selectMessageRange(dragSelectAnchorId.value, dragSelectAnchorId.value)
+    dragSelectElement.value?.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+  event.preventDefault()
+  updateDragSelectionTarget(event.clientX, event.clientY)
+  startDragAutoScroll()
+}
+function finishDragSelection(event?: PointerEvent) {
+  if (!dragSelectStarted.value) return
+  if (event && dragSelectPointerId.value !== null && event.pointerId !== dragSelectPointerId.value) return
+  if (dragSelectActive.value || dragSelectChanged.value) {
+    suppressNextMessageClick.value = true
+    window.clearTimeout(suppressMessageClickTimer)
+    suppressMessageClickTimer = window.setTimeout(() => { suppressNextMessageClick.value = false; suppressMessageClickTimer = 0 }, 250)
+  }
+  const element = dragSelectElement.value
+  if (element && dragSelectPointerId.value !== null && element.hasPointerCapture(dragSelectPointerId.value)) element.releasePointerCapture(dragSelectPointerId.value)
+  stopDragAutoScroll()
+  dragSelectActive.value = false
+  dragSelectStarted.value = false
+  dragSelectAnchorId.value = ''
+  dragSelectCurrentId.value = ''
+  dragSelectPointerId.value = null
+  dragSelectElement.value = undefined
+}
+function cancelDragSelection() {
+  if (!dragSelectStarted.value) {
+    stopDragAutoScroll()
+    dragSelectActive.value = false
+    return
+  }
+  const element = dragSelectElement.value
+  if (element && dragSelectPointerId.value !== null && element.hasPointerCapture(dragSelectPointerId.value)) element.releasePointerCapture(dragSelectPointerId.value)
+  stopDragAutoScroll()
+  dragSelectActive.value = false
+  dragSelectStarted.value = false
+  dragSelectAnchorId.value = ''
+  dragSelectCurrentId.value = ''
+  dragSelectPointerId.value = null
+  dragSelectElement.value = undefined
+}
+function handleMessageClick(event: MouseEvent, message: any) {
+  if (suppressNextMessageClick.value) {
+    suppressNextMessageClick.value = false
+    window.clearTimeout(suppressMessageClickTimer)
+    suppressMessageClickTimer = 0
+    event.preventDefault()
+    return
+  }
+  if (selectionMode.value) toggleMessageSelection(message)
+}
+function toggleMessageSelection(message: any) {
+  if (selectedMessageIds.has(message.messageId)) selectedMessageIds.delete(message.messageId)
+  else selectedMessageIds.add(message.messageId)
+}
 function enterMultiSelect(message: any) { closeMessageMenu(); selectionMode.value = true; selectedMessageIds.add(message.messageId) }
-function exitMultiSelect() { selectionMode.value = false; selectedMessageIds.clear() }
+function toggleSelectAll() {
+  if (allMessagesSelected.value) activeMessages.value.forEach((message) => selectedMessageIds.delete(message.messageId))
+  else activeMessages.value.forEach((message) => selectedMessageIds.add(message.messageId))
+}
+function exitMultiSelect() { cancelDragSelection(); selectionMode.value = false; selectedMessageIds.clear() }
 async function batchFavorite() { const ids = [...selectedMessageIds]; for (const id of ids) { const message = activeMessages.value.find((item) => item.messageId === id); if (message && !message.isFavorite) { await ChatService.SetMessageFavorite(id, true); message.isFavorite = true } } exitMultiSelect(); Message.success('已收藏所选消息') }
-async function batchDelete() { const ids = [...selectedMessageIds]; for (const id of ids) { await ChatService.DeleteMessage(id); delete messagePreviews[id] } if (activePeer.value) await loadConversation(activePeer.value, false, false, false); exitMultiSelect(); Message.success('已删除所选消息') }
+function requestMessageDelete(messageIds: string[]) {
+  const ids = [...new Set(messageIds.filter(Boolean))]
+  if (!ids.length) return
+  closeAllContextMenus()
+  messageDeleteConfirm.messageIds = ids
+  messageDeleteConfirm.busy = false
+  messageDeleteConfirm.visible = true
+}
+function deleteMessage(message: any) { requestMessageDelete([message.messageId]) }
+function closeMessageDeleteConfirm() {
+  if (messageDeleteConfirm.busy) return
+  messageDeleteConfirm.visible = false
+  messageDeleteConfirm.messageIds = []
+}
+async function confirmMessageDelete(deleteLocalFiles: boolean) {
+  const ids = [...messageDeleteConfirm.messageIds]
+  if (!ids.length || messageDeleteConfirm.busy) return
+  messageDeleteConfirm.busy = true
+  try {
+    const result = await ChatService.DeleteMessages(ids, deleteLocalFiles)
+    ids.forEach((id) => { delete messagePreviews[id] })
+    ids.forEach((id) => {
+      delete store.transferProgress[id]
+      delete store.transferHistory[id]
+      delete store.transferProgressByDirection[id]
+      delete store.transferHistoryByDirection[id]
+    })
+    if (activePeer.value) await loadConversation(activePeer.value, false, false, false)
+    closeMessageDeleteConfirm()
+    exitMultiSelect()
+    const failures = Number(result?.failedMessageIds?.length || 0)
+    const skipped = Number(result?.skippedExternalFiles || 0) + Number(result?.skippedLocalFiles || 0)
+    if (failures) Message.warning(`已删除 ${result?.deletedMessages || 0} 条消息，${failures} 条删除失败`)
+    else if (skipped) Message.success(`已删除 ${result?.deletedMessages || ids.length} 条消息，${skipped} 个本地文件未删除`)
+    else Message.success(`已删除 ${result?.deletedMessages || ids.length} 条消息`)
+  } catch (error: any) {
+    Message.error(error?.message || '删除消息失败')
+  } finally {
+    messageDeleteConfirm.busy = false
+  }
+}
+function batchDelete() { requestMessageDelete([...selectedMessageIds]) }
 function openForward(messages: ChatMessage[], excludedDeviceId = activePeer.value?.deviceId) { const candidates = store.friends.filter((peer) => peer.deviceId !== excludedDeviceId); if (!candidates.length) { Message.warning('没有可转发的好友'); return }; forwardSources.value = messages; forwardCandidates.value = candidates; forwardTargetIds.value = []; forwardVisible.value = true }
 function openFavoriteForward(message: ChatMessage) { openForward([message], '') }
 async function confirmForward() { if (!forwardTargetIds.value.length) { Message.warning('请选择转发好友'); return }; for (const targetId of forwardTargetIds.value) for (const message of forwardSources.value) await ChatService.SendMessageWithMetadata(targetId, message.content, message.messageId, message.content, message.messageId); Message.success(`已转发给 ${forwardTargetIds.value.length} 位好友`); forwardVisible.value = false; exitMultiSelect() }
 function toggleForwardTarget(deviceId: string) { forwardTargetIds.value = forwardTargetIds.value.includes(deviceId) ? forwardTargetIds.value.filter((id) => id !== deviceId) : [...forwardTargetIds.value, deviceId] }
 function forwardMessage(message: any) { closeMessageMenu(); openForward([message]) }
 function batchForward() { const messages = activeMessages.value.filter((message) => selectedMessageIds.has(message.messageId)); openForward(messages) }
-function quoteMessage(message: any) { closeMessageMenu(); quoteMessageId.value = message.messageId; quoteContent.value = message.content || ''; Message.info('已引用消息，请输入回复') }
+function quoteMessage(message: any) {
+  closeMessageMenu()
+  quoteMessageId.value = message.messageId
+  if (message.kind === 'file') {
+    const name = message.attachmentName || message.content || '未命名附件'
+    if (isImageMessage(message)) {
+      quoteKindLabel.value = '图片'
+      quoteContent.value = `图片：${name}`
+    } else {
+      quoteKindLabel.value = '文件'
+      quoteContent.value = `文件：${name}${message.attachmentSize ? ` · ${formatBytes(message.attachmentSize)}` : ''}`
+    }
+  } else {
+    quoteKindLabel.value = '文本'
+    quoteContent.value = message.content || '（空消息）'
+  }
+  void nextTick(() => composerInput.value?.focus())
+  Message.info('已引用消息，请输入回复')
+}
+function clearQuote() { quoteMessageId.value = ''; quoteContent.value = ''; quoteKindLabel.value = '文本'; void nextTick(() => composerInput.value?.focus()) }
 function closePeerInfo() { showPeerInfo.value = false }
 function togglePeerInfo() { showPeerInfo.value = !showPeerInfo.value; if (showPeerInfo.value && activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
 function openPeerInfo() { showPeerInfo.value = true; if (activePeer.value) void refreshPeerAvatar(activePeer.value.deviceId) }
@@ -1879,7 +2130,13 @@ function minimiseWindow() { Window.Minimise() }
 async function toggleMaximise() { if (await Window.IsMaximised()) Window.UnMaximise(); else Window.Maximise() }
 function closeWindow() { Window.Minimise() }
 watch(() => store.profile, (value) => Object.assign(editProfile, { ...value, nickname: normalizeNickname(value.nickname) }), { deep: true })
-watch(() => activePeer.value, (peer) => { peerRemark.value = peer?.remark || '' })
+watch(() => activePeer.value, (peer, previous) => {
+  peerRemark.value = peer?.remark || ''
+  if (peer?.deviceId !== previous?.deviceId) {
+    exitMultiSelect()
+    clearQuote()
+  }
+})
 watch(activePeerCanSend, (canSend) => { if (!canSend) emojiOpen.value = false })
 watch(activeMessageLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) }, { immediate: true })
 watch(activeTransferLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) })
@@ -1926,6 +2183,7 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', updateDesktopForeground)
   window.addEventListener('focus', updateDesktopForeground)
   window.addEventListener('blur', updateDesktopForeground)
+  window.addEventListener('blur', cancelDragSelection)
   window.addEventListener('pointerdown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', unlockNotificationAudio, { once: true })
   window.addEventListener('keydown', handleContextMenuKeydown)
@@ -1951,7 +2209,7 @@ onMounted(async () => {
   await load()
   scheduleMenuWarmup()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleFileDragState) window.removeEventListener('flyqpro:file-drag-state', handleFileDragState); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelDragSelection(); window.clearTimeout(suppressMessageClickTimer); suppressMessageClickTimer = 0; suppressNextMessageClick.value = false; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('blur', cancelDragSelection); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleFileDragState) window.removeEventListener('flyqpro:file-drag-state', handleFileDragState); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -2622,7 +2880,21 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .conversation-head { height: 58px; flex-basis: 58px; padding: 0 18px; }
 .head-peer strong { font-size: 14px; }
 .head-peer span { font-size: 11px; }
-.message-line { align-items: center; gap: 8px; }
+.message-line { position: relative; align-items: center; gap: 8px; }
+.message-line.selection-active { cursor: pointer; }
+.message-scroll.is-drag-selecting, .message-scroll.is-drag-selecting * { user-select: none; }
+.message-scroll.is-drag-selecting { cursor: crosshair; }
+.message-scroll.is-drag-selecting .message-line { cursor: crosshair; }
+.message-select-toggle { position: absolute; left: -30px; top: 50%; z-index: 2; display: inline-flex; width: 20px; height: 20px; transform: translateY(-50%); align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line-strong, #c9cdd4); border-radius: 50%; background: var(--surface-1); cursor: pointer; }
+.message-select-toggle span { width: 8px; height: 8px; border-radius: 50%; background: transparent; }
+.message-select-toggle.checked { border-color: var(--accent); background: var(--accent); }
+.message-select-toggle.checked span { background: #fff; }
+.composer-quote { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; margin: 2px 0 4px; padding: 5px 8px; border-left: 3px solid var(--accent); border-radius: 4px; background: var(--surface-2); color: var(--text); }
+.composer-quote > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.composer-quote strong { color: var(--accent); font-size: 11px; }
+.composer-quote span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-quote button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-quote button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); }
 .message-avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .message-status { display: inline-flex; width: 52px; height: 17px; margin-left: 6px; align-items: center; justify-content: center; border-radius: 4px; background: rgba(255, 255, 255, .2); font-size: 10px; vertical-align: middle; }
 .chat-app .message-line.mine .message-status { color: var(--message-outgoing-text); background: rgba(255, 255, 255, .18); }

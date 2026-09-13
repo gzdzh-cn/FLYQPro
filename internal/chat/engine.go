@@ -369,6 +369,16 @@ type incomingFile struct {
 	parallel            bool
 	transferToken       string
 	parallelStreamCount int
+	// last* are transfer-level tuning metrics. Parallel streams report their
+	// own frames at different times, so the detail view must not depend on the
+	// last event from one particular stream.
+	lastWindowBytes     int64
+	lastWindowSize      int
+	lastChunkSize       int
+	lastStreamCount     int
+	lastActiveStreams   int
+	lastInFlightBytes   int64
+	lastAckTargetBytes  int64
 	parallelMu          sync.Mutex
 	parallelRanges      map[int]*parallelRange
 	parallelSessions    map[int]*wireSession
@@ -1299,6 +1309,15 @@ func (e *Engine) receiveBinaryFileWindow(reader *wireReader, transfer *incomingF
 	transfer.nextChunk += chunkCount
 	transfer.windowChunks = chunkCount
 	transfer.windowBytes = payloadLen
+	transfer.parallelMu.Lock()
+	transfer.lastChunkSize = chunkSize
+	transfer.lastWindowSize = chunkCount
+	transfer.lastWindowBytes = payloadLen
+	transfer.lastStreamCount = 1
+	transfer.lastActiveStreams = 1
+	transfer.lastInFlightBytes = transfer.binaryAckBytes + transfer.received - windowReceivedStart
+	transfer.lastAckTargetBytes = transfer.binaryAckTarget
+	transfer.parallelMu.Unlock()
 	transfer.binaryPending = false
 	transfer.binaryAckBytes += payloadLen
 	transfer.binaryAckWindows++
@@ -1456,14 +1475,46 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 	}
 	if parallelTransfer {
 		transfer.parallelMu.Lock()
-		options.windowBytes = 0
-		options.inFlightBytes, options.activeStreams = parallelReceiverMetricsLocked(transfer)
+		inFlightBytes, activeStreams := parallelReceiverMetricsLocked(transfer)
+		if transfer.lastWindowBytes > 0 {
+			options.windowBytes = transfer.lastWindowBytes
+		}
+		if transfer.lastWindowSize > 0 {
+			options.windowSize = transfer.lastWindowSize
+		}
+		if transfer.lastChunkSize > 0 {
+			options.chunkSize = transfer.lastChunkSize
+		}
+		options.inFlightBytes = inFlightBytes
+		options.activeStreams = activeStreams
 		options.streamCount = transfer.parallelStreamCount
-		options.ackTargetBytes = parallelAckBytes
+		if options.streamCount == 0 {
+			options.streamCount = transfer.lastStreamCount
+		}
+		options.ackTargetBytes = transfer.lastAckTargetBytes
+		if options.ackTargetBytes == 0 {
+			options.ackTargetBytes = parallelAckBytes
+		}
+		transfer.lastActiveStreams = activeStreams
+		transfer.lastInFlightBytes = inFlightBytes
 		options.durableBytes = transfer.durableBytes
 		transfer.parallelMu.Unlock()
 	} else {
-		options.windowBytes = transfer.windowBytes
+		transfer.parallelMu.Lock()
+		if transfer.lastWindowBytes > 0 {
+			options.windowBytes = transfer.lastWindowBytes
+		}
+		if transfer.lastWindowSize > 0 {
+			options.windowSize = transfer.lastWindowSize
+		}
+		if transfer.lastChunkSize > 0 {
+			options.chunkSize = transfer.lastChunkSize
+		}
+		options.ackTargetBytes = transfer.lastAckTargetBytes
+		transfer.parallelMu.Unlock()
+		if options.windowBytes == 0 {
+			options.windowBytes = transfer.windowBytes
+		}
 		options.inFlightBytes = receiverInFlightBytesLocked(transfer)
 	}
 	if !parallelTransfer {
@@ -1474,7 +1525,9 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		}
 	}
 	if transfer.binary && !transfer.parallel {
-		options.ackTargetBytes = transfer.binaryAckTarget
+		if transfer.binaryAckTarget > 0 {
+			options.ackTargetBytes = transfer.binaryAckTarget
+		}
 	}
 	return options
 }
@@ -1584,6 +1637,13 @@ func (e *Engine) receiveParallelStream(reader *wireReader, conn net.Conn, hello 
 		received := transfer.received
 		inFlightBytes, activeStreams := parallelReceiverMetricsLocked(transfer)
 		durableBytes := transfer.durableBytes
+		transfer.lastChunkSize = join.ChunkSize
+		transfer.lastWindowSize = join.StreamCount
+		transfer.lastWindowBytes = int64(header.PayloadLen)
+		transfer.lastStreamCount = join.StreamCount
+		transfer.lastActiveStreams = activeStreams
+		transfer.lastInFlightBytes = inFlightBytes
+		transfer.lastAckTargetBytes = parallelAckBytes
 		shouldEmit := time.Since(transfer.binaryLastAckAt) >= parallelProgressInterval || received == transfer.expected
 		if shouldEmit {
 			transfer.lastProgress = received

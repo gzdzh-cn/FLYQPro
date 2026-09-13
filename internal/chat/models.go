@@ -274,6 +274,18 @@ type ClearConversationResult struct {
 	SkippedLocalFiles    int `json:"skippedLocalFiles"`
 }
 
+// DeleteMessagesResult describes a best-effort message deletion. The database
+// rows are removed even when an optional local-file cleanup is skipped.
+type DeleteMessagesResult struct {
+	DeletedMessages      int      `json:"deletedMessages"`
+	DeletedAttachments   int      `json:"deletedAttachments"`
+	DeletedFiles         int      `json:"deletedFiles"`
+	SkippedExternalFiles int      `json:"skippedExternalFiles"`
+	SkippedLocalFiles    int      `json:"skippedLocalFiles"`
+	FailedMessageIDs     []string `json:"failedMessageIds,omitempty"`
+	Errors               []string `json:"errors,omitempty"`
+}
+
 type AttachmentMigrationResult struct {
 	SourceRoot   string `json:"sourceRoot"`
 	TargetRoot   string `json:"targetRoot"`

@@ -416,6 +416,38 @@ func TestReceiverProgressMetricsClampAndAggregate(t *testing.T) {
 	}
 }
 
+func TestReceiverProgressOptionsKeepLastTuningMetrics(t *testing.T) {
+	window := &incomingFile{
+		expected:           1024,
+		binary:             true,
+		chunkSize:          256,
+		windowBytes:        0,
+		lastChunkSize:      256,
+		lastWindowSize:     16,
+		lastWindowBytes:    4096,
+		lastAckTargetBytes: 8192,
+	}
+	options := receiverProgressOptions(window, nil)
+	if options.windowBytes != 4096 || options.windowSize != 16 || options.chunkSize != 256 || options.ackTargetBytes != 8192 {
+		t.Fatalf("window tuning metrics = chunk=%d window=%d bytes=%d ack=%d", options.chunkSize, options.windowSize, options.windowBytes, options.ackTargetBytes)
+	}
+
+	parallel := &incomingFile{
+		parallel:            true,
+		expected:            1024,
+		parallelStreamCount: 4,
+		lastChunkSize:       1024,
+		lastWindowSize:      4,
+		lastWindowBytes:     16384,
+		lastAckTargetBytes:  32768,
+		parallelRanges:      map[int]*parallelRange{0: {received: 10, acknowledged: 10}},
+	}
+	options = receiverProgressOptions(parallel, nil)
+	if options.windowBytes != 16384 || options.streamCount != 4 || options.activeStreams != 1 || options.ackTargetBytes != 32768 {
+		t.Fatalf("parallel tuning metrics = window=%d streams=%d/%d ack=%d", options.windowBytes, options.activeStreams, options.streamCount, options.ackTargetBytes)
+	}
+}
+
 func TestSubnetHostTargetsIncludesPeerAndExcludesLocalAndBroadcast(t *testing.T) {
 	_, subnet, err := net.ParseCIDR("192.168.43.4/24")
 	if err != nil {

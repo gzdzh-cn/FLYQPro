@@ -278,6 +278,13 @@ func removeTransferResumeState(attachmentID string, removePart bool) {
 	removeTransferResumeArtifacts(attachmentID, removePart, true)
 }
 
+// RemoveAttachmentTransferState is used by message deletion after the
+// transfer has been stopped. It removes only transfer-owned artifacts; the
+// final saved attachment is handled separately by the service layer.
+func RemoveAttachmentTransferState(attachmentID string, removePart bool) {
+	removeTransferResumeState(attachmentID, removePart)
+}
+
 func cleanupExpiredTransferResumeStates() {
 	root := filepath.Join(AppDataDir(), "temp")
 	paths, err := filepath.Glob(filepath.Join(root, "*.resume.json"))

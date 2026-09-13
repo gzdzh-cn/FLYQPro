@@ -1622,7 +1622,101 @@ func (s *ChatService) DeleteMessage(messageID string) error {
 	if strings.TrimSpace(messageID) == "" {
 		return fmt.Errorf("消息 ID 不能为空")
 	}
-	return chat.DeleteMessageRecord(gctx.New(), messageID)
+	_, err := s.DeleteMessages([]string{messageID}, false)
+	return err
+}
+
+// DeleteMessages removes messages and their transfer metadata. Final local
+// files are deleted only when the caller explicitly opts in; temporary
+// transfer artifacts are always removed because they cannot be resumed after
+// the owning message is gone.
+func (s *ChatService) DeleteMessages(messageIDs []string, deleteLocalFiles bool) (chat.DeleteMessagesResult, error) {
+	var result chat.DeleteMessagesResult
+	if s.engine.IsAttachmentMigrationActive() {
+		return result, fmt.Errorf("附件迁移正在进行")
+	}
+	ctx := gctx.New()
+	profile, profileErr := chat.GetProfile(ctx)
+	if deleteLocalFiles && profileErr != nil {
+		return result, profileErr
+	}
+	roots := []string{chat.DefaultAttachmentDir(), filepath.Join(chat.AppDataDir(), "temp")}
+	if strings.TrimSpace(profile.FileSavePath) != "" {
+		roots = append(roots, profile.FileSavePath)
+	}
+	seenIDs := make(map[string]struct{}, len(messageIDs))
+	seenFiles := make(map[string]struct{})
+	localDeviceID := s.engine.DeviceInfo().DeviceID
+
+	for _, rawID := range messageIDs {
+		messageID := strings.TrimSpace(rawID)
+		if messageID == "" {
+			continue
+		}
+		if _, seen := seenIDs[messageID]; seen {
+			continue
+		}
+		seenIDs[messageID] = struct{}{}
+		message, err := chat.GetMessage(ctx, messageID)
+		if err != nil {
+			// Deletion is intentionally idempotent: a stale UI row is already
+			// gone, so it does not make the remaining batch fail.
+			continue
+		}
+
+		if message.AttachmentID != "" {
+			attachment, attachmentErr := chat.GetAttachment(ctx, message.AttachmentID)
+			if attachmentErr == nil {
+				_ = s.engine.CancelAttachment(message.AttachmentID)
+				if deleteLocalFiles {
+					path := strings.TrimSpace(attachment.LocalPath)
+					if message.SenderDeviceID == localDeviceID || attachment.Status == "sent" {
+						result.SkippedExternalFiles++
+					} else if path == "" {
+						result.SkippedLocalFiles++
+					} else {
+						cleanPath, absErr := filepath.Abs(path)
+						managed := absErr == nil
+						if managed {
+							managed = false
+							for _, root := range roots {
+								if chat.IsPathWithin(cleanPath, root) {
+									managed = true
+									break
+								}
+							}
+						}
+						if !managed {
+							result.SkippedExternalFiles++
+						} else if _, duplicate := seenFiles[cleanPath]; duplicate {
+							// Count a shared path only once.
+						} else {
+							seenFiles[cleanPath] = struct{}{}
+							info, statErr := os.Lstat(cleanPath)
+							if os.IsNotExist(statErr) {
+								result.SkippedLocalFiles++
+							} else if statErr != nil || info.IsDir() {
+								result.SkippedLocalFiles++
+							} else if removeErr := os.Remove(cleanPath); removeErr != nil {
+								result.SkippedLocalFiles++
+							} else {
+								result.DeletedFiles++
+							}
+						}
+					}
+				}
+				chat.RemoveAttachmentTransferState(message.AttachmentID, true)
+				result.DeletedAttachments++
+			}
+		}
+		if err := chat.DeleteMessageRecord(ctx, messageID); err != nil {
+			result.FailedMessageIDs = append(result.FailedMessageIDs, messageID)
+			result.Errors = append(result.Errors, err.Error())
+			continue
+		}
+		result.DeletedMessages++
+	}
+	return result, nil
 }
 
 func (s *ChatService) attachmentFile(attachmentID string) (chat.Attachment, os.FileInfo, error) {
