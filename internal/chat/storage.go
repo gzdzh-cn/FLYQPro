@@ -198,6 +198,44 @@ func saveTransferResumeRecord(ctx context.Context, state transferResumeState) er
 		state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, metricGenerationOrDefault(state.MetricGeneration), state.CheckpointSeq, state.MetricSeq, state.ElapsedMs, state.MetricStartedBytes, state.MetricLastBytes, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), nowString())
 }
 
+func saveTransferCheckpointRecord(ctx context.Context, state transferResumeState, snapshot TransferSnapshot) error {
+	ranges, err := json.Marshal(normalizeTransferRanges(state.CompletedRanges, state.FileSize))
+	if err != nil {
+		return err
+	}
+	if snapshot.AttachmentID == "" {
+		snapshot.AttachmentID = state.AttachmentID
+	}
+	if snapshot.MessageID == "" {
+		snapshot.MessageID = state.MessageID
+	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	database := db.DB()
+	if database == nil {
+		return fmt.Errorf("数据库尚未初始化")
+	}
+	now := nowString()
+	return database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, metric_generation=excluded.metric_generation, checkpoint_seq=excluded.checkpoint_seq, metric_seq=excluded.metric_seq, elapsed_ms=excluded.elapsed_ms, metric_started_bytes=excluded.metric_started_bytes, metric_last_bytes=excluded.metric_last_bytes, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
+			state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, metricGenerationOrDefault(state.MetricGeneration), state.CheckpointSeq, state.MetricSeq, state.ElapsedMs, state.MetricStartedBytes, state.MetricLastBytes, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), now); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO transfer_snapshot_directions(attachment_id, direction, message_id, snapshot_json, updated_at)
+			VALUES(?, ?, ?, ?, ?)
+			ON CONFLICT(attachment_id, direction) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+			snapshot.AttachmentID, snapshot.Direction, snapshot.MessageID, string(payload), now)
+		return err
+	})
+}
+
 func loadTransferResumeRecord(ctx context.Context, attachmentID string) (transferResumeState, error) {
 	var rows []transferResumeRow
 	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes WHERE attachment_id=? LIMIT 1`, attachmentID)
@@ -1208,6 +1246,31 @@ func MessageExists(ctx context.Context, messageID string) (bool, error) {
 
 func SaveAttachment(ctx context.Context, attachment Attachment) error {
 	return exec(ctx, `INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET sha256=CASE WHEN excluded.sha256 != '' THEN excluded.sha256 ELSE attachments.sha256 END, thumbnail_data=CASE WHEN excluded.thumbnail_data != '' THEN excluded.thumbnail_data ELSE attachments.thumbnail_data END, thumbnail_mime=CASE WHEN excluded.thumbnail_mime != '' THEN excluded.thumbnail_mime ELSE attachments.thumbnail_mime END, local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.ThumbnailData, attachment.ThumbnailMime, attachment.LocalPath, attachment.Status, nowString())
+}
+
+// commitIncomingFinalizationMetadata makes the visible attachment, message and
+// recovery terminal state one atomic SQLite commit. The returned code preserves
+// which logical step failed without exposing database internals to the wire.
+func commitIncomingFinalizationMetadata(ctx context.Context, attachment Attachment) (TransferErrorCode, error) {
+	database := db.DB()
+	if database == nil {
+		return ErrAttachmentPersist, fmt.Errorf("数据库尚未初始化")
+	}
+	code := ErrAttachmentPersist
+	err := database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET sha256=CASE WHEN excluded.sha256 != '' THEN excluded.sha256 ELSE attachments.sha256 END, thumbnail_data=CASE WHEN excluded.thumbnail_data != '' THEN excluded.thumbnail_data ELSE attachments.thumbnail_data END, thumbnail_mime=CASE WHEN excluded.thumbnail_mime != '' THEN excluded.thumbnail_mime ELSE attachments.thumbnail_mime END, local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.ThumbnailData, attachment.ThumbnailMime, attachment.LocalPath, attachment.Status, nowString()); err != nil {
+			return fmt.Errorf("attachment metadata: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE messages SET status=? WHERE message_id=?`, "sent", attachment.MessageID); err != nil {
+			return fmt.Errorf("message metadata: %w", err)
+		}
+		code = ErrResumePersistFailed
+		if _, err := tx.Exec(`UPDATE transfer_resumes SET status=?, error_code='', retryable=0, updated_at=? WHERE attachment_id=?`, string(TransferCompleted), nowString(), attachment.AttachmentID); err != nil {
+			return fmt.Errorf("resume metadata: %w", err)
+		}
+		return nil
+	})
+	return code, err
 }
 
 func ListAttachmentMigrationRows(ctx context.Context) ([]attachmentMigrationRow, error) {

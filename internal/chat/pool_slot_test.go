@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -40,6 +41,81 @@ func TestV3PoolKeepsConnectionAcrossReleasesAndClosesIdle(t *testing.T) {
 	p.CloseIdle(time.Now(), time.Second)
 	if s.Connection() != nil {
 		t.Fatal("idle connection was not closed")
+	}
+}
+
+func TestV3SlotReplyDrainKeepsAckPongAndNackOrdered(t *testing.T) {
+	p := NewPeerPool("peer", 1)
+	s, err := p.Acquire(context.Background(), "drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	s.SetConnection(a)
+	want := []BinaryFrameV3{
+		{Type: FrameChunkAck, TransferID: [16]byte{1}, Sequence: 1},
+		{Type: FramePoolPong, TransferID: [16]byte{1}, Sequence: 2},
+		{Type: FrameChunkNack, TransferID: [16]byte{1}, Sequence: 3},
+	}
+	done := make(chan error, 1)
+	go func() {
+		for _, frame := range want {
+			if err := writeV3Frame(b, frame); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for index := range want {
+		got, err := s.ReadFrame(context.Background())
+		if err != nil || got.Type != want[index].Type || got.Sequence != want[index].Sequence {
+			t.Fatalf("reply %d mismatch: frame=%+v err=%v", index, got, err)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	p.Release(s)
+}
+
+func TestV3SlotRejectsWritesFromExpiredLease(t *testing.T) {
+	p := NewPeerPool("peer", 1)
+	first, err := p.Acquire(context.Background(), "first-transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	first.SetConnection(a)
+	expiredLease := first.LeaseToken()
+	p.Release(first)
+	second, err := p.Acquire(context.Background(), "second-transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Release(second)
+	frame := BinaryFrameV3{Type: FrameBeginFile, TransferID: [16]byte{1}}
+	if err := first.WriteFrameForLease("first-transfer", expiredLease, frame); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("expired lease write error=%v", err)
+	}
+}
+
+func TestV3DurableBatchPolicy(t *testing.T) {
+	if got := v3DurableBatchSize(63*1024*1024, 0); got != 4*1024*1024 {
+		t.Fatalf("small file batch=%d", got)
+	}
+	if got := v3DurableBatchSize(64*1024*1024, 0); got != 8*1024*1024 {
+		t.Fatalf("large file initial batch=%d", got)
+	}
+	if got := v3DurableBatchSize(64*1024*1024, 20*time.Millisecond); got != 16*1024*1024 {
+		t.Fatalf("fast disk batch=%d", got)
+	}
+	if got := v3DurableBatchSize(64*1024*1024, 200*time.Millisecond); got != 4*1024*1024 {
+		t.Fatalf("slow disk batch=%d", got)
 	}
 }
 

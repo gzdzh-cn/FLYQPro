@@ -138,6 +138,8 @@
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
                 <p><span>已用时间</span><strong>{{ detailProgressElapsed }}</strong></p>
+                <p><span>数据传输耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.dataTransferMs) }}</strong></p>
+                <p><span>最终化耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.finalizationMs) }}</strong></p>
                 <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailDisplayPhase(detailProgress)) }}</strong></p>
                 <p v-if="detailProgress?.errorCode"><span>失败原因</span><strong>{{ transferErrorLabel(detailProgress.errorCode) }} · {{ transferRetryLabel(detailProgress) }}</strong></p>
                 <p v-if="!detailIsReceiver"><span>已发送容量</span><strong>{{ formatMetricBytes(detailSentBytes) }}</strong></p>
@@ -157,6 +159,11 @@
                 <p><span>调优状态</span><strong>{{ detailTuningState }}</strong></p>
                 <p><span>磁盘同步耗时</span><strong>{{ detailProgress?.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : detailProgress ? '暂未提供' : '暂未提供' }}</strong></p>
                 <p><span>checkpoint 序号</span><strong>{{ detailProgress?.checkpointSeq !== undefined ? detailProgress.checkpointSeq : '暂未提供' }}</strong></p>
+                <p><span>数据连接耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.dataSlotDialMs) }}</strong></p>
+                <p><span>首帧延迟</span><strong>{{ formatDiagnosticDuration(detailProgress?.firstFrameMs) }}</strong></p>
+                <p><span>slot 数</span><strong>{{ detailProgress?.streamCount ? `${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
+                <p><span>重连次数</span><strong>{{ detailProgress?.reconnectCount !== undefined ? `${detailProgress.reconnectCount} 次` : '暂未提供' }}</strong></p>
+                <p><span>重传数据量</span><strong>{{ detailProgress?.retransmittedBytes !== undefined ? formatMetricBytes(detailProgress.retransmittedBytes) : '暂未提供' }}</strong></p>
                 <p v-if="detailIsReceiver"><span>接收确认状态</span><strong>{{ detailProgress?.metricSource === 'receiver-durable' ? '已持久化确认' : '等待接收确认' }}</strong></p>
                 <p><span>通道 / 模式</span><strong>{{ detailProgress?.transport || 'TLS/TCP' }} · {{ transferModeLabel(detailProgress?.transferMode) }}</strong></p>
                 <p><span>并行数据流</span><strong>{{ detailProgress?.streamCount !== undefined && detailProgress.streamCount > 0 ? `${detailProgress.activeStreams !== undefined ? detailProgress.activeStreams : detailProgress.streamCount} / ${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
@@ -1316,6 +1323,12 @@ function formatTransferRate(value?: number): { primary: string; secondary: strin
   return { primary: `${formatSpeed(bytes)}/s`, secondary: '' }
 }
 function formatDuration(value?: number) { const seconds = Math.max(0, Math.round(Number(value || 0) / 1000)); if (!seconds) return '正在测量'; const minutes = Math.floor(seconds / 60); return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒` }
+function formatDiagnosticDuration(value?: number) {
+  if (value === undefined || value === null || Number.isNaN(Number(value))) return '暂未提供'
+  const milliseconds = Math.max(0, Number(value))
+  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`
+  return formatDuration(milliseconds)
+}
 function projectTransferProgress(progress: any, message: any): any {
   if (!progress) return progress
   const projected = { ...progress }
@@ -1433,8 +1446,8 @@ function transferProgressFor(message: any): any {
   // overwrite receiver speed, bytes, or tuning parameters.
   const merged = { ...(diagnostics || {}), ...(preferred || {}) }
   merged.sent = diagnostics?.sent ?? diagnostics?.transferred ?? merged.sent
-  merged.remoteReceived = preferred?.remoteReceived ?? preferred?.transferred ?? 0
-  merged.transferred = preferred?.transferred ?? 0
+  merged.remoteReceived = preferred?.remoteReceived ?? preferred?.durableBytes ?? preferred?.transferred ?? diagnostics?.durableBytes ?? diagnostics?.transferred ?? 0
+  merged.transferred = preferred?.durableBytes ?? preferred?.transferred ?? diagnostics?.durableBytes ?? diagnostics?.transferred ?? 0
   merged.total = preferred?.total || diagnostics?.total || message.attachmentSize || 0
   if (diagnostics) {
     merged.state = diagnostics.state || merged.state

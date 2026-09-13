@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -26,14 +28,22 @@ type PoolSlot struct {
 	LastProgress          time.Time
 	BytesSent, BytesAcked int64
 	conn                  net.Conn
+	readCh                chan poolSlotReadResult
+	readCancel            context.CancelFunc
 	lastIOAt              time.Time
 	lastAckAt             time.Time
 	inFlightBytes         int64
 	currentTransferID     string
+	leaseToken            uint64
 	lastPingAt            time.Time
 	terminal              bool
 	mu                    sync.Mutex
 	ioMu                  sync.Mutex
+}
+
+type poolSlotReadResult struct {
+	frame BinaryFrameV3
+	err   error
 }
 
 func (s *PoolSlot) Reserve(task string) error {
@@ -45,6 +55,7 @@ func (s *PoolSlot) Reserve(task string) error {
 	s.State = SlotReserved
 	s.CurrentTask = task
 	s.currentTransferID = task
+	s.leaseToken++
 	s.terminal = false
 	s.LastProgress = time.Now()
 	s.lastIOAt = s.LastProgress
@@ -118,6 +129,18 @@ func (s *PoolSlot) IsOwner(transferID string) bool {
 	return !s.terminal && s.currentTransferID == transferID && s.State != SlotDead
 }
 
+func (s *PoolSlot) LeaseToken() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseToken
+}
+
+func (s *PoolSlot) IsLeaseOwner(transferID string, leaseToken uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.terminal && s.currentTransferID == transferID && s.leaseToken == leaseToken && s.State != SlotDead
+}
+
 func (s *PoolSlot) TransferID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,14 +166,92 @@ func (s *PoolSlot) Connection() net.Conn {
 }
 func (s *PoolSlot) SetConnection(conn net.Conn) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	previous := s.conn
+	previousCancel := s.readCancel
 	s.conn = conn
+	s.readCh = nil
+	s.readCancel = nil
+	var readCtx context.Context
+	if conn != nil {
+		s.readCh = make(chan poolSlotReadResult, 64)
+		readCtx, s.readCancel = context.WithCancel(context.Background())
+	}
+	readCh := s.readCh
+	s.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+	if previous != nil && previous != conn {
+		_ = previous.Close()
+	}
+	if conn != nil {
+		go s.drainReplies(readCtx, conn, readCh)
+	}
+}
+
+// drainReplies is the sole reader for a leased TLS slot. It remains alive
+// while the connection is idle so late Pong/ACK frames cannot be consumed by
+// the next transfer's synchronous read path.
+func (s *PoolSlot) drainReplies(ctx context.Context, conn net.Conn, output chan poolSlotReadResult) {
+	defer close(output)
+	for {
+		frame, err := ReadBinaryFrameV3(conn, 64*1024)
+		if err != nil {
+			select {
+			case output <- poolSlotReadResult{err: err}:
+			default:
+			}
+			return
+		}
+		s.TouchIO("read")
+		select {
+		case output <- poolSlotReadResult{frame: frame}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *PoolSlot) ReadFrame(ctx context.Context) (BinaryFrameV3, error) {
+	s.mu.Lock()
+	readCh := s.readCh
+	valid := s.conn != nil
+	s.mu.Unlock()
+	if !valid || readCh == nil {
+		return BinaryFrameV3{}, net.ErrClosed
+	}
+	select {
+	case <-ctx.Done():
+		return BinaryFrameV3{}, ctx.Err()
+	case result, ok := <-readCh:
+		if !ok {
+			return BinaryFrameV3{}, io.ErrUnexpectedEOF
+		}
+		return result.frame, result.err
+	}
+}
+
+func (s *PoolSlot) ReadFrameForLease(ctx context.Context, transferID string, leaseToken uint64) (BinaryFrameV3, error) {
+	if !s.IsLeaseOwner(transferID, leaseToken) {
+		return BinaryFrameV3{}, net.ErrClosed
+	}
+	frame, err := s.ReadFrame(ctx)
+	if err == nil && !s.IsLeaseOwner(transferID, leaseToken) {
+		return BinaryFrameV3{}, net.ErrClosed
+	}
+	return frame, err
 }
 func (s *PoolSlot) CloseConnection() {
 	s.mu.Lock()
 	conn := s.conn
+	cancel := s.readCancel
 	s.conn = nil
+	s.readCh = nil
+	s.readCancel = nil
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -158,11 +259,17 @@ func (s *PoolSlot) CloseConnection() {
 func (s *PoolSlot) Kill() {
 	s.mu.Lock()
 	conn := s.conn
+	cancel := s.readCancel
 	s.conn = nil
+	s.readCh = nil
+	s.readCancel = nil
 	s.State = SlotDead
 	s.CurrentTask = ""
 	s.currentTransferID = ""
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -173,12 +280,18 @@ func (s *PoolSlot) Kill() {
 func (s *PoolSlot) Cancel() {
 	s.mu.Lock()
 	conn := s.conn
+	cancel := s.readCancel
 	s.conn = nil
+	s.readCh = nil
+	s.readCancel = nil
 	s.State = SlotDead
 	s.CurrentTask = ""
 	s.currentTransferID = ""
 	s.terminal = true
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -235,6 +348,13 @@ func (s *PoolSlot) WriteFrame(frame BinaryFrameV3) error {
 		s.TouchIO("write")
 	}
 	return nil
+}
+
+func (s *PoolSlot) WriteFrameForLease(transferID string, leaseToken uint64, frame BinaryFrameV3) error {
+	if !s.IsLeaseOwner(transferID, leaseToken) {
+		return net.ErrClosed
+	}
+	return s.WriteFrame(frame)
 }
 func (s *PoolSlot) Stalled(now time.Time) bool {
 	s.mu.Lock()

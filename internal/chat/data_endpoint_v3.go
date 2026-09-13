@@ -65,8 +65,16 @@ func DialV3Data(ctx context.Context, addr string, config *tls.Config) (net.Conn,
 // first successful TLS handshake. This handles peers with simultaneous WiFi
 // and Ethernet interfaces without relying on discovery order.
 func DialV3DataCandidates(ctx context.Context, hosts []string, port int, config *tls.Config) (net.Conn, error) {
+	conn, _, err := DialV3DataCandidatesPreferred(ctx, hosts, port, "", config)
+	return conn, err
+}
+
+// DialV3DataCandidatesPreferred gives the last known-good address a short head
+// start, then races every fallback. A stale cache therefore costs at most the
+// fallback delay rather than a complete dial timeout.
+func DialV3DataCandidatesPreferred(ctx context.Context, hosts []string, port int, preferred string, config *tls.Config) (net.Conn, string, error) {
 	if len(hosts) == 0 || port <= 0 {
-		return nil, errors.New("no v3 data candidates")
+		return nil, "", errors.New("no v3 data candidates")
 	}
 	unique := make([]string, 0, len(hosts))
 	seen := make(map[string]struct{}, len(hosts))
@@ -81,21 +89,41 @@ func DialV3DataCandidates(ctx context.Context, hosts []string, port int, config 
 		unique = append(unique, host)
 	}
 	if len(unique) == 0 {
-		return nil, errors.New("no v3 data candidates")
+		return nil, "", errors.New("no v3 data candidates")
+	}
+	if preferred != "" {
+		for i, host := range unique {
+			if host == preferred {
+				copy(unique[1:i+1], unique[0:i])
+				unique[0] = host
+				break
+			}
+		}
 	}
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
 		conn net.Conn
+		host string
 		err  error
 	}
-	results := make(chan result)
-	for _, host := range unique {
+	results := make(chan result, len(unique))
+	for index, host := range unique {
+		index := index
 		host := host
 		go func() {
+			if preferred != "" && index > 0 {
+				timer := time.NewTimer(50 * time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-probeCtx.Done():
+					return
+				case <-timer.C:
+				}
+			}
 			conn, err := DialV3Data(probeCtx, net.JoinHostPort(host, strconv.Itoa(port)), config)
 			select {
-			case results <- result{conn: conn, err: err}:
+			case results <- result{conn: conn, host: host, err: err}:
 			case <-probeCtx.Done():
 				if conn != nil {
 					_ = conn.Close()
@@ -107,11 +135,11 @@ func DialV3DataCandidates(ctx context.Context, hosts []string, port int, config 
 	for range unique {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case item := <-results:
 			if item.err == nil && item.conn != nil {
 				cancel()
-				return item.conn, nil
+				return item.conn, item.host, nil
 			}
 			lastErr = item.err
 		}
@@ -119,5 +147,5 @@ func DialV3DataCandidates(ctx context.Context, hosts []string, port int, config 
 	if lastErr == nil {
 		lastErr = errors.New("all v3 data candidates failed")
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }

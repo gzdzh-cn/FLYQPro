@@ -66,6 +66,10 @@ type Engine struct {
 	transferTuning          map[string]transferTuning
 	transferScheduler       *transferScheduler
 	peerPools               map[string]*PeerPool
+	dataDialMu              sync.Mutex
+	dataDialAddresses       map[string]string
+	transferStagesMu        sync.Mutex
+	transferStages          map[string]transferStageMetrics
 	fileControls            map[string]*fileControlConnection
 	presenceMu              sync.Mutex
 	discoveryScanMu         sync.Mutex
@@ -372,54 +376,61 @@ type incomingFile struct {
 	// last* are transfer-level tuning metrics. Parallel streams report their
 	// own frames at different times, so the detail view must not depend on the
 	// last event from one particular stream.
-	lastWindowBytes     int64
-	lastWindowSize      int
-	lastChunkSize       int
-	lastStreamCount     int
-	lastActiveStreams   int
-	lastInFlightBytes   int64
-	lastAckTargetBytes  int64
-	parallelMu          sync.Mutex
-	parallelRanges      map[int]*parallelRange
-	parallelSessions    map[int]*wireSession
-	parallelWritten     int64
-	parallelAcked       int64
-	parallelStopped     bool
-	v3Mu                sync.Mutex
-	v3Ranges            []ByteRange
-	v3Streams           map[uint16]*v3StreamState
-	v3Readers           map[uint16]*v3FrameReader
-	v3SessionID         [16]byte
-	v3Generation        uint64
-	v3Finalizing        bool
-	v3Paused            bool
-	v3MetricSeq         uint64
-	v3MetricAt          time.Time
-	v3MetricBytes       int64
-	v3LastSpeed         float64
-	v3AverageSpeed      float64
-	v3PeakSpeed         float64
-	v3LastDiskWriteMs   int64
-	v3LastAckLatencyMs  int64
-	v3Done              chan string
-	v3CheckpointMu      sync.Mutex
-	v3Checkpoint        *v3Checkpoint
-	v3WrittenVersion    uint64
-	v3DurableVersion    uint64
-	v3Sink              func([]byte) error
-	v3StartOffset       int64
-	v3IOMu              sync.RWMutex
-	resumeState         transferResumeState
-	resumeOffset        int64
-	resumeCommitted     int64
-	durableBytes        int64
-	resumeMu            sync.Mutex
-	finalizationMu      sync.Mutex
-	finalizationDone    chan struct{}
-	finalizationStarted bool
-	finalizationStatus  string
-	finalizationResult  v3FinalizationError
-	finalizationCause   error
+	lastWindowBytes       int64
+	lastWindowSize        int
+	lastChunkSize         int
+	lastStreamCount       int
+	lastActiveStreams     int
+	lastInFlightBytes     int64
+	lastAckTargetBytes    int64
+	parallelMu            sync.Mutex
+	parallelRanges        map[int]*parallelRange
+	parallelSessions      map[int]*wireSession
+	parallelWritten       int64
+	parallelAcked         int64
+	parallelStopped       bool
+	v3Mu                  sync.Mutex
+	v3Ranges              []ByteRange
+	v3Streams             map[uint16]*v3StreamState
+	v3Readers             map[uint16]*v3FrameReader
+	v3SessionID           [16]byte
+	v3Generation          uint64
+	v3Finalizing          bool
+	v3Paused              bool
+	v3MetricSeq           uint64
+	v3MetricAt            time.Time
+	v3MetricBytes         int64
+	v3LastSpeed           float64
+	v3AverageSpeed        float64
+	v3PeakSpeed           float64
+	v3LastDiskWriteMs     int64
+	v3LastAckLatencyMs    int64
+	v3ReceiverWriteMs     int64
+	v3DurabilitySyncMs    int64
+	v3ResumePersistMs     int64
+	v3FinalHashMs         int64
+	v3DestinationCommitMs int64
+	v3MetadataCommitMs    int64
+	v3FinalizationMs      int64
+	v3Done                chan string
+	v3CheckpointMu        sync.Mutex
+	v3Checkpoint          *v3Checkpoint
+	v3WrittenVersion      uint64
+	v3DurableVersion      uint64
+	v3Sink                func([]byte) error
+	v3StartOffset         int64
+	v3IOMu                sync.RWMutex
+	resumeState           transferResumeState
+	resumeOffset          int64
+	resumeCommitted       int64
+	durableBytes          int64
+	resumeMu              sync.Mutex
+	finalizationMu        sync.Mutex
+	finalizationDone      chan struct{}
+	finalizationStarted   bool
+	finalizationStatus    string
+	finalizationResult    v3FinalizationError
+	finalizationCause     error
 }
 
 type incomingPause struct {
@@ -666,7 +677,7 @@ func binaryTransferID(value string) [16]byte {
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pausingIncoming: make(map[string]*incomingPause), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), fileControls: make(map[string]*fileControlConnection)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pausingIncoming: make(map[string]*incomingPause), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), dataDialAddresses: make(map[string]string), transferStages: make(map[string]transferStageMetrics), fileControls: make(map[string]*fileControlConnection)}
 }
 
 func configureTCPConnection(conn net.Conn) {
@@ -1442,6 +1453,13 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 	v3PeakSpeed := transfer.v3PeakSpeed
 	v3LastDiskWriteMs := transfer.v3LastDiskWriteMs
 	v3LastAckLatencyMs := transfer.v3LastAckLatencyMs
+	v3ReceiverWriteMs := transfer.v3ReceiverWriteMs
+	v3DurabilitySyncMs := transfer.v3DurabilitySyncMs
+	v3ResumePersistMs := transfer.v3ResumePersistMs
+	v3FinalHashMs := transfer.v3FinalHashMs
+	v3DestinationCommitMs := transfer.v3DestinationCommitMs
+	v3MetadataCommitMs := transfer.v3MetadataCommitMs
+	v3FinalizationMs := transfer.v3FinalizationMs
 	transfer.v3Mu.Unlock()
 	parallelTransfer := transfer.parallel
 	transfer.resumeMu.Lock()
@@ -1472,6 +1490,13 @@ func receiverProgressOptions(transfer *incomingFile, verified *bool) transferPro
 		peakSpeed:           v3PeakSpeed,
 		diskWriteMs:         v3LastDiskWriteMs,
 		ackLatency:          time.Duration(v3LastAckLatencyMs) * time.Millisecond,
+		receiverWriteMs:     v3ReceiverWriteMs,
+		durabilitySyncMs:    v3DurabilitySyncMs,
+		resumePersistMs:     v3ResumePersistMs,
+		finalHashMs:         v3FinalHashMs,
+		destinationCommitMs: v3DestinationCommitMs,
+		metadataCommitMs:    v3MetadataCommitMs,
+		finalizationMs:      v3FinalizationMs,
 	}
 	if parallelTransfer {
 		transfer.parallelMu.Lock()
@@ -2871,6 +2896,17 @@ func (transfer *incomingFile) finalizationSnapshot() v3FinalizationError {
 }
 
 func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingFile) string {
+	finalizationStarted := time.Now()
+	finalizationRecorded := false
+	recordFinalization := func() {
+		if finalizationRecorded {
+			return
+		}
+		finalizationRecorded = true
+		transfer.v3Mu.Lock()
+		transfer.v3FinalizationMs += time.Since(finalizationStarted).Milliseconds()
+		transfer.v3Mu.Unlock()
+	}
 	transfer.v3Mu.Lock()
 	received := transfer.received
 	transfer.v3Mu.Unlock()
@@ -2907,14 +2943,13 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 			finalizeErr = err
 		} else {
 			digest := sha256.New()
-			hashFile, err := os.Open(transfer.tempPath)
-			if err == nil {
-				_, err = io.Copy(digest, hashFile)
-				closeErr := hashFile.Close()
-				if err == nil {
-					err = closeErr
-				}
-			}
+			hashStarted := time.Now()
+			_, err := io.Copy(digest, io.NewSectionReader(transfer.file, 0, transfer.expected))
+			hashDuration := time.Since(hashStarted)
+			transfer.v3Mu.Lock()
+			transfer.v3FinalHashMs += hashDuration.Milliseconds()
+			transfer.v3Mu.Unlock()
+			log.Printf("传输阶段: attachment=%s peer=%s stage=final_hash duration=%s bytes=%d", attachmentID, transfer.senderID, hashDuration, transfer.expected)
 			if err != nil {
 				log.Printf("文件最终化步骤失败: attachment=%s step=sha256 error=%s", attachmentID, redactDiagnosticError(err))
 				v3Valid = false
@@ -2945,14 +2980,13 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 			finalizeErr = err
 		} else {
 			digest := sha256.New()
-			hashFile, err := os.Open(transfer.tempPath)
-			if err == nil {
-				_, err = io.Copy(digest, hashFile)
-				closeErr := hashFile.Close()
-				if err == nil {
-					err = closeErr
-				}
-			}
+			hashStarted := time.Now()
+			_, err := io.Copy(digest, io.NewSectionReader(transfer.file, 0, transfer.expected))
+			hashDuration := time.Since(hashStarted)
+			transfer.v3Mu.Lock()
+			transfer.v3FinalHashMs += hashDuration.Milliseconds()
+			transfer.v3Mu.Unlock()
+			log.Printf("传输阶段: attachment=%s peer=%s stage=final_hash duration=%s bytes=%d", attachmentID, transfer.senderID, hashDuration, transfer.expected)
 			if err != nil {
 				log.Printf("文件最终化步骤失败: attachment=%s step=sha256_parallel error=%s", attachmentID, redactDiagnosticError(err))
 				parallelValid = false
@@ -2985,7 +3019,12 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 	localPath := transfer.tempPath
 	if valid && transfer.targetPath != "" && !e.IsAttachmentMigrationActive() {
 		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "finalizing", transferProgressOptions{verified: &verified, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
+		commitStarted := time.Now()
 		if err := commitVerifiedV3File(transfer.tempPath, transfer.targetPath, transfer.expected, transfer.sha256); err != nil {
+			commitDuration := time.Since(commitStarted)
+			transfer.v3Mu.Lock()
+			transfer.v3DestinationCommitMs += commitDuration.Milliseconds()
+			transfer.v3Mu.Unlock()
 			log.Printf("文件最终化步骤失败: attachment=%s step=destination_commit error=%s", attachmentID, redactDiagnosticError(err))
 			code = ErrDestinationCommit
 			finalizeErr = err
@@ -2995,12 +3034,18 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 				localPath = transfer.targetPath
 			}
 		} else {
+			commitDuration := time.Since(commitStarted)
+			transfer.v3Mu.Lock()
+			transfer.v3DestinationCommitMs += commitDuration.Milliseconds()
+			transfer.v3Mu.Unlock()
+			log.Printf("传输阶段: attachment=%s peer=%s stage=destination_commit duration=%s bytes=%d", attachmentID, transfer.senderID, commitDuration, transfer.expected)
 			localPath = transfer.targetPath
 		}
 	} else if valid {
 		e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "finalizing", transferProgressOptions{verified: &verified, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
 	}
 	if !valid {
+		recordFinalization()
 		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, code, retryable, verified, finalizeErr)
 	}
 
@@ -3012,18 +3057,18 @@ func (e *Engine) finishIncomingFileOnce(attachmentID string, transfer *incomingF
 		attachmentMime = "application/octet-stream"
 	}
 	attachment, _ := GetAttachment(context.Background(), attachmentID)
-	if err := SaveAttachment(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: attachmentMime, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, LocalPath: localPath, Status: "saved"}); err != nil {
-		log.Printf("文件最终化步骤失败: attachment=%s step=attachment_persist error=%s", attachmentID, redactDiagnosticError(err))
-		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrAttachmentPersist, true, verified, err)
+	metadataStarted := time.Now()
+	metadataCode, metadataErr := commitIncomingFinalizationMetadata(context.Background(), Attachment{AttachmentID: attachmentID, MessageID: transfer.messageID, FileName: transfer.fileName, MimeType: attachmentMime, FileSize: transfer.expected, SHA256: transfer.sha256, ThumbnailData: attachment.ThumbnailData, ThumbnailMime: attachment.ThumbnailMime, LocalPath: localPath, Status: "saved"})
+	transfer.v3Mu.Lock()
+	transfer.v3MetadataCommitMs += time.Since(metadataStarted).Milliseconds()
+	transfer.v3Mu.Unlock()
+	if metadataErr != nil {
+		recordFinalization()
+		log.Printf("文件最终化步骤失败: attachment=%s step=metadata_commit error=%s", attachmentID, redactDiagnosticError(metadataErr))
+		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, metadataCode, true, verified, metadataErr)
 	}
-	if err := exec(context.Background(), `UPDATE messages SET status=? WHERE message_id=?`, "sent", transfer.messageID); err != nil {
-		log.Printf("文件最终化步骤失败: attachment=%s step=message_persist error=%s", attachmentID, redactDiagnosticError(err))
-		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrAttachmentPersist, true, verified, err)
-	}
-	if err := markTransferResumeTerminalWithRanges(context.Background(), attachmentID, TransferCompleted, "", false, false); err != nil {
-		log.Printf("文件最终化步骤失败: attachment=%s step=resume_persist error=%s", attachmentID, redactDiagnosticError(err))
-		return e.recordIncomingFinalizationFailure(attachmentID, transfer, localPath, ErrResumePersistFailed, true, verified, err)
-	}
+	log.Printf("传输阶段: attachment=%s peer=%s stage=metadata_commit duration=%s", attachmentID, transfer.senderID, time.Since(metadataStarted))
+	recordFinalization()
 	removeTransferResumeArtifacts(attachmentID, false, true)
 	if messageRecord, messageErr := GetMessage(context.Background(), transfer.messageID); messageErr == nil {
 		messageRecord.Status = "sent"
@@ -3084,7 +3129,10 @@ func (e *Engine) recordIncomingFinalizationFailure(attachmentID string, transfer
 	transfer.v3Mu.Lock()
 	received := transfer.received
 	transfer.v3Mu.Unlock()
-	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", transferProgressOptions{verified: &verified, errorCode: string(code), retryable: retryable, durableBytes: transfer.durableBytes, sessionID: fmt.Sprintf("%x", transfer.v3SessionID), generation: transfer.v3Generation, transferMode: receiverTransferMode(transfer)})
+	failedOptions := receiverProgressOptions(transfer, &verified)
+	failedOptions.errorCode = string(code)
+	failedOptions.retryable = retryable
+	e.emitTransferProgress(transfer.messageID, attachmentID, transfer.senderID, received, transfer.expected, "receive", "failed", failedOptions)
 	transfer.finalizationMu.Lock()
 	transfer.finalizationResult = v3FinalizationError{Version: v3FinalizationErrorVersion, Status: "failed", ErrorCode: code, Retryable: retryable, Verified: verified, DurableBytes: transfer.durableBytes, CommittedPath: localPath}
 	transfer.finalizationCause = cause
@@ -3136,6 +3184,18 @@ type transferProgressOptions struct {
 	localSendSpeed         float64
 	averageSpeed           float64
 	peakSpeed              float64
+	checkpointPersisted    bool
+	receiverWriteMs        int64
+	durabilitySyncMs       int64
+	resumePersistMs        int64
+	finalHashMs            int64
+	destinationCommitMs    int64
+	metadataCommitMs       int64
+	dataTransferMs         int64
+	finalizationMs         int64
+	totalDurationMs        int64
+	reconnectCount         int
+	retransmittedBytes     int64
 }
 
 const transferSpeedSmoothingWindow = 1500 * time.Millisecond
@@ -3439,6 +3499,23 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	if option.verified != nil {
 		value["verified"] = *option.verified
 	}
+	stages := e.transferStageSnapshot(attachmentID)
+	value["controlDialMs"] = stages.ControlDialMs
+	value["offerWaitMs"] = stages.OfferWaitMs
+	value["dataSlotDialMs"] = stages.DataSlotDialMs
+	value["firstFrameMs"] = stages.FirstFrameMs
+	value["receiverWriteMs"] = stages.ReceiverWriteMs + option.receiverWriteMs
+	value["durabilitySyncMs"] = stages.DurabilitySyncMs + option.durabilitySyncMs
+	value["resumePersistMs"] = stages.ResumePersistMs + option.resumePersistMs
+	value["ackWaitMs"] = stages.AckWaitMs
+	value["finalHashMs"] = stages.FinalHashMs + option.finalHashMs
+	value["destinationCommitMs"] = stages.DestinationCommitMs + option.destinationCommitMs
+	value["metadataCommitMs"] = stages.MetadataCommitMs + option.metadataCommitMs
+	value["dataTransferMs"] = stages.DataTransferMs + option.dataTransferMs
+	value["finalizationMs"] = stages.FinalizationMs + option.finalizationMs
+	value["totalDurationMs"] = stages.TotalDurationMs + option.totalDurationMs
+	value["reconnectCount"] = stages.ReconnectCount + option.reconnectCount
+	value["retransmittedBytes"] = stages.RetransmittedBytes + option.retransmittedBytes
 	displayMetrics := direction != "send" || option.displayLocalMetrics
 	e.transferMetricsMu.Lock()
 	if e.transferMetrics == nil {
@@ -3533,15 +3610,31 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	// Persist checkpoint and lifecycle projections, rather than every socket
 	// progress tick. This keeps the UI recoverable without putting SQLite on the
 	// hot data path for each chunk.
-	persistSnapshot := option.checkpointSeq > 0 || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "retrying" || phase == "waiting_network" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
+	durableMetricSnapshot := option.metricSeq > 0 && ((direction == "receive" && phase == "transferring") || (direction == "remote-receive" && phase == "receiving"))
+	persistSnapshot := durableMetricSnapshot || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "retrying" || phase == "waiting_network" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
 	if persistSnapshot {
 		if snapshot, snapshotErr := snapshotFromProgress(value); snapshotErr == nil {
 			if snapshot.State == "" {
 				snapshot.State = canonicalTransferState(phase)
 			}
-			_ = saveTransferSnapshot(context.Background(), snapshot)
+			if option.checkpointPersisted {
+				// The receiver checkpoint coordinator committed the resume ranges
+				// and directional snapshot in one transaction before this event.
+				// Do not put a second SQLite write back on the ACK hot path.
+			} else if direction == "remote-receive" && durableMetricSnapshot {
+				_ = saveTransferSnapshotDirection(context.Background(), snapshot)
+			} else {
+				_ = saveTransferSnapshot(context.Background(), snapshot)
+			}
 		}
-		_ = updateTransferResumeMetric(context.Background(), attachmentID, metric.metricGeneration, metric.activeElapsed.Milliseconds(), metric.startedBytes, metric.lastBytes, option.metricSeq)
+		if !option.checkpointPersisted {
+			_ = updateTransferResumeMetric(context.Background(), attachmentID, metric.metricGeneration, metric.activeElapsed.Milliseconds(), metric.startedBytes, metric.lastBytes, option.metricSeq)
+		}
+	}
+	if direction != "remote-receive" && (phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected") {
+		e.transferStagesMu.Lock()
+		delete(e.transferStages, attachmentID)
+		e.transferStagesMu.Unlock()
 	}
 	switch direction {
 	case "send":
@@ -5895,12 +5988,15 @@ func (e *Engine) discardFileControl(peerID string, session *wireSession) {
 }
 
 func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message Message, path, sum string, dialect ProtocolDialect) (transferErr error) {
+	transferStarted := time.Now()
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	controlStarted := time.Now()
 	control, err := e.fileControlForPeer(peer, dialect)
+	e.recordTransferStage(message.AttachmentID, peer.DeviceID, "control_dial", -1, peer.IP, time.Since(controlStarted), 0, isTemporaryNetError(err), transferErrorCode(err))
 	if err != nil {
 		return err
 	}
@@ -5956,6 +6052,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 	supportsDemand := hasCapability(response.Capabilities, "attachment-demand-v1") && responseDialect.Major >= ProtocolMajor
 	resumeOffset := int64(0)
 	if supportsDemand || responseDialect.Major >= ProtocolMajor {
+		offerWaitStarted := time.Now()
 		offerResponse, err := readFileOfferResponse(reader, message.AttachmentID)
 		if err != nil {
 			if session.isCanceled() {
@@ -5975,6 +6072,7 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 			}
 			_ = conn.SetDeadline(time.Time{})
 		}
+		e.recordTransferStage(message.AttachmentID, peer.DeviceID, "offer_wait", -1, peer.IP, time.Since(offerWaitStarted), 0, err != nil, transferErrorCode(err))
 		if offerResponse.Type == "file_cancel" || offerResponse.Status == "canceled" {
 			return errAttachmentCanceled
 		}
@@ -6026,14 +6124,40 @@ func (e *Engine) transferFileWithDialect(ctx context.Context, peer Peer, message
 		}
 		v3Profile.RemoteIP = peer.IP
 		v3Streams := v3Profile.SlotLimit(message.AttachmentSize)
+		dataStarted := time.Now()
 		if err := e.sendV3FileDataParallel(ctx, peer, message, file, sum, v3Streams, resumeOffset, completedRanges); err != nil {
+			e.recordTransferStage(message.AttachmentID, peer.DeviceID, "data_transfer", -1, peer.IP, time.Since(dataStarted), 0, isTemporaryNetError(err), transferErrorCode(err))
 			if ctx.Err() != nil || session.isCanceled() {
 				return errAttachmentCanceled
 			}
 			return fmt.Errorf("v3 数据传输失败: %w", err)
 		}
+		e.recordTransferStage(message.AttachmentID, peer.DeviceID, "data_transfer", -1, peer.IP, time.Since(dataStarted), message.AttachmentSize, false, "")
+		e.recordTransferStage(message.AttachmentID, peer.DeviceID, "total", -1, peer.IP, time.Since(transferStarted), message.AttachmentSize, false, "")
 		verified := true
 		completedOptions := transferProgressOptions{chunkSize: v3Profile.ChunkBytes(message.AttachmentSize), streamCount: v3Streams, activeStreams: 0, transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: protocolLabel, metricSource: "receiver-durable", durableBytes: message.AttachmentSize, verified: &verified}
+		if finalReceiver, snapshotErr := loadTransferSnapshotDirection(context.Background(), message.AttachmentID, "remote-receive"); snapshotErr == nil {
+			completedOptions.metricGeneration = finalReceiver.MetricGeneration
+			completedOptions.authoritativeElapsedMs = finalReceiver.ElapsedMs
+			completedOptions.metricSeq = finalReceiver.MetricSeq
+			completedOptions.checkpointSeq = finalReceiver.CheckpointSeq
+			completedOptions.confirmedThroughput = finalReceiver.Speed
+			completedOptions.averageSpeed = finalReceiver.AverageSpeed
+			completedOptions.peakSpeed = finalReceiver.PeakSpeed
+			completedOptions.diskWriteMs = finalReceiver.DiskWriteMs
+			completedOptions.ackLatency = time.Duration(finalReceiver.AckLatencyMs) * time.Millisecond
+			completedOptions.windowSize = finalReceiver.WindowSize
+			completedOptions.windowBytes = finalReceiver.WindowBytes
+			completedOptions.ackTargetBytes = finalReceiver.AckTargetBytes
+			completedOptions.receiverWriteMs = finalReceiver.ReceiverWriteMs
+			completedOptions.durabilitySyncMs = finalReceiver.DurabilitySyncMs
+			completedOptions.resumePersistMs = finalReceiver.ResumePersistMs
+			completedOptions.finalHashMs = finalReceiver.FinalHashMs
+			completedOptions.destinationCommitMs = finalReceiver.DestinationCommitMs
+			completedOptions.metadataCommitMs = finalReceiver.MetadataCommitMs
+			completedOptions.dataTransferMs = finalReceiver.DataTransferMs
+			completedOptions.finalizationMs = finalReceiver.FinalizationMs
+		}
 		// EndFile is acknowledged only after the receiver has finalized the
 		// file. Publish completion for both projections so the sender's UI,
 		// which uses remote-receive as its primary progress, cannot remain at

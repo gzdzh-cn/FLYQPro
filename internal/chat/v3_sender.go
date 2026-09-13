@@ -98,7 +98,7 @@ func isTemporaryNetError(err error) bool {
 	return false
 }
 
-func (e *Engine) dialV3PeerData(ctx context.Context, peer Peer) (net.Conn, error) {
+func (e *Engine) dialV3PeerData(ctx context.Context, peer Peer, slot *PoolSlot) (net.Conn, error) {
 	if peer.DataPort <= 0 {
 		return nil, os.ErrInvalid
 	}
@@ -106,11 +106,24 @@ func (e *Engine) dialV3PeerData(ctx context.Context, peer Peer) (net.Conn, error
 	if err != nil {
 		return nil, err
 	}
-	transport := newTLSTCPV3DataTransport(append([]string{peer.IP}, peer.LocalAddresses...), peer.DataPort, config)
-	conn, err := transport.OpenStream(ctx)
+	e.dataDialMu.Lock()
+	preferred := e.dataDialAddresses[peer.DeviceID]
+	e.dataDialMu.Unlock()
+	dialCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	conn, address, err := DialV3DataCandidatesPreferred(dialCtx, append([]string{peer.IP}, peer.LocalAddresses...), peer.DataPort, preferred, config)
+	attachmentID, slotID := "", -1
+	if slot != nil {
+		attachmentID, slotID = slot.TransferID(), slot.ID
+	}
+	e.recordTransferStage(attachmentID, peer.DeviceID, "data_slot_dial", slotID, address, time.Since(started), 0, isTemporaryNetError(err), transferErrorCode(err))
 	if err != nil {
 		return nil, err
 	}
+	e.dataDialMu.Lock()
+	e.dataDialAddresses[peer.DeviceID] = address
+	e.dataDialMu.Unlock()
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		if err := verifyPeerCertificate(tlsConn, peer); err != nil {
 			_ = conn.Close()
@@ -128,7 +141,7 @@ func (e *Engine) pooledV3DataConn(ctx context.Context, peer Peer, slot *PoolSlot
 		_ = conn.SetDeadline(time.Time{})
 		return conn, nil
 	}
-	conn, err := e.dialV3PeerData(ctx, peer)
+	conn, err := e.dialV3PeerData(ctx, peer, slot)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +178,11 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 	if streams > parallelMaxStreams {
 		streams = parallelMaxStreams
 	}
+	if message.AttachmentSize < 8*1024*1024 {
+		streams = 1
+	} else if message.AttachmentSize < 64*1024*1024 && streams > 2 {
+		streams = 2
+	}
 	if message.RelativePath != "" && streams > 4 {
 		streams = 4
 	}
@@ -183,6 +201,10 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		return err
 	}
 	pool := e.v3Pool(peer.DeviceID, len(assignments))
+	pool.Warm(ctx, message.AttachmentID, len(assignments), func(warmCtx context.Context, slot *PoolSlot) error {
+		_, err := e.pooledV3DataConn(warmCtx, peer, slot)
+		return err
+	})
 	var progressMu sync.Mutex
 	completedBytes := message.AttachmentSize
 	progressStarted := time.Now()
@@ -232,6 +254,14 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			options.ackTargetBytes = sample.metrics.AckTargetBytes
 			options.streamCount = sample.metrics.StreamCount
 			options.activeStreams = sample.metrics.ActiveStreams
+			options.receiverWriteMs = sample.metrics.ReceiverWriteMs
+			options.durabilitySyncMs = sample.metrics.DurabilitySyncMs
+			options.resumePersistMs = sample.metrics.ResumePersistMs
+			options.finalHashMs = sample.metrics.FinalHashMs
+			options.destinationCommitMs = sample.metrics.DestinationCommitMs
+			options.metadataCommitMs = sample.metrics.MetadataCommitMs
+			options.dataTransferMs = sample.metrics.DataTransferMs
+			options.finalizationMs = sample.metrics.FinalizationMs
 		}
 		e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, completedBytes, message.AttachmentSize, "send", "transferring", options)
 		// The sender's primary progress is the remote durable byte count. Emit
@@ -250,7 +280,7 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 		wg.Add(1)
 		go func(ranges []ByteRange) {
 			defer wg.Done()
-			errs <- e.sendV3Worker(ctx, peer, message, file, digest, pool, ranges, progress)
+			errs <- e.sendV3Worker(ctx, peer, message, file, digest, pool, ranges, false, progress)
 		}(ranges)
 	}
 	wg.Wait()
@@ -260,7 +290,9 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 			return err
 		}
 	}
-	return nil
+	// One logical transfer has one finalization owner. Data workers release their
+	// durable ranges first; this final lease reuses a warmed TLS connection.
+	return e.sendV3Worker(ctx, peer, message, file, digest, pool, nil, true)
 }
 
 // ACKs are scoped to the exact chunk and authenticated session, not just a
@@ -319,12 +351,13 @@ func writeV3Frame(conn net.Conn, frame BinaryFrameV3) error {
 	return nil
 }
 
-func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, file *os.File, digest [32]byte, pool *PeerPool, ranges []ByteRange, progress ...func(v3ProgressSample)) (result error) {
+func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, file *os.File, digest [32]byte, pool *PeerPool, ranges []ByteRange, finalize bool, progress ...func(v3ProgressSample)) (result error) {
 	slot, err := pool.Acquire(ctx, message.AttachmentID)
 	if err != nil {
 		return err
 	}
 	defer pool.Release(slot)
+	leaseToken := slot.LeaseToken()
 	defer func() {
 		if result != nil {
 			slot.Kill()
@@ -347,6 +380,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 	id, sessionID := binaryTransferID(message.AttachmentID), pool.SessionID()
 	streamID, generation := uint16(slot.ID), slot.Generation
 	begin := BinaryFrameV3{Type: FrameBeginFile, TransferID: id, StreamID: streamID, SessionID: sessionID, Generation: generation}
+	firstFrameStarted := time.Now()
 	open := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -357,11 +391,12 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			return err
 		}
 		_ = conn.SetDeadline(time.Time{})
-		return slot.WriteFrame(begin)
+		return slot.WriteFrameForLease(message.AttachmentID, leaseToken, begin)
 	}
 	if err := open(); err != nil {
 		return err
 	}
+	e.recordTransferStage(message.AttachmentID, peer.DeviceID, "first_frame", slot.ID, "", time.Since(firstFrameStarted), 0, false, "")
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -375,7 +410,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 	var seq uint64
 	batchEnabled := hasCapability(peer.Capabilities, ackBatchCapability)
 	metricsEnabled := hasCapability(peer.Capabilities, transferMetricsCapability)
-	windowBytes := int64(4 * 1024 * 1024)
+	windowBytes := v3DurableBatchSize(message.AttachmentSize, 0)
 	if windowBytes > maxInFlightBytes {
 		windowBytes = maxInFlightBytes
 	}
@@ -416,6 +451,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 			var lastMetrics TransferMetricsSnapshotV1
 			for attempt := 0; attempt < 3; attempt++ {
 				if conn == nil {
+					e.recordTransferStage(message.AttachmentID, peer.DeviceID, "reconnect", slot.ID, "", 0, 0, true, ErrSessionNotReady)
 					if err = open(); err != nil {
 						continue
 					}
@@ -426,7 +462,10 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 					if pending[i].confirmed {
 						continue
 					}
-					if err = slot.WriteFrame(pending[i].frame); err != nil {
+					if pending[i].sent {
+						e.recordTransferStage(message.AttachmentID, peer.DeviceID, "retransmit", slot.ID, "", 0, int64(len(pending[i].frame.Payload)), true, ErrSessionNotReady)
+					}
+					if err = slot.WriteFrameForLease(message.AttachmentID, leaseToken, pending[i].frame); err != nil {
 						writeErr = err
 						break
 					}
@@ -435,11 +474,12 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 						pending[i].sent = true
 					}
 				}
-				if writeErr == nil && batchEnabled && pendingBytes < windowBytes {
-					// Explicitly delimit a short final window. This avoids relying on
-					// transport read deadlines (which some TLS stacks buffer).
+				if writeErr == nil && batchEnabled {
+					// Explicitly delimit every durable window. Sender and receiver can
+					// then adapt their next batch independently without waiting for a
+					// byte threshold the other side no longer uses.
 					ping := BinaryFrameV3{Type: FramePoolPing, TransferID: id, StreamID: streamID, Sequence: seq, SessionID: sessionID, Generation: generation}
-					if err = slot.WriteFrame(ping); err != nil {
+					if err = slot.WriteFrameForLease(message.AttachmentID, leaseToken, ping); err != nil {
 						writeErr = err
 					}
 				}
@@ -449,41 +489,54 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 					continue
 				}
 				readErr := error(nil)
+				ackWaitStarted := time.Now()
+				remaining := 0
 				for i := range pending {
-					if pending[i].confirmed {
+					if !pending[i].confirmed {
+						remaining++
+					}
+				}
+				for remaining > 0 {
+					ack, errRead := slot.ReadFrameForLease(ctx, message.AttachmentID, leaseToken)
+					if errRead != nil {
+						readErr = errRead
+						break
+					}
+					if ack.Type == FramePoolPong {
 						continue
 					}
-					for {
-						ack, errRead := ReadBinaryFrameV3(conn, 64*1024)
-						if errRead != nil {
-							readErr = errRead
-							break
-						}
-						if ack.Type == FramePoolPong {
-							slot.TouchIO("read")
+					matched := -1
+					for i := range pending {
+						if pending[i].confirmed {
 							continue
 						}
-						if !matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {
-							if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkNack) {
-								readErr = fmt.Errorf("v3 chunk nack")
-							} else {
-								readErr = fmt.Errorf("v3 stale or invalid acknowledgement")
-							}
+						if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkNack) {
+							readErr = fmt.Errorf("v3 chunk nack")
+							matched = i
 							break
 						}
-						pending[i].confirmed = true
-						slot.MarkAck(int64(len(pending[i].frame.Payload)))
-						if metricsEnabled && len(ack.Payload) > 0 {
-							if snapshot, decodeErr := decodeTransferMetricsSnapshot(ack.Payload); decodeErr == nil && snapshot.MetricSeq >= lastMetrics.MetricSeq {
-								lastMetrics = snapshot
-							}
+						if matchesV3ReplyWithPayload(ack, pending[i].frame, FrameChunkAck) {
+							matched = i
+							break
 						}
-						break
 					}
 					if readErr != nil {
 						break
 					}
+					if matched < 0 {
+						readErr = fmt.Errorf("v3 stale or invalid acknowledgement")
+						break
+					}
+					pending[matched].confirmed = true
+					remaining--
+					slot.MarkAck(int64(len(pending[matched].frame.Payload)))
+					if metricsEnabled && len(ack.Payload) > 0 {
+						if snapshot, decodeErr := decodeTransferMetricsSnapshot(ack.Payload); decodeErr == nil && snapshot.MetricSeq >= lastMetrics.MetricSeq {
+							lastMetrics = snapshot
+						}
+					}
 				}
+				e.recordTransferStage(message.AttachmentID, peer.DeviceID, "ack_wait", slot.ID, "", time.Since(ackWaitStarted), pendingBytes, readErr != nil, transferErrorCode(readErr))
 				if readErr == nil {
 					break
 				}
@@ -491,7 +544,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 				slot.CloseConnection()
 				conn = nil
 			}
-			for _, chunk := range pending {
+			for index, chunk := range pending {
 				if !chunk.confirmed {
 					return fmt.Errorf("v3 chunk unconfirmed: %w", errors.Join(err, io.ErrUnexpectedEOF))
 				}
@@ -500,7 +553,7 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 					return newTransferError(ErrSessionNotReady, true, fmt.Errorf("保存发送恢复范围失败: %w", err))
 				}
 				sample := tuner.Observe(n, time.Since(chunk.started))
-				if lastMetrics.Speed > 0 {
+				if index == len(pending)-1 && lastMetrics.MetricSeq > 0 {
 					sample.throughput = lastMetrics.Speed
 					sample.ackLatency = time.Duration(lastMetrics.AckLatencyMs) * time.Millisecond
 					snapshot := lastMetrics
@@ -510,7 +563,20 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 					progress[0](sample)
 				}
 			}
+			if lastMetrics.MetricSeq > 0 {
+				windowBytes = v3DurableBatchSize(message.AttachmentSize, time.Duration(lastMetrics.DiskWriteMs)*time.Millisecond)
+				if windowBytes > maxInFlightBytes {
+					windowBytes = maxInFlightBytes
+				}
+			}
 		}
+	}
+	if !finalize {
+		// Release the receiver's per-connection transfer loop without requesting
+		// whole-file finalization. The coordinator sends the only EndFile after
+		// every stream has durable ACKs.
+		streamDone := BinaryFrameV3{Type: FrameChunkMeta, TransferID: id, StreamID: streamID, Sequence: seq, Offset: uint64(message.AttachmentSize), SessionID: sessionID, Generation: generation}
+		return slot.WriteFrameForLease(message.AttachmentID, leaseToken, streamDone)
 	}
 	current, err := file.Stat()
 	if err != nil {
@@ -523,12 +589,12 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 	// Hashing a multi-gigabyte file on slow storage can take minutes.
 	slot.Drain()
 	_ = conn.SetDeadline(time.Time{})
-	if err := slot.WriteFrame(end); err != nil {
+	if err := slot.WriteFrameForLease(message.AttachmentID, leaseToken, end); err != nil {
 		return err
 	}
 	var reply BinaryFrameV3
 	for {
-		reply, err = ReadBinaryFrameV3(conn, 1024)
+		reply, err = slot.ReadFrameForLease(ctx, message.AttachmentID, leaseToken)
 		if err != nil {
 			return err
 		}
@@ -557,6 +623,9 @@ func (e *Engine) sendV3Worker(ctx context.Context, peer Peer, message Message, f
 				diskWriteMs: snapshot.DiskWriteMs, ackLatency: time.Duration(snapshot.AckLatencyMs) * time.Millisecond,
 				chunkSize: snapshot.ChunkSize, windowSize: snapshot.WindowSize, windowBytes: snapshot.WindowBytes,
 				ackTargetBytes: snapshot.AckTargetBytes, streamCount: snapshot.StreamCount, activeStreams: snapshot.ActiveStreams,
+				receiverWriteMs: snapshot.ReceiverWriteMs, durabilitySyncMs: snapshot.DurabilitySyncMs, resumePersistMs: snapshot.ResumePersistMs,
+				finalHashMs: snapshot.FinalHashMs, destinationCommitMs: snapshot.DestinationCommitMs, metadataCommitMs: snapshot.MetadataCommitMs,
+				dataTransferMs: snapshot.DataTransferMs, finalizationMs: snapshot.FinalizationMs,
 				transferMode: v3TransferMode, displayLocalMetrics: true,
 			})
 		}
@@ -618,5 +687,5 @@ func (e *Engine) sendV3FileDataRanges(ctx context.Context, peer Peer, message Me
 	if err != nil {
 		return err
 	}
-	return e.sendV3Worker(ctx, peer, message, file, digest, e.v3Pool(peer.DeviceID, 1), ranges)
+	return e.sendV3Worker(ctx, peer, message, file, digest, e.v3Pool(peer.DeviceID, 1), ranges, true)
 }

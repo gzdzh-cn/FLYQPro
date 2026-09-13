@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -25,6 +26,13 @@ func (f faultingTransferPersistenceIO) SaveResumeRecord(ctx context.Context, sta
 		return f.databaseError
 	}
 	return f.transferPersistenceIO.SaveResumeRecord(ctx, state)
+}
+
+func (f faultingTransferPersistenceIO) SaveCheckpoint(ctx context.Context, state transferResumeState, snapshot TransferSnapshot) error {
+	if f.databaseError != nil {
+		return f.databaseError
+	}
+	return f.transferPersistenceIO.SaveCheckpoint(ctx, state, snapshot)
 }
 
 func (f faultingTransferPersistenceIO) SyncFile(file *os.File) error {
@@ -76,6 +84,27 @@ func TestResumeCheckpointUsesSidecarWhenSQLiteFails(t *testing.T) {
 	}
 	if _, err := os.Stat(sidecar); err != nil {
 		t.Fatalf("durable sidecar missing: %v", err)
+	}
+}
+
+func TestActiveCheckpointThrottlesCompatibilitySidecar(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	var sidecarSyncs atomic.Int32
+	installTransferPersistenceFault(t, faultingTransferPersistenceIO{syncError: func(path string) error {
+		if strings.HasSuffix(path, ".resume.json.tmp") {
+			sidecarSyncs.Add(1)
+		}
+		return nil
+	}})
+	state := transferResumeState{AttachmentID: "throttled-sidecar", TransferID: "throttled-sidecar", Direction: "receive", FileSize: 1, State: TransferActive}
+	if err := saveTransferResumeCheckpointState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveTransferResumeCheckpointState(state); err != nil {
+		t.Fatal(err)
+	}
+	if got := sidecarSyncs.Load(); got != 1 {
+		t.Fatalf("sidecar synced %d times for adjacent checkpoints", got)
 	}
 }
 

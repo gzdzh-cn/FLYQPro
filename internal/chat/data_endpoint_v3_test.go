@@ -76,3 +76,31 @@ func TestV3CandidateFailureDoesNotHideReachableAddress(t *testing.T) {
 	conn.Close()
 	<-done
 }
+
+func TestV3StalePreferredAddressFallsBackPromptly(t *testing.T) {
+	_, cert := parallelTestIdentity(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr == nil {
+			defer conn.Close()
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	started := time.Now()
+	conn, host, err := DialV3DataCandidatesPreferred(context.Background(), []string{"127.0.0.2", "127.0.0.1"}, ln.Addr().(*net.TCPAddr).Port, "127.0.0.2", &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if host != "127.0.0.1" {
+		t.Fatalf("unexpected winning host %q", host)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stale preferred address delayed fallback: %s", elapsed)
+	}
+}

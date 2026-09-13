@@ -22,6 +22,7 @@ type transferPersistenceIO interface {
 	SyncFile(*os.File) error
 	SyncDirectory(string) error
 	SaveResumeRecord(context.Context, transferResumeState) error
+	SaveCheckpoint(context.Context, transferResumeState, TransferSnapshot) error
 }
 
 type osTransferPersistenceIO struct{}
@@ -41,6 +42,9 @@ func (osTransferPersistenceIO) Rename(source, target string) error { return os.R
 func (osTransferPersistenceIO) SyncFile(file *os.File) error       { return file.Sync() }
 func (osTransferPersistenceIO) SaveResumeRecord(ctx context.Context, state transferResumeState) error {
 	return saveTransferResumeRecord(ctx, state)
+}
+func (osTransferPersistenceIO) SaveCheckpoint(ctx context.Context, state transferResumeState, snapshot TransferSnapshot) error {
+	return saveTransferCheckpointRecord(ctx, state, snapshot)
 }
 func (osTransferPersistenceIO) SyncDirectory(path string) error {
 	if runtime.GOOS == "windows" {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"flyqpro/internal/service/db"
@@ -17,6 +18,11 @@ const (
 	transferResumeVersion = 1
 	transferResumeTTL     = 24 * time.Hour
 )
+
+var transferSidecarThrottle = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
 
 type transferResumeState struct {
 	Version            int               `json:"version"`
@@ -105,6 +111,22 @@ func contiguousTransferOffset(ranges []TransferRange, size int64) int64 {
 }
 
 func saveTransferResumeState(state transferResumeState) error {
+	return saveTransferResumeStateWithSidecar(state, true)
+}
+
+func saveTransferResumeCheckpointState(state transferResumeState) error {
+	return saveTransferResumeCheckpoint(state, snapshotFromResume(state))
+}
+
+func saveTransferResumeStateWithSidecar(state transferResumeState, forceSidecar bool) error {
+	return saveTransferResumeStateWithCheckpoint(state, forceSidecar, nil)
+}
+
+func saveTransferResumeCheckpoint(state transferResumeState, snapshot TransferSnapshot) error {
+	return saveTransferResumeStateWithCheckpoint(state, false, &snapshot)
+}
+
+func saveTransferResumeStateWithCheckpoint(state transferResumeState, forceSidecar bool, checkpoint *TransferSnapshot) error {
 	persistence := currentTransferPersistenceIO()
 	_, path, err := transferResumePaths(state.AttachmentID)
 	if err != nil {
@@ -142,38 +164,57 @@ func saveTransferResumeState(state transferResumeState) error {
 	}
 	// Persist the database record first. The sidecar remains a compatibility
 	// fallback for older builds and for a temporarily unavailable database.
-	dbErr := persistence.SaveResumeRecord(context.Background(), state)
+	var dbErr error
+	if checkpoint != nil {
+		dbErr = persistence.SaveCheckpoint(context.Background(), state, *checkpoint)
+	} else {
+		dbErr = persistence.SaveResumeRecord(context.Background(), state)
+	}
+	transferSidecarThrottle.Lock()
+	lastSidecar := transferSidecarThrottle.last[state.AttachmentID]
+	writeSidecar := forceSidecar || dbErr != nil || lastSidecar.IsZero() || time.Since(lastSidecar) >= time.Second
+	transferSidecarThrottle.Unlock()
 	temporary := path + ".tmp"
 	var sidecarErr error
-	file, err := persistence.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		sidecarErr = err
-	} else {
-		if _, err := file.Write(data); err != nil {
+	if writeSidecar {
+		file, err := persistence.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
 			sidecarErr = err
-		} else if err := persistence.SyncFile(file); err != nil {
-			sidecarErr = err
-		}
-		if closeErr := file.Close(); sidecarErr == nil && closeErr != nil {
-			sidecarErr = closeErr
-		}
-		if sidecarErr == nil {
-			sidecarErr = persistence.Rename(temporary, path)
+		} else {
+			if _, err := file.Write(data); err != nil {
+				sidecarErr = err
+			} else if err := persistence.SyncFile(file); err != nil {
+				sidecarErr = err
+			}
+			if closeErr := file.Close(); sidecarErr == nil && closeErr != nil {
+				sidecarErr = closeErr
+			}
 			if sidecarErr == nil {
-				// A rename is only durable after the containing directory is
-				// synchronized. This closes the crash window where the JSON
-				// contents exist but the directory entry does not.
-				sidecarErr = persistence.SyncDirectory(filepath.Dir(path))
+				sidecarErr = persistence.Rename(temporary, path)
+				if sidecarErr == nil {
+					sidecarErr = persistence.SyncDirectory(filepath.Dir(path))
+				}
+			}
+			if sidecarErr != nil {
+				_ = file.Close()
+				_ = persistence.Remove(temporary)
 			}
 		}
-		if sidecarErr != nil {
-			_ = file.Close()
-			_ = persistence.Remove(temporary)
+		if sidecarErr == nil {
+			transferSidecarThrottle.Lock()
+			transferSidecarThrottle.last[state.AttachmentID] = time.Now()
+			transferSidecarThrottle.Unlock()
 		}
 	}
 	if dbErr != nil && sidecarErr != nil {
 		_ = db.SetTransferResumeMigrationStatus(context.Background(), "rollback", state.AttachmentID, dbErr.Error()+"; "+sidecarErr.Error())
 		return fmt.Errorf("恢复记录持久化失败: sqlite=%v; sidecar=%v", dbErr, sidecarErr)
+	}
+	if !forceSidecar && dbErr == nil {
+		// Hot checkpoints already have one authoritative SQLite upsert. Migration
+		// bookkeeping is lifecycle metadata and must not add another SQL write to
+		// every durable batch.
+		return nil
 	}
 	if dbErr == nil {
 		_ = db.SetTransferResumeMigrationStatus(context.Background(), "migrating", state.AttachmentID, "")
@@ -268,6 +309,9 @@ func removeTransferResumeArtifacts(attachmentID string, removePart, removeSideca
 	if removeSidecar {
 		_ = os.Remove(state)
 		_ = os.Remove(state + ".tmp")
+		transferSidecarThrottle.Lock()
+		delete(transferSidecarThrottle.last, attachmentID)
+		transferSidecarThrottle.Unlock()
 	}
 	if removePart {
 		_ = os.Remove(part)

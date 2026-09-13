@@ -144,8 +144,23 @@ export interface TransferProgress {
   ackWaitMs?: number
   confirmedThroughput?: number
   ackLatencyMs?: number
-  diskWriteMs?: number
-  transferMode?: 'parallel-binary' | 'binary-window' | 'json-window' | 'legacy-chunk' | string
+	diskWriteMs?: number
+	controlDialMs?: number
+	offerWaitMs?: number
+	dataSlotDialMs?: number
+	firstFrameMs?: number
+	receiverWriteMs?: number
+	durabilitySyncMs?: number
+	resumePersistMs?: number
+	finalHashMs?: number
+	destinationCommitMs?: number
+	metadataCommitMs?: number
+	dataTransferMs?: number
+	finalizationMs?: number
+	totalDurationMs?: number
+	reconnectCount?: number
+	retransmittedBytes?: number
+	transferMode?: 'parallel-binary' | 'binary-window' | 'json-window' | 'legacy-chunk' | string
   streamCount?: number
   activeStreams?: number
   streamId?: number

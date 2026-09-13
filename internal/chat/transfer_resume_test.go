@@ -105,6 +105,44 @@ func TestDirectionalTransferSnapshotsDoNotOverwriteElapsedMetrics(t *testing.T) 
 	}
 }
 
+func TestResumeCheckpointPersistsDirectionalSnapshotAtomically(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	ctx := context.Background()
+	state := transferResumeState{
+		AttachmentID:     "atomic-checkpoint",
+		TransferID:       "atomic-checkpoint",
+		MessageID:        "atomic-message",
+		Direction:        "receive",
+		FileSize:         8192,
+		CheckpointSeq:    7,
+		CompletedRanges:  []TransferRange{{Offset: 0, Length: 4096}},
+		State:            TransferActive,
+		MetricGeneration: 2,
+		ElapsedMs:        1200,
+	}
+	snapshot := snapshotFromResume(state)
+	snapshot.Speed = 3 * 1024 * 1024
+	snapshot.Phase = "checkpoint_persist"
+	snapshot.UpdatedAt = time.Now().UTC()
+	if err := saveTransferResumeCheckpoint(state, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	resume, err := loadTransferResumeRecord(ctx, state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume.CheckpointSeq != state.CheckpointSeq || contiguousTransferOffset(resume.CompletedRanges, resume.FileSize) != 4096 {
+		t.Fatalf("resume checkpoint mismatch: %+v", resume)
+	}
+	directional, err := loadTransferSnapshotDirection(ctx, state.AttachmentID, "receive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directional.CheckpointSeq != state.CheckpointSeq || directional.Speed != snapshot.Speed || directional.DurableBytes != 4096 {
+		t.Fatalf("directional checkpoint mismatch: %+v", directional)
+	}
+}
+
 func TestResumeSnapshotRestoresElapsedMetricFields(t *testing.T) {
 	ctx := openSharedFolderTestDatabase(t)
 	state := transferResumeState{AttachmentID: "elapsed-resume", TransferID: "elapsed-resume", Direction: "receive", FileSize: 100, State: TransferPausedLocal, MetricGeneration: 4, ElapsedMs: 3700, MetricStartedBytes: 5, MetricLastBytes: 60}

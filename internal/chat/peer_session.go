@@ -63,6 +63,44 @@ func (p *PeerPool) Release(s *PoolSlot) {
 	}
 }
 
+// Warm reserves idle slots while their TLS connections are established, then
+// returns them to the pool with the live connection attached. A failed warmup
+// is isolated to that slot; workers can acquire a replacement normally.
+func (p *PeerPool) Warm(ctx context.Context, transferID string, count int, connect func(context.Context, *PoolSlot) error) {
+	if count <= 0 || connect == nil {
+		return
+	}
+	p.mu.Lock()
+	reserved := make([]*PoolSlot, 0, count)
+	for _, slot := range p.slots {
+		if len(reserved) >= count {
+			break
+		}
+		if slot.Connection() != nil {
+			continue
+		}
+		if slot.Reserve(transferID) == nil && slot.Start() {
+			reserved = append(reserved, slot)
+		}
+	}
+	p.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, slot := range reserved {
+		slot := slot
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := connect(ctx, slot); err != nil {
+				slot.Kill()
+				return
+			}
+			p.Release(slot)
+		}()
+	}
+	wg.Wait()
+	p.ReplaceDead()
+}
+
 // CloseTransfer interrupts every slot currently owned by one transfer. It is
 // intentionally idempotent: a worker may already have returned its slot when
 // the UI cancellation arrives.

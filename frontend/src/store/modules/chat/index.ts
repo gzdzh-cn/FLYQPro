@@ -83,6 +83,18 @@ function mergeMonotonicProgress(previous: TransferProgress | undefined, incoming
   if (sameMetricGeneration && previous?.metricLastBytes !== undefined && (next.metricLastBytes === undefined || Number(next.metricLastBytes) < Number(previous.metricLastBytes))) {
     next.metricLastBytes = previous.metricLastBytes
   }
+  const cumulativeDiagnostics: Array<keyof TransferProgress> = [
+    'receiverWriteMs', 'durabilitySyncMs', 'resumePersistMs', 'ackWaitMs',
+    'finalHashMs', 'destinationCommitMs', 'metadataCommitMs', 'dataTransferMs',
+    'finalizationMs', 'totalDurationMs', 'reconnectCount', 'retransmittedBytes',
+  ]
+  if (sameMetricGeneration && previous) {
+    cumulativeDiagnostics.forEach((field) => {
+      const oldValue = Number(previous[field] ?? 0)
+      const newValue = Number(next[field] ?? 0)
+      if (oldValue > newValue) (next as any)[field] = oldValue
+    })
+  }
   return next
 }
 

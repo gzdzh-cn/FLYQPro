@@ -11,47 +11,64 @@ import (
 // TransferSnapshot is the stable, transport-neutral diagnostic view exposed to
 // the desktop UI. It deliberately omits sockets and filesystem internals.
 type TransferSnapshot struct {
-	AttachmentID       string            `json:"attachmentId"`
-	TransferID         string            `json:"transferId"`
-	MessageID          string            `json:"messageId"`
-	PeerDeviceID       string            `json:"peerDeviceId"`
-	Direction          string            `json:"direction"`
-	SessionID          string            `json:"sessionId"`
-	Generation         uint64            `json:"generation"`
-	MetricGeneration   uint64            `json:"metricGeneration,omitempty"`
-	State              TransferState     `json:"state"`
-	Phase              string            `json:"phase,omitempty"`
-	Transferred        int64             `json:"transferred"`
-	DurableBytes       int64             `json:"durableBytes"`
-	Total              int64             `json:"total"`
-	Percent            int               `json:"percent"`
-	Speed              float64           `json:"speed,omitempty"`
-	AverageSpeed       float64           `json:"averageSpeed,omitempty"`
-	PeakSpeed          float64           `json:"peakSpeed,omitempty"`
-	ETAs               int64             `json:"etaSeconds,omitempty"`
-	ElapsedMs          int64             `json:"elapsedMs,omitempty"`
-	MetricStartedBytes int64             `json:"metricStartedBytes,omitempty"`
-	MetricLastBytes    int64             `json:"metricLastBytes,omitempty"`
-	MetricSeq          uint64            `json:"metricSeq,omitempty"`
-	CheckpointSeq      uint64            `json:"checkpointSeq,omitempty"`
-	Retries            int               `json:"retries"`
-	ErrorCode          TransferErrorCode `json:"errorCode,omitempty"`
-	Retryable          bool              `json:"retryable"`
-	Verified           *bool             `json:"verified,omitempty"`
-	DiskWriteMs        int64             `json:"diskWriteMs,omitempty"`
-	AckLatencyMs       int64             `json:"ackLatencyMs,omitempty"`
-	ChunkSize          int               `json:"chunkSize,omitempty"`
-	WindowSize         int               `json:"windowSize,omitempty"`
-	WindowBytes        int64             `json:"windowBytes,omitempty"`
-	InFlightBytes      int64             `json:"inFlightBytes,omitempty"`
-	AckTargetBytes     int64             `json:"ackTargetBytes,omitempty"`
-	StreamCount        int               `json:"streamCount,omitempty"`
-	ActiveStreams      int               `json:"activeStreams,omitempty"`
-	TransferMode       string            `json:"transferMode,omitempty"`
-	Transport          string            `json:"transport,omitempty"`
-	TuningState        string            `json:"tuningState,omitempty"`
-	CommittedPath      string            `json:"committedPath,omitempty"`
-	UpdatedAt          time.Time         `json:"updatedAt"`
+	AttachmentID        string            `json:"attachmentId"`
+	TransferID          string            `json:"transferId"`
+	MessageID           string            `json:"messageId"`
+	PeerDeviceID        string            `json:"peerDeviceId"`
+	Direction           string            `json:"direction"`
+	SessionID           string            `json:"sessionId"`
+	Generation          uint64            `json:"generation"`
+	MetricGeneration    uint64            `json:"metricGeneration,omitempty"`
+	State               TransferState     `json:"state"`
+	Phase               string            `json:"phase,omitempty"`
+	Transferred         int64             `json:"transferred"`
+	DurableBytes        int64             `json:"durableBytes"`
+	Total               int64             `json:"total"`
+	Percent             int               `json:"percent"`
+	Speed               float64           `json:"speed,omitempty"`
+	AverageSpeed        float64           `json:"averageSpeed,omitempty"`
+	PeakSpeed           float64           `json:"peakSpeed,omitempty"`
+	LocalSendSpeed      float64           `json:"localSendSpeed,omitempty"`
+	ETAs                int64             `json:"etaSeconds,omitempty"`
+	ElapsedMs           int64             `json:"elapsedMs,omitempty"`
+	MetricStartedBytes  int64             `json:"metricStartedBytes,omitempty"`
+	MetricLastBytes     int64             `json:"metricLastBytes,omitempty"`
+	MetricSeq           uint64            `json:"metricSeq,omitempty"`
+	CheckpointSeq       uint64            `json:"checkpointSeq,omitempty"`
+	Retries             int               `json:"retries"`
+	ErrorCode           TransferErrorCode `json:"errorCode,omitempty"`
+	Retryable           bool              `json:"retryable"`
+	Verified            *bool             `json:"verified,omitempty"`
+	DiskWriteMs         int64             `json:"diskWriteMs,omitempty"`
+	AckLatencyMs        int64             `json:"ackLatencyMs,omitempty"`
+	ChunkSize           int               `json:"chunkSize,omitempty"`
+	WindowSize          int               `json:"windowSize,omitempty"`
+	WindowBytes         int64             `json:"windowBytes,omitempty"`
+	InFlightBytes       int64             `json:"inFlightBytes,omitempty"`
+	AckTargetBytes      int64             `json:"ackTargetBytes,omitempty"`
+	StreamCount         int               `json:"streamCount,omitempty"`
+	ActiveStreams       int               `json:"activeStreams,omitempty"`
+	TransferMode        string            `json:"transferMode,omitempty"`
+	Transport           string            `json:"transport,omitempty"`
+	TuningState         string            `json:"tuningState,omitempty"`
+	CommittedPath       string            `json:"committedPath,omitempty"`
+	ControlDialMs       int64             `json:"controlDialMs,omitempty"`
+	OfferWaitMs         int64             `json:"offerWaitMs,omitempty"`
+	DataSlotDialMs      int64             `json:"dataSlotDialMs,omitempty"`
+	FirstFrameMs        int64             `json:"firstFrameMs,omitempty"`
+	ReceiverWriteMs     int64             `json:"receiverWriteMs,omitempty"`
+	DurabilitySyncMs    int64             `json:"durabilitySyncMs,omitempty"`
+	ResumePersistMs     int64             `json:"resumePersistMs,omitempty"`
+	AckWaitMs           int64             `json:"ackWaitMs,omitempty"`
+	FinalHashMs         int64             `json:"finalHashMs,omitempty"`
+	DestinationCommitMs int64             `json:"destinationCommitMs,omitempty"`
+	MetadataCommitMs    int64             `json:"metadataCommitMs,omitempty"`
+	DataTransferMs      int64             `json:"dataTransferMs,omitempty"`
+	FinalizationMs      int64             `json:"finalizationMs,omitempty"`
+	TotalDurationMs     int64             `json:"totalDurationMs,omitempty"`
+	ReconnectCount      int               `json:"reconnectCount,omitempty"`
+	RetransmittedBytes  int64             `json:"retransmittedBytes,omitempty"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
 }
 
 func snapshotFromResume(state transferResumeState) TransferSnapshot {
@@ -75,7 +92,7 @@ func snapshotFromResume(state transferResumeState) TransferSnapshot {
 			phase = "transferring"
 		}
 	}
-	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, MetricGeneration: metricGenerationOrDefault(state.MetricGeneration), State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), ElapsedMs: state.ElapsedMs, MetricSeq: state.MetricSeq, MetricStartedBytes: state.MetricStartedBytes, MetricLastBytes: state.MetricLastBytes, Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
+	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, MetricGeneration: metricGenerationOrDefault(state.MetricGeneration), State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), ElapsedMs: state.ElapsedMs, MetricSeq: state.MetricSeq, CheckpointSeq: state.CheckpointSeq, MetricStartedBytes: state.MetricStartedBytes, MetricLastBytes: state.MetricLastBytes, Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
 }
 
 func snapshotFromProgress(value map[string]any) (TransferSnapshot, error) {
@@ -153,14 +170,19 @@ func (e *Engine) ListRecoveryTasks() []TransferSnapshot {
 }
 
 func (e *Engine) GetTransferDiagnostics(transferID string) (TransferSnapshot, error) {
-	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "send"); snapshotErr == nil {
-		return snapshot, nil
+	send, sendErr := loadTransferSnapshotDirection(context.Background(), transferID, "send")
+	remote, remoteErr := loadTransferSnapshotDirection(context.Background(), transferID, "remote-receive")
+	if sendErr == nil {
+		if remoteErr == nil {
+			return mergeSenderDiagnostics(send, remote), nil
+		}
+		return send, nil
 	}
 	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "receive"); snapshotErr == nil {
 		return snapshot, nil
 	}
-	if snapshot, snapshotErr := loadTransferSnapshotDirection(context.Background(), transferID, "remote-receive"); snapshotErr == nil {
-		return snapshot, nil
+	if remoteErr == nil {
+		return remote, nil
 	}
 	if snapshot, snapshotErr := loadTransferSnapshot(context.Background(), transferID); snapshotErr == nil {
 		return snapshot, nil
@@ -179,6 +201,39 @@ func (e *Engine) GetTransferDiagnostics(transferID string) (TransferSnapshot, er
 		}
 	}
 	return TransferSnapshot{}, fmt.Errorf("transfer not found")
+}
+
+func mergeSenderDiagnostics(send, remote TransferSnapshot) TransferSnapshot {
+	result := remote
+	result.Direction = "send"
+	result.State, result.Phase = send.State, send.Phase
+	result.ErrorCode, result.Retryable, result.Retries = send.ErrorCode, send.Retryable, send.Retries
+	result.LocalSendSpeed = send.LocalSendSpeed
+	if result.MessageID == "" {
+		result.MessageID = send.MessageID
+	}
+	if result.PeerDeviceID == "" {
+		result.PeerDeviceID = send.PeerDeviceID
+	}
+	if result.Total == 0 {
+		result.Total = send.Total
+	}
+	if result.ControlDialMs == 0 {
+		result.ControlDialMs = send.ControlDialMs
+	}
+	if result.DataSlotDialMs == 0 {
+		result.DataSlotDialMs = send.DataSlotDialMs
+	}
+	if result.FirstFrameMs == 0 {
+		result.FirstFrameMs = send.FirstFrameMs
+	}
+	if result.ReconnectCount == 0 {
+		result.ReconnectCount = send.ReconnectCount
+	}
+	if result.RetransmittedBytes == 0 {
+		result.RetransmittedBytes = send.RetransmittedBytes
+	}
+	return result
 }
 
 func mergeTransferSnapshot(primary, fallback TransferSnapshot) TransferSnapshot {
