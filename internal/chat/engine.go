@@ -3584,18 +3584,27 @@ func (e *Engine) PauseAttachment(attachmentID string) error {
 	if outgoing != nil {
 		outgoing.pauseOnce.Do(func() { close(outgoing.pause) })
 		e.closeOutgoingData(attachmentID)
+		message := outgoing.message
+		// The local pause transition must not wait for SQLite or a slow control
+		// socket. Emit it immediately; persistence and the best-effort remote
+		// notification finish independently in the background.
+		message.Status, message.AttachmentStatus = "paused", "paused"
+		e.emit("chat:message", message)
+		e.emit("chat:attachment", map[string]any{"attachmentId": attachmentID, "messageId": message.MessageID, "conversationId": message.ConversationID, "status": "paused", "localPath": message.AttachmentPath})
 		if outgoing.session != nil {
 			go func(session *wireSession) {
 				_ = session.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 				_ = writeWire(session.conn, wireMessage{Type: "file_pause", AttachmentID: attachmentID, Status: "paused"})
 			}(outgoing.session)
 		}
-		if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
-			attachment.Status = "paused"
-			_ = SaveAttachment(context.Background(), attachment)
-			e.emitAttachmentStatus(attachment.MessageID, "paused", "")
-		}
-		_ = updateTransferResumeStatus(context.Background(), attachmentID, TransferPausedLocal, "", true)
+		go func() {
+			if attachment, err := GetAttachment(context.Background(), attachmentID); err == nil {
+				attachment.Status = "paused"
+				_ = SaveAttachment(context.Background(), attachment)
+			}
+			_ = UpdateMessageStatus(context.Background(), message.MessageID, "paused")
+			_ = updateTransferResumeStatus(context.Background(), attachmentID, TransferPausedLocal, "", true)
+		}()
 		e.emitTransferProgress(outgoing.message.MessageID, attachmentID, outgoing.peerID, e.lastTransferBytes(attachmentID, "remote-receive"), outgoing.message.AttachmentSize, "send", "paused")
 		return nil
 	}
