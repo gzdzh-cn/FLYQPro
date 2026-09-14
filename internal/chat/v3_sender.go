@@ -196,6 +196,28 @@ func (e *Engine) sendV3FileDataParallel(ctx context.Context, peer Peer, message 
 	if len(assignments) == 0 {
 		assignments = [][]ByteRange{{}}
 	}
+	// The offer has already been accepted when this entry point is reached in
+	// the normal v3 path. Publish the local sender lifecycle before hashing the
+	// source file or warming data slots, so a slow dial or disk does not leave
+	// the UI showing the stale scheduler queue state. This is deliberately a
+	// sender-only event: receiver-durable bytes and speed still come from ACKs.
+	startedBytes := message.AttachmentSize
+	for _, ranges := range assignments {
+		for _, r := range ranges {
+			startedBytes -= r.End - r.Start
+		}
+	}
+	if startedBytes < 0 {
+		startedBytes = 0
+	}
+	startPhase := "transferring"
+	if startedBytes > 0 {
+		startPhase = "resuming"
+	}
+	e.emitTransferProgress(message.MessageID, message.AttachmentID, peer.DeviceID, startedBytes, message.AttachmentSize, "send", startPhase, transferProgressOptions{
+		chunkSize: defaultTransferChunkSize, windowSize: len(assignments), streamCount: len(assignments),
+		transferMode: v3TransferMode, transport: "TLS13/TCP-v3", protocol: fmt.Sprintf("%s/%d", ProtocolName, ProtocolMajor),
+	})
 	digest, err := v3FileDigest(file, fullSHA)
 	if err != nil {
 		return err
