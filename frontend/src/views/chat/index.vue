@@ -399,7 +399,10 @@ const pendingComposerListHeight = computed(() => {
 })
 // The extra two pixels account for the additional flex gap introduced by the list.
 const pendingComposerExtraHeight = computed(() => pendingComposerListHeight.value ? pendingComposerListHeight.value + 2 : 0)
-const composerTotalHeight = computed(() => composerHeight.value + pendingComposerExtraHeight.value)
+// Keep the user-configured editor height intact when the fixed quote row is
+// inserted above it. The row is 42px tall with 2px top and 4px bottom margin.
+const quoteComposerExtraHeight = computed(() => quoteMessageId.value ? 48 : 0)
+const composerTotalHeight = computed(() => composerHeight.value + pendingComposerExtraHeight.value + quoteComposerExtraHeight.value)
 const messagePreviews = reactive<Record<string, string>>({})
 const retryingMessages = reactive<Record<string, boolean>>({})
 const attachmentActions = reactive<Record<string, boolean>>({})
@@ -2575,7 +2578,8 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 @keyframes conversation-file-drop-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 .message-bubble.is-favorite::before { content: '★'; position: absolute; right: -18px; top: -8px; color: #ffb400; font-size: 13px; }
 .message-bubble { position: relative; }
-.message-quote { margin: -2px 0 8px; padding: 5px 8px; border-left: 3px solid rgba(128, 145, 180, .7); color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.message-quote { margin: -2px 0 8px; padding: 5px 8px; border-left: 3px solid color-mix(in srgb, var(--accent) 56%, transparent); color: var(--text); background: color-mix(in srgb, var(--accent) 7%, transparent); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-app .message-line.mine .message-quote { border-left-color: color-mix(in srgb, var(--message-outgoing-text) 72%, transparent); color: var(--message-outgoing-text); background: rgba(255, 255, 255, .12); }
 .attachment-complete-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid rgba(128, 145, 180, .18); }
 .attachment-complete-actions button, .message-context-menu button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 12px; padding: 4px 7px; border-radius: 5px; }
 .attachment-complete-actions button:hover, .message-context-menu button:hover { background: rgba(55, 103, 232, .12); }
@@ -3204,9 +3208,9 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .selection-actions button svg { width: 15px; height: 15px; flex: 0 0 auto; }
 .selection-actions .selection-danger { border-color: color-mix(in srgb, #f53f3f 45%, var(--line)); color: #f53f3f; }
 .selection-actions .selection-cancel { color: var(--muted); }
-.composer-quote { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; margin: 2px 0 4px; padding: 5px 8px; border-left: 3px solid var(--accent); border-radius: 4px; background: var(--surface-2); color: var(--text); }
-.composer-quote > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.composer-quote strong { color: var(--accent); font-size: 11px; }
+.composer-quote { display: flex; flex: 0 0 42px; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-width: 0; height: 42px; min-height: 42px; margin: 2px 0 4px; padding: 5px 8px; box-sizing: border-box; border-left: 3px solid var(--accent); border-radius: 4px; background: var(--surface-2); color: var(--text); }
+.composer-quote > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; overflow: hidden; }
+.composer-quote strong { overflow: hidden; color: var(--accent); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-quote span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-quote button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
 .composer-quote button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); }
