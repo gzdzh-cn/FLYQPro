@@ -67,7 +67,7 @@
         <div v-if="fileDropIndicatorVisible" class="conversation-file-drop-indicator" aria-hidden="true"><div class="conversation-file-drop-card"><span class="conversation-file-drop-icon">↓</span><strong>松开以添加文件</strong><small>文件会加入输入框，不会立即发送</small></div></div>
         <div class="message-scroll" ref="messageScroll" :class="{ 'is-drag-selecting': dragSelectActive, 'is-selection-mode': selectionMode }" @scroll="onMessageScroll(); closeAllContextMenus()" @wheel="cancelAutoScroll" @pointerdown="handleMessageAreaPointerDown" @touchstart="handleMessageAreaPointerDown" @click="handleMessageAreaClick" @dragstart.prevent>
           <div v-if="!activeMessages.length" class="conversation-empty"><div class="empty-icon">✦</div><h3>开始聊天</h3><p>向 <span class="nickname-ellipsis-inline">{{ activePeer.remark || activePeer.nickname }}</span> 发送第一条消息</p></div>
-          <div v-for="message in activeMessages" v-memo="[selectionMode, message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), expandedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.metricSeq, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" :data-message-id="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId), 'selection-active': selectionMode }" @pointerdown.stop="beginDragSelection($event, message)" @pointermove="updateDragSelection" @pointerup="finishDragSelection" @pointercancel="cancelDragSelection" @lostpointercapture="finishDragSelection" @click="handleMessageClick($event, message)">
+          <div v-for="message in activeMessages" v-memo="[selectionMode, message.messageId, message.kind, message.senderDeviceId, message.createdAt, message.content, message.quoteContent, message.status, message.isFavorite, message.attachmentId, message.attachmentMime, message.attachmentStatus, message.attachmentPath, message.attachmentThumbnail, message.attachmentSize, message.attachmentName, messagePreviews[message.messageId], selectedMessageIds.has(message.messageId), expandedMessageIds.has(message.messageId), transferProgressFor(message)?.phase, transferProgressFor(message)?.transferred, transferProgressFor(message)?.speed, transferProgressFor(message)?.metricSeq, transferProgressFor(message)?.elapsedMs, transferProgressFor(message)?.etaSeconds, transferProgressFor(message)?.fileSize, visualProgressPercent(message), attachmentActionBusy(message), activePeer?.deviceId, activePeer?.nickname, activePeer?.avatarData, store.profile.nickname, store.profile.avatarData]" :key="message.messageId" :data-message-id="message.messageId" class="message-line" :class="{ mine: message.senderDeviceId === deviceInfo?.deviceId, 'is-selected': selectedMessageIds.has(message.messageId), 'selection-active': selectionMode }" @pointerdown.stop="beginDragSelection($event, message)" @pointermove="updateDragSelection" @pointerup="finishDragSelection" @pointercancel="cancelDragSelection" @lostpointercapture="finishDragSelection" @click="handleMessageClick($event, message)">
             <button v-if="selectionMode" type="button" class="message-select-toggle" :class="{ checked: selectedMessageIds.has(message.messageId) }" :aria-pressed="selectedMessageIds.has(message.messageId)" :aria-label="selectedMessageIds.has(message.messageId) ? '取消选择消息' : '选择消息'" @click.stop="toggleMessageSelection(message)"><span /></button>
             <button v-if="message.senderDeviceId !== deviceInfo?.deviceId" type="button" class="avatar message-avatar avatar-button" :style="avatarStyle(activePeer.nickname, activePeer.avatarData)" aria-label="查看好友资料" title="查看好友资料" @click.stop="openPeerInfo">{{ activePeer.avatarData ? '' : initials(activePeer.nickname) }}</button>
             <button v-if="message.senderDeviceId === deviceInfo?.deviceId && (message.kind === 'file' || message.kind === 'text') && message.status === 'failed'" type="button" class="message-retry" :disabled="retryingMessages[message.messageId]" aria-label="重发消息" title="发送失败，点击重发" @click.stop="retryMessage(message)">!</button>
@@ -99,7 +99,7 @@
                   </div>
                   <div v-if="attachmentAwaitingAcceptance(message)" class="attachment-pending"><span class="attachment-pending-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div>
                 </template>
-                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="false" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${transferProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用时间 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
+                <div v-if="transferProgressFor(message) && !['completed', 'failed', 'canceled', 'rejected'].includes(transferProgressFor(message)?.phase) && !isImageMessage(message)" class="transfer-progress" :class="{ 'is-awaiting': transferProgressFor(message)?.phase === 'awaiting_acceptance', 'is-paused': attachmentIsPaused(message) }"><div class="transfer-progress-head"><span class="transfer-progress-speed">{{ transferSpeedLabel(message) }}</span><span class="transfer-progress-actions"><button type="button" class="transfer-details-button" @click.stop.prevent="showAttachmentDetails(message)">详情</button><a-button size="mini" :disabled="!transferPrimaryActionEnabled(message)" :loading="false" @click.stop.prevent="pauseOrResumeAttachment(message)">{{ transferPrimaryActionLabel(message) }}</a-button><a-button size="mini" status="danger" :loading="attachmentActionBusy(message)" @click.stop.prevent="cancelAttachment(message)">取消</a-button></span></div><div class="transfer-progress-track"><i :style="{ width: `${visualProgressPercent(message)}%` }" /></div><div class="transfer-progress-foot"><span>已用时间 {{ transferElapsedLabel(message) }}</span><span>剩余 {{ transferEtaLabel(message) }}</span></div></div>
                 <div v-if="attachmentCompletedLocal(message)" class="attachment-complete-actions"><button type="button" @click.stop="isImageMessage(message) ? openImage(message) : openAttachment(message)">打开</button><button type="button" @click.stop="revealAttachment(message)">打开文件夹</button><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
                 <div v-if="transferDetailsActionVisible(message)" class="attachment-transfer-details-action"><button type="button" @click.stop.prevent="showAttachmentDetails(message)">详情</button></div>
               </template>
@@ -371,6 +371,20 @@ const discoveryWidth = ref(storedSize('flyqpro.discoveryWidth', 320, 240, 460))
 const composerHeight = ref(storedSize('flyqpro.composerHeight', 158, 120, 320))
 const emojiOpen = ref(false)
 const composerInput = ref<HTMLTextAreaElement>()
+type TransferVisualState = {
+  metricGeneration: number
+  durableBytes: number
+  total: number
+  visualBytes: number
+  anchorBytes: number
+  anchorAt: number
+  lastFrameAt: number
+  speed: number
+  capBytes: number
+  phase: string
+}
+const transferVisualStates = reactive<Record<string, TransferVisualState>>({})
+let transferVisualFrame = 0
 const emojis = [...new Set('😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫡 🤭 🫢 🤫 🤥 😶 😐 😑 😬 🫠 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👿 👹 👺 🤡 💩 👻 💀 ☠️ 👽 👾 🤖 🎃 😺 😸 😹 😻 😼 😽 🙀 😿 😾 👋 🤚 🖐️ ✋ 🖖 👌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🙏 ✍️ 💅 🤝 💪 🦾 🖕 👂 🦻 👃 🧠 🫀 🫁 🦷 🦴 👀 👁️ 👅 👄 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 🆔 ⚛️ 🉑 ☢️ ☣️ 📛 🚫 ⛔ 📵 🚯 🚳 🚷 🔞 📶 🚸 ⚠️ 🔱 ♻️ ✅ ❇️ ✳️ ❎ 🌐 💠 Ⓜ️ 🌀 💤 🆚 🆗 🆕 🆓 🆒 🆘 🛑 ⛽ 🚧 🔰 ♻️ 💯 🔥 ✨ ⭐ 🌟 💫 💥 💢 💦 💨 🕳️ 💬 👁️‍🗨️ 🗨️ 🗯️ 💭 💤 🎉 🎊 🎈 🎁 🎀 🎂 🍰 🥂 🍻 ☕ 🍵 🧋 🍺 🍷 🥤 🍔 🍟 🍕 🌮 🍣 🍜 🍎 🍉 🍓 🥑 ⚽ 🏀 🏈 ⚾ 🎾 🏐 🏓 🥊 🏆 🥇 🎮 🎲 🎵 🎶 🎸 🎹 🎤 📷 📸 💻 🖥️ ⌚ 📱 💡 🔋 🔌 💰 💎 🚗 ✈️ 🚀 🛸 🏠 🏢 🌈 ☀️ 🌙 ⛅ ❄️ ☔ 🌊 🌍'.split(' '))]
 const pendingImages = ref<string[]>([])
 type PendingFile = { id: string; path: string; name: string; size: number; mime: string }
@@ -521,6 +535,11 @@ const selectedAttachmentMessages = computed(() => selectedMessages.value.filter(
 const messageIndexById = computed(() => new Map(activeMessages.value.map((message, index) => [message.messageId, index])))
 const activeMessageLoadKey = computed(() => activeMessages.value.map((message) => `${message.messageId}:${message.kind}:${message.attachmentId || ''}:${message.attachmentStatus || ''}:${message.attachmentPath || ''}:${message.attachmentThumbnail ? 'thumbnail' : ''}`).join('|'))
 const activeTransferLoadKey = computed(() => activeMessages.value.map((message) => { const progress = message.attachmentId ? (store.transferProgress[message.attachmentId] || store.transferHistory[message.attachmentId]) : undefined; return `${message.messageId}:${progress?.phase || ''}:${progress?.transferred || 0}` }).join('|'))
+const activeTransferVisualKey = computed(() => activeMessages.value.map((message) => {
+  const progress = transferProgressFor(message)
+  if (!progress || !message.attachmentId) return `${message.messageId}:none`
+  return `${message.attachmentId}:${progress.metricGeneration ?? 0}:${progress.phase || ''}:${progress.primaryBytes ?? progress.transferred ?? 0}:${progress.primarySpeed ?? progress.speed ?? 0}:${progress.ackTargetBytes ?? 0}:${progress.windowBytes ?? 0}:${progress.total || message.attachmentSize || 0}`
+}).join('|'))
 const migrationPercent = computed(() => store.attachmentMigration.total ? Math.min(100, Math.round(store.attachmentMigration.current / store.attachmentMigration.total * 100)) : 0)
 const isDefaultPath = computed(() => !editProfile.fileSavePath || editProfile.fileSavePath === defaultAttachmentPath.value)
 const defaultAttachmentPath = ref('')
@@ -1401,7 +1420,17 @@ function tuningStateLabel(state?: string) { return ({ probing: '探测中', obse
 function transferModeLabel(mode?: string) { return ({ 'parallel-binary': '并行高速二进制', 'binary-window': '高速二进制', 'json-window': '兼容窗口', 'legacy-chunk': '逐块兼容' } as Record<string, string>)[mode || ''] || mode || '正在协商' }
 const terminalTransferPhases = new Set(['completed', 'canceled', 'rejected', 'failed'])
 const senderLifecyclePhases = new Set(['queued', 'transferring', 'resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'rejected', 'failed'])
+const receiverActivePhases = new Set(['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'])
+const senderControlPhases = new Set(['resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'rejected', 'failed'])
 const resumeActivePhases = new Set(['queued', 'transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'verifying', 'finalizing', 'completed', 'failed', 'canceled', 'rejected'])
+function receiverHasStarted(preferred: any): boolean {
+  if (!preferred) return false
+  return receiverActivePhases.has(preferred.phase) ||
+    Number(preferred.metricSeq || 0) > 0 ||
+    Number(preferred.checkpointSeq || 0) > 0 ||
+    Number(preferred.durableBytes || 0) > 0 ||
+    Number(preferred.speed || preferred.primarySpeed || 0) > 0
+}
 function transferProgressFor(message: any): any {
   if (!message?.attachmentId) return undefined
   const attachmentId = message.attachmentId
@@ -1451,6 +1480,9 @@ function transferProgressFor(message: any): any {
   merged.remoteReceived = preferred?.remoteReceived ?? preferred?.durableBytes ?? preferred?.transferred ?? diagnostics?.durableBytes ?? diagnostics?.transferred ?? 0
   merged.transferred = preferred?.durableBytes ?? preferred?.transferred ?? diagnostics?.durableBytes ?? diagnostics?.transferred ?? 0
   merged.total = preferred?.total || diagnostics?.total || message.attachmentSize || 0
+  const receiverStarted = receiverHasStarted(preferred)
+  const diagnosticsPhase = diagnostics?.phase
+  const diagnosticsOwnsLifecycle = Boolean(diagnostics && (senderControlPhases.has(diagnosticsPhase) || (diagnosticsPhase === 'transferring' && !receiverStarted) || (diagnosticsPhase === 'queued' && !receiverStarted)))
   if (diagnostics) {
     merged.state = diagnostics.state || merged.state
     merged.errorCode = diagnostics.errorCode || merged.errorCode
@@ -1458,10 +1490,18 @@ function transferProgressFor(message: any): any {
     merged.retries = diagnostics.retries ?? merged.retries
     merged.localSendSpeed = Number(diagnostics.localSendSpeed || diagnostics.speed || diagnostics.confirmedThroughput || diagnostics.windowThroughput || 0)
   }
-  // The send direction owns lifecycle controls. A receiver-durable snapshot
-  // may provide bytes and speed, but it must never hide a local pause/resume.
-  if (diagnostics && (!preferred || senderLifecyclePhases.has(diagnostics.phase))) {
-    merged.phase = diagnostics.phase
+  if (receiverStarted && !diagnosticsOwnsLifecycle) {
+    merged.state = preferred?.state || 'active'
+  }
+  // The send direction owns local controls, while receiver evidence owns the
+  // active transfer projection. In particular, an old send/queued event must
+  // not hide a receiver that has already accepted and started writing data.
+  if (diagnosticsOwnsLifecycle) {
+    merged.phase = diagnosticsPhase
+  } else if (receiverStarted) {
+    merged.phase = preferred?.phase || 'receiving'
+  } else if (diagnostics && senderLifecyclePhases.has(diagnosticsPhase)) {
+    merged.phase = diagnosticsPhase
   }
   if (diagnostics && ['paused', 'paused_local', 'paused_peer', 'paused_network_unstable'].includes(diagnostics.phase)) {
     merged.speed = undefined
@@ -1512,6 +1552,89 @@ function transferProgressPercent(message: any): number {
   if (progress.phase === 'completed') return 100
   const total = progress.total || message.attachmentSize || 0
   return total ? Math.min(99, Math.round(transferProgressTransferred(message) / total * 100)) : Math.min(99, progress.percent || 0)
+}
+const visualTransferPhases = new Set(['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'])
+function transferVisualNow() { return typeof performance !== 'undefined' ? performance.now() : Date.now() }
+function visualProgressPercent(message: any): number {
+  const progress = transferProgressFor(message)
+  const authoritative = transferProgressPercent(message)
+  if (!progress || progress.phase === 'completed') return authoritative
+  const state = message?.attachmentId ? transferVisualStates[message.attachmentId] : undefined
+  if (!state || state.metricGeneration !== Number(progress.metricGeneration ?? 0) || !(state.total > 0)) return authoritative
+  return Math.min(99, Math.max(authoritative, state.visualBytes / state.total * 100))
+}
+function scheduleTransferVisualFrame() {
+  if (!transferVisualFrame) transferVisualFrame = requestAnimationFrame(runTransferVisualFrame)
+}
+function runTransferVisualFrame(timestamp: number) {
+  transferVisualFrame = 0
+  let active = false
+  Object.values(transferVisualStates).forEach((state) => {
+    const elapsed = Math.min(100, Math.max(0, timestamp - state.lastFrameAt)) / 1000
+    state.lastFrameAt = timestamp
+    if (!visualTransferPhases.has(state.phase) || state.speed <= 0 || state.capBytes <= state.visualBytes) return
+    const predicted = Math.min(state.capBytes, Math.max(state.durableBytes, state.anchorBytes + state.speed * Math.max(0, timestamp - state.anchorAt) / 1000))
+    const target = Math.max(state.visualBytes, predicted)
+    if (target > state.visualBytes) {
+      // Catch up to a fresh durable checkpoint over a short interval, then
+      // keep advancing at the receiver's last valid speed sample.
+      const catchUpRate = Math.max(state.speed, (target - state.visualBytes) / 0.45)
+      state.visualBytes = Math.min(target, state.visualBytes + catchUpRate * elapsed)
+    }
+    if (state.visualBytes + 0.5 < state.capBytes && state.speed > 0) active = true
+  })
+  if (active) scheduleTransferVisualFrame()
+}
+function syncTransferVisualStates() {
+  const now = transferVisualNow()
+  const liveAttachments = new Set<string>()
+  activeMessages.value.forEach((message) => {
+    if (!message.attachmentId) return
+    const progress = transferProgressFor(message)
+    if (!progress) return
+    const attachmentId = message.attachmentId
+    liveAttachments.add(attachmentId)
+    const total = Math.max(0, Number(progress.total || message.attachmentSize || 0))
+    const durableBytes = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, transferProgressTransferred(message)))
+    const metricGeneration = Number(progress.metricGeneration ?? 0)
+    const speed = Number(progress.primarySpeed || 0)
+    const batchBytes = Math.max(0, Number(progress.ackTargetBytes || progress.windowBytes || 0))
+    const capBytes = batchBytes > 0 && total > 0 ? Math.min(total * 0.99, durableBytes + batchBytes) : durableBytes
+    let state = transferVisualStates[attachmentId]
+    if (!state || state.metricGeneration !== metricGeneration || state.total !== total) {
+      state = transferVisualStates[attachmentId] = {
+        metricGeneration,
+        durableBytes,
+        total,
+        visualBytes: durableBytes,
+        anchorBytes: durableBytes,
+        anchorAt: now,
+        lastFrameAt: now,
+        speed,
+        capBytes,
+        phase: progress.phase || '',
+      }
+    } else {
+      if (durableBytes > state.durableBytes) {
+        state.durableBytes = durableBytes
+        state.anchorBytes = durableBytes
+        state.anchorAt = now
+      }
+      state.total = total
+      if (state.speed <= 0 && speed > 0) {
+        state.anchorBytes = Math.max(state.visualBytes, durableBytes)
+        state.anchorAt = now
+      }
+      state.speed = speed > 0 ? speed : state.speed
+      state.capBytes = Math.max(state.visualBytes, capBytes)
+      state.phase = progress.phase || state.phase
+    }
+    if (progress.phase === 'completed') state.visualBytes = total
+    if (visualTransferPhases.has(state.phase) && state.speed > 0 && state.capBytes > state.visualBytes) scheduleTransferVisualFrame()
+  })
+  Object.keys(transferVisualStates).forEach((attachmentId) => {
+    if (!liveAttachments.has(attachmentId)) delete transferVisualStates[attachmentId]
+  })
 }
 function transferSpeedLabel(message: any): string {
   const progress = transferProgressFor(message)
@@ -1588,7 +1711,7 @@ function transferDetailsActionVisible(message: any): boolean {
   return ['failed', 'canceled', 'rejected'].includes(progress.phase)
 }
 function imageProgressRingStyle(message: any) {
-  return { '--progress': `${transferProgressPercent(message)}%` }
+  return { '--progress': `${visualProgressPercent(message)}%` }
 }
 const messageMenuStyle = computed(() => ({ left: `${messageMenu.x}px`, top: `${messageMenu.y}px` }))
 const peerMenuStyle = computed(() => ({ left: `${peerMenu.x}px`, top: `${peerMenu.y}px` }))
@@ -2283,6 +2406,7 @@ watch(() => activePeer.value, (peer, previous) => {
 watch(activePeerCanSend, (canSend) => { if (!canSend) emojiOpen.value = false })
 watch(activeMessageLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) }, { immediate: true })
 watch(activeTransferLoadKey, () => { activeMessages.value.forEach(loadMessagePreview) })
+watch(activeTransferVisualKey, syncTransferVisualStates, { immediate: true })
 watch(() => store.lastMessageEvent, (message) => {
   if (!message) return
   const isActiveConversation = conversationVisible.value && message.conversationId === `conv-${activePeer.value?.deviceId}`
@@ -2352,7 +2476,7 @@ onMounted(async () => {
   await load()
   scheduleMenuWarmup()
 })
-onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelDragSelection(); window.clearTimeout(suppressMessageClickTimer); suppressMessageClickTimer = 0; suppressNextMessageClick.value = false; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('blur', cancelDragSelection); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleFileDragState) window.removeEventListener('flyqpro:file-drag-state', handleFileDragState); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
+onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuWarmupQueue = []; cancelDragSelection(); if (transferVisualFrame) cancelAnimationFrame(transferVisualFrame); transferVisualFrame = 0; Object.keys(transferVisualStates).forEach((attachmentId) => delete transferVisualStates[attachmentId]); window.clearTimeout(suppressMessageClickTimer); suppressMessageClickTimer = 0; suppressNextMessageClick.value = false; cancelScrollAnimation(); bottomSettleToken++; document.removeEventListener('visibilitychange', updateDesktopForeground); window.removeEventListener('focus', updateDesktopForeground); window.removeEventListener('blur', updateDesktopForeground); window.removeEventListener('blur', cancelDragSelection); window.removeEventListener('pointerdown', unlockNotificationAudio); window.removeEventListener('keydown', unlockNotificationAudio); window.removeEventListener('keydown', handleContextMenuKeydown); window.removeEventListener('pointerdown', closeContextMenusOnPointerDown); window.removeEventListener('pointerdown', pauseMenuWarmup); window.removeEventListener('keydown', pauseMenuWarmup); if (handleFileDragState) window.removeEventListener('flyqpro:file-drag-state', handleFileDragState); if (handleBrowserDrop) window.removeEventListener('flyqpro:file-dropped', handleBrowserDrop); cancelNativeDrop?.(); void notificationAudio?.close() })
 </script>
 
 <style scoped lang="less">
@@ -3067,7 +3191,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .transfer-details-button { flex: 0 0 auto; min-width: 38px; padding: 0; border: 0; background: transparent; color: inherit; font-size: 11px; cursor: pointer; opacity: .82; white-space: nowrap; }
 .transfer-progress-actions :deep(.arco-btn) { flex: 0 0 auto; width: 44px; justify-content: center; padding: 0; white-space: nowrap; }
 .transfer-progress-track { height: 5px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
-.transfer-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .36s ease-out; }
+.transfer-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: none; will-change: width; }
 .transfer-progress.is-paused .transfer-progress-track i { background: var(--muted); }
 .transfer-progress-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 17px; margin-top: 4px; color: color-mix(in srgb, currentColor 72%, transparent); font-size: 10px; line-height: 17px; white-space: nowrap; }
 .transfer-progress-foot span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

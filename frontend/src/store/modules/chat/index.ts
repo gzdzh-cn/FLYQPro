@@ -30,6 +30,16 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     const previousGeneration = transferGeneration(previous)
     if (generation !== previousGeneration) return generation < previousGeneration
   }
+  // The initial send/queued event can arrive after the receiver has already
+  // accepted the offer. It belongs to the same logical transfer and must not
+  // move the sender back to the queue after data or a pause has been observed.
+  if (progress.direction === 'send' && progress.phase === 'queued' && previous.direction === 'send') {
+    const sameMetricGeneration = progress.metricGeneration === undefined || previous.metricGeneration === undefined ||
+      metricGeneration(progress) === metricGeneration(previous)
+    const receiverStarted = ['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'resuming', 'retrying', 'waiting_network', 'completed', 'failed', 'canceled', 'cancelled', 'rejected'].includes(previous.phase) ||
+      Number(previous.metricSeq ?? 0) > 0 || Number(previous.checkpointSeq ?? 0) > 0 || Number(previous.durableBytes ?? previous.transferred ?? 0) > 0
+    if (sameMetricGeneration && receiverStarted) return true
+  }
   // A backend heartbeat deliberately reuses the last durable metric sequence
   // and byte count. It is still newer when it carries a newer elapsed clock or
   // phase, and must not be discarded by the durable-counter ordering below.
