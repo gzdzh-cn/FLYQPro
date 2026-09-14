@@ -28,7 +28,10 @@ func commitV3Checkpoint(engine *Engine, transfer *incomingFile, version uint64) 
 		if leader {
 			// Bound added small-file latency while allowing other slots to join the
 			// same durable write batch. No goroutine remains after the file ends.
-			time.Sleep(500 * time.Microsecond)
+			// Give parallel slots a short coalescing window. The range/version
+			// snapshot is still taken inside persistIncomingV3Checkpoint, so data
+			// arriving after it cannot be acknowledged by this batch.
+			time.Sleep(2 * time.Millisecond)
 			err := persistIncomingV3Checkpoint(engine, transfer)
 			transfer.v3CheckpointMu.Lock()
 			pending.err = err
@@ -140,5 +143,8 @@ func persistIncomingV3Checkpoint(engine *Engine, transfer *incomingFile) error {
 		transfer.durableBytes = covered
 	}
 	transfer.v3Mu.Unlock()
+	if engine != nil {
+		engine.recordTransferStage(transfer.attachmentID, transfer.senderID, "checkpoint", -1, "", time.Since(syncStarted), covered, false, "")
+	}
 	return nil
 }

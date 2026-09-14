@@ -137,7 +137,8 @@
                 <p><span>平均速度</span><strong class="attachment-details-rate"><span>{{ detailProgressAverageSpeed.primary }}</span><small v-if="detailProgressAverageSpeed.secondary">{{ detailProgressAverageSpeed.secondary }}</small></strong></p>
                 <p><span>峰值速度</span><strong class="attachment-details-rate"><span>{{ detailProgressPeakSpeed.primary }}</span><small v-if="detailProgressPeakSpeed.secondary">{{ detailProgressPeakSpeed.secondary }}</small></strong></p>
                 <p><span>预计剩余</span><strong>{{ detailProgressEta }}</strong></p>
-                <p><span>已用时间</span><strong>{{ detailProgressElapsed }}</strong></p>
+                <p><span>总耗时</span><strong>{{ detailProgressElapsed }}</strong></p>
+                <p><span>有效传输耗时</span><strong>{{ detailProgress?.effectiveTransferMs === undefined ? '暂未提供' : formatDuration(detailProgress.effectiveTransferMs) }}</strong></p>
                 <p><span>数据传输耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.dataTransferMs) }}</strong></p>
                 <p><span>最终化耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.finalizationMs) }}</strong></p>
                 <p><span>当前状态</span><strong>{{ transferPhaseLabel(detailDisplayPhase(detailProgress)) }}</strong></p>
@@ -159,6 +160,7 @@
                 <p><span>调优状态</span><strong>{{ detailTuningState }}</strong></p>
                 <p><span>磁盘同步耗时</span><strong>{{ detailProgress?.diskWriteMs ? `${detailProgress.diskWriteMs} ms` : detailProgress ? '暂未提供' : '暂未提供' }}</strong></p>
                 <p><span>checkpoint 序号</span><strong>{{ detailProgress?.checkpointSeq !== undefined ? detailProgress.checkpointSeq : '暂未提供' }}</strong></p>
+                <p><span>checkpoint 次数</span><strong>{{ detailProgress?.checkpointCount !== undefined ? detailProgress.checkpointCount : '暂未提供' }}</strong></p>
                 <p><span>数据连接耗时</span><strong>{{ formatDiagnosticDuration(detailProgress?.dataSlotDialMs) }}</strong></p>
                 <p><span>首帧延迟</span><strong>{{ formatDiagnosticDuration(detailProgress?.firstFrameMs) }}</strong></p>
                 <p><span>slot 数</span><strong>{{ detailProgress?.streamCount ? `${detailProgress.streamCount} 路` : '暂未提供' }}</strong></p>
@@ -3065,7 +3067,7 @@ onBeforeUnmount(() => { saveActiveScrollPosition(); clearMenuWarmupTask(); menuW
 .transfer-details-button { flex: 0 0 auto; min-width: 38px; padding: 0; border: 0; background: transparent; color: inherit; font-size: 11px; cursor: pointer; opacity: .82; white-space: nowrap; }
 .transfer-progress-actions :deep(.arco-btn) { flex: 0 0 auto; width: 44px; justify-content: center; padding: 0; white-space: nowrap; }
 .transfer-progress-track { height: 5px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
-.transfer-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .18s ease; }
+.transfer-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .36s ease-out; }
 .transfer-progress.is-paused .transfer-progress-track i { background: var(--muted); }
 .transfer-progress-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 17px; margin-top: 4px; color: color-mix(in srgb, currentColor 72%, transparent); font-size: 10px; line-height: 17px; white-space: nowrap; }
 .transfer-progress-foot span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

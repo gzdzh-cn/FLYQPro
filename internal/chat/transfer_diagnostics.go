@@ -31,6 +31,9 @@ type TransferSnapshot struct {
 	LocalSendSpeed      float64           `json:"localSendSpeed,omitempty"`
 	ETAs                int64             `json:"etaSeconds,omitempty"`
 	ElapsedMs           int64             `json:"elapsedMs,omitempty"`
+	EffectiveTransferMs int64             `json:"effectiveTransferMs,omitempty"`
+	ElapsedHeartbeat    bool              `json:"elapsedHeartbeat,omitempty"`
+	StageUpdatedAt      time.Time         `json:"stageUpdatedAt,omitempty"`
 	MetricStartedBytes  int64             `json:"metricStartedBytes,omitempty"`
 	MetricLastBytes     int64             `json:"metricLastBytes,omitempty"`
 	MetricSeq           uint64            `json:"metricSeq,omitempty"`
@@ -68,6 +71,7 @@ type TransferSnapshot struct {
 	TotalDurationMs     int64             `json:"totalDurationMs,omitempty"`
 	ReconnectCount      int               `json:"reconnectCount,omitempty"`
 	RetransmittedBytes  int64             `json:"retransmittedBytes,omitempty"`
+	CheckpointCount     int               `json:"checkpointCount,omitempty"`
 	UpdatedAt           time.Time         `json:"updatedAt"`
 }
 
@@ -92,7 +96,7 @@ func snapshotFromResume(state transferResumeState) TransferSnapshot {
 			phase = "transferring"
 		}
 	}
-	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, MetricGeneration: metricGenerationOrDefault(state.MetricGeneration), State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), ElapsedMs: state.ElapsedMs, MetricSeq: state.MetricSeq, CheckpointSeq: state.CheckpointSeq, MetricStartedBytes: state.MetricStartedBytes, MetricLastBytes: state.MetricLastBytes, Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
+	return TransferSnapshot{AttachmentID: state.AttachmentID, TransferID: transferID, MessageID: state.MessageID, PeerDeviceID: state.SenderDeviceID, Direction: direction, SessionID: state.SessionID, Generation: state.Generation, MetricGeneration: metricGenerationOrDefault(state.MetricGeneration), State: state.State, Phase: phase, Transferred: durable, DurableBytes: durable, Total: state.FileSize, Percent: transferProgressPercent(durable, state.FileSize, phase), ElapsedMs: state.ElapsedMs, EffectiveTransferMs: state.EffectiveTransferMs, MetricSeq: state.MetricSeq, CheckpointSeq: state.CheckpointSeq, MetricStartedBytes: state.MetricStartedBytes, MetricLastBytes: state.MetricLastBytes, Retries: state.Retries, ErrorCode: state.ErrorCode, Retryable: state.Retryable, UpdatedAt: state.UpdatedAt}
 }
 
 func snapshotFromProgress(value map[string]any) (TransferSnapshot, error) {
@@ -245,6 +249,9 @@ func mergeTransferSnapshot(primary, fallback TransferSnapshot) TransferSnapshot 
 	}
 	if primary.MetricGeneration == 0 {
 		primary.MetricGeneration = fallback.MetricGeneration
+	}
+	if primary.EffectiveTransferMs < fallback.EffectiveTransferMs {
+		primary.EffectiveTransferMs = fallback.EffectiveTransferMs
 	}
 	if primary.Total == 0 {
 		primary.Total = fallback.Total

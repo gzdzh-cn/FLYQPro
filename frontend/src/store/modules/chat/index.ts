@@ -30,6 +30,16 @@ function progressIsOlder(progress: TransferProgress, previous?: TransferProgress
     const previousGeneration = transferGeneration(previous)
     if (generation !== previousGeneration) return generation < previousGeneration
   }
+  // A backend heartbeat deliberately reuses the last durable metric sequence
+  // and byte count. It is still newer when it carries a newer elapsed clock or
+  // phase, and must not be discarded by the durable-counter ordering below.
+  if (progress.elapsedHeartbeat && previous.elapsedHeartbeat !== false) {
+    const sameMetric = metricGeneration(progress) === metricGeneration(previous) &&
+      Number(progress.generation ?? 0) === Number(previous.generation ?? 0) &&
+      Number(progress.metricSeq ?? 0) === Number(previous.metricSeq ?? 0) &&
+      Number(progress.durableBytes ?? progress.transferred ?? 0) === Number(previous.durableBytes ?? previous.transferred ?? 0)
+    if (sameMetric && Number(progress.elapsedMs ?? -1) >= Number(previous.elapsedMs ?? -1)) return false
+  }
   const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
   let comparable = false
   let strictlyOlder = false
@@ -76,6 +86,9 @@ function mergeMonotonicProgress(previous: TransferProgress | undefined, incoming
   const sameMetricGeneration = !previous || previous.metricGeneration === undefined || incoming.metricGeneration === undefined || metricGeneration(previous) === metricGeneration(incoming)
   if (sameMetricGeneration && previous?.elapsedMs !== undefined && (next.elapsedMs === undefined || Number(next.elapsedMs) < Number(previous.elapsedMs))) {
     next.elapsedMs = previous.elapsedMs
+  }
+  if (sameMetricGeneration && previous?.effectiveTransferMs !== undefined && (next.effectiveTransferMs === undefined || Number(next.effectiveTransferMs) < Number(previous.effectiveTransferMs))) {
+    next.effectiveTransferMs = previous.effectiveTransferMs
   }
   if (sameMetricGeneration && previous?.metricStartedBytes !== undefined && next.metricStartedBytes === undefined) {
     next.metricStartedBytes = previous.metricStartedBytes

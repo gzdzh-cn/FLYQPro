@@ -70,6 +70,7 @@ type Engine struct {
 	dataDialAddresses       map[string]string
 	transferStagesMu        sync.Mutex
 	transferStages          map[string]transferStageMetrics
+	transferHeartbeats      map[string]transferHeartbeat
 	fileControls            map[string]*fileControlConnection
 	presenceMu              sync.Mutex
 	discoveryScanMu         sync.Mutex
@@ -81,11 +82,14 @@ type Engine struct {
 }
 
 type transferMetric struct {
-	startedAt        time.Time
-	startedBytes     int64
-	lastAt           time.Time
-	lastBytes        int64
-	activeElapsed    time.Duration
+	startedAt     time.Time
+	startedBytes  int64
+	lastAt        time.Time
+	lastBytes     int64
+	activeElapsed time.Duration
+	// totalElapsed is the user-facing elapsed time. activeElapsed remains the
+	// effective data-phase metric for compatibility with existing diagnostics.
+	totalElapsed     time.Duration
 	lastPhase        string
 	generation       uint64
 	metricGeneration uint64
@@ -93,6 +97,17 @@ type transferMetric struct {
 	smoothedSpeed    float64
 	speedSampleAt    time.Time
 	speedSampleBytes int64
+}
+
+type transferHeartbeat struct {
+	messageID    string
+	attachmentID string
+	peerDeviceID string
+	direction    string
+	transferred  int64
+	total        int64
+	phase        string
+	options      transferProgressOptions
 }
 
 type transferTuning struct {
@@ -473,6 +488,7 @@ type outgoingTransfer struct {
 	resumeMu             sync.Mutex
 	resumeState          transferResumeState
 	resumePersistedBytes int64
+	resumeLastPersistAt  time.Time
 	terminalMu           sync.Mutex
 	terminal             bool
 }
@@ -677,7 +693,7 @@ func binaryTransferID(value string) [16]byte {
 }
 
 func NewEngine() *Engine {
-	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pausingIncoming: make(map[string]*incomingPause), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), dataDialAddresses: make(map[string]string), transferStages: make(map[string]transferStageMetrics), fileControls: make(map[string]*fileControlConnection)}
+	return &Engine{peers: make(map[string]Peer), incoming: make(map[string]*incomingFile), pausingIncoming: make(map[string]*incomingPause), pendingIncoming: make(map[string]*pendingIncomingOffer), outgoing: make(map[string]*outgoingTransfer), preparing: make(map[string]*preparingAttachment), sharedTransfers: make(map[string]*sharedTransferSession), friendRestoreAt: make(map[string]time.Time), discoveryMisses: make(map[string]int), discoveryPresenceAt: make(map[string]int64), locallyHiddenFriends: make(map[string]struct{}), friendRemovalSyncAt: make(map[string]time.Time), transferMetrics: make(map[string]transferMetric), transferLastBytes: make(map[string]int64), transferTuning: make(map[string]transferTuning), transferScheduler: newTransferScheduler(), peerPools: make(map[string]*PeerPool), dataDialAddresses: make(map[string]string), transferStages: make(map[string]transferStageMetrics), transferHeartbeats: make(map[string]transferHeartbeat), fileControls: make(map[string]*fileControlConnection)}
 }
 
 func configureTCPConnection(conn net.Conn) {
@@ -898,6 +914,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.scanLoop()
 	go e.livenessLoop()
 	go e.probeKnownPeers()
+	go e.transferHeartbeatLoop()
 	go e.scanNetwork(true)
 	go e.resumeInterruptedOutgoing()
 	e.emit("chat:network-status", e.NetworkStatus())
@@ -3196,6 +3213,9 @@ type transferProgressOptions struct {
 	totalDurationMs        int64
 	reconnectCount         int
 	retransmittedBytes     int64
+	effectiveTransferMs    int64
+	elapsedHeartbeat       bool
+	stageUpdatedAt         time.Time
 }
 
 const transferSpeedSmoothingWindow = 1500 * time.Millisecond
@@ -3205,6 +3225,19 @@ const transferSpeedMinimumSampleInterval = 200 * time.Millisecond
 func transferPhaseCountsElapsed(phase string) bool {
 	switch phase {
 	case "transferring", "receiving", "remote-receive", "writing", "durability_sync", "checkpoint_persist", "ack_emit":
+		return true
+	default:
+		return false
+	}
+}
+
+// transferPhaseCountsTotalElapsed describes the user-facing clock. Once an
+// offer has been accepted, the clock keeps running through network recovery,
+// verification, and finalization. Queueing and waiting for acceptance are
+// deliberately excluded; pause and cancel are the only freezing states.
+func transferPhaseCountsTotalElapsed(phase string) bool {
+	switch phase {
+	case "transferring", "receiving", "remote-receive", "writing", "durability_sync", "checkpoint_persist", "ack_emit", "resuming", "retrying", "waiting_network", "verifying", "finalizing":
 		return true
 	default:
 		return false
@@ -3240,6 +3273,13 @@ func advanceTransferMetricWithLogicalGeneration(metric transferMetric, exists bo
 	wasActive := transferPhaseCountsElapsed(metric.lastPhase)
 	if active && wasActive && !metric.lastAt.IsZero() && now.After(metric.lastAt) {
 		metric.activeElapsed += now.Sub(metric.lastAt)
+	}
+	// Accumulate the user-facing clock independently of the effective data
+	// clock. The previous phase determines whether time since the last event is
+	// part of the task; this makes a transition into retrying/finalizing count
+	// the interval immediately preceding it without counting time before accept.
+	if transferPhaseCountsTotalElapsed(metric.lastPhase) && !metric.lastAt.IsZero() && now.After(metric.lastAt) {
+		metric.totalElapsed += now.Sub(metric.lastAt)
 	}
 	if !active {
 		// A pause or wait must not dilute the first speed sample after resume.
@@ -3307,7 +3347,7 @@ func loadPersistedTransferMetric(attachmentID, direction string, fallbackBytes i
 	if err != nil {
 		if state, stateErr := loadTransferResumeRecord(context.Background(), attachmentID); stateErr == nil && (direction == "receive" || direction == state.Direction) {
 			now := time.Now()
-			return transferMetric{startedAt: now, startedBytes: state.MetricStartedBytes, lastAt: now, lastBytes: maxInt64(state.MetricLastBytes, fallbackBytes), activeElapsed: time.Duration(state.ElapsedMs) * time.Millisecond, lastPhase: string(state.State), generation: state.Generation, metricGeneration: metricGenerationOrDefault(state.MetricGeneration), speedSampleAt: now, speedSampleBytes: maxInt64(state.MetricLastBytes, fallbackBytes)}, true
+			return transferMetric{startedAt: now, startedBytes: state.MetricStartedBytes, lastAt: now, lastBytes: maxInt64(state.MetricLastBytes, fallbackBytes), activeElapsed: time.Duration(state.EffectiveTransferMs) * time.Millisecond, totalElapsed: time.Duration(state.ElapsedMs) * time.Millisecond, lastPhase: string(state.State), generation: state.Generation, metricGeneration: metricGenerationOrDefault(state.MetricGeneration), speedSampleAt: now, speedSampleBytes: maxInt64(state.MetricLastBytes, fallbackBytes)}, true
 		}
 		return transferMetric{}, false
 	}
@@ -3319,7 +3359,8 @@ func loadPersistedTransferMetric(attachmentID, direction string, fallbackBytes i
 	}
 	return transferMetric{
 		startedAt: now, startedBytes: startedBytes, lastAt: now, lastBytes: lastBytes,
-		activeElapsed: time.Duration(snapshot.ElapsedMs) * time.Millisecond,
+		activeElapsed: time.Duration(snapshot.EffectiveTransferMs) * time.Millisecond,
+		totalElapsed:  time.Duration(snapshot.ElapsedMs) * time.Millisecond,
 		lastPhase:     snapshot.Phase, generation: snapshot.Generation,
 		metricGeneration: metricGenerationOrDefault(snapshot.MetricGeneration),
 		peakSpeed:        snapshot.PeakSpeed, smoothedSpeed: snapshot.Speed,
@@ -3342,9 +3383,47 @@ func (e *Engine) transferMetricSnapshot(attachmentID, direction string) (elapsed
 		if snapshot, err := loadTransferSnapshotDirection(context.Background(), attachmentID, direction); err == nil {
 			return snapshot.ElapsedMs, metricGenerationOrDefault(snapshot.MetricGeneration)
 		}
+		if state, err := loadTransferResumeRecord(context.Background(), attachmentID); err == nil && (direction == "receive" || direction == state.Direction) {
+			return state.ElapsedMs, metricGenerationOrDefault(state.MetricGeneration)
+		}
 		return 0, 0
 	}
-	return metric.activeElapsed.Milliseconds(), metric.metricGeneration
+	return metric.totalElapsed.Milliseconds(), metric.metricGeneration
+}
+
+// transferHeartbeatLoop keeps the UI clock moving between durable ACKs. It
+// republishes the last durable snapshot only; emitTransferProgress detects the
+// heartbeat flag and skips all persistence side effects.
+func (e *Engine) transferHeartbeatLoop() {
+	e.mu.RLock()
+	stop := e.stop
+	e.mu.RUnlock()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			e.transferMetricsMu.Lock()
+			items := make([]transferHeartbeat, 0, len(e.transferHeartbeats))
+			for _, item := range e.transferHeartbeats {
+				items = append(items, item)
+			}
+			e.transferMetricsMu.Unlock()
+			for _, item := range items {
+				e.transferMetricsMu.Lock()
+				current, stillActive := e.transferHeartbeats[item.attachmentID+"|"+item.direction]
+				e.transferMetricsMu.Unlock()
+				if !stillActive || current.phase != item.phase {
+					continue
+				}
+				options := item.options
+				options.elapsedHeartbeat = true
+				e.emitTransferProgress(item.messageID, item.attachmentID, item.peerDeviceID, item.transferred, item.total, item.direction, item.phase, options)
+			}
+		}
+	}
 }
 
 func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID string, transferred, total int64, direction, phase string, options ...transferProgressOptions) {
@@ -3516,12 +3595,20 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	value["totalDurationMs"] = stages.TotalDurationMs + option.totalDurationMs
 	value["reconnectCount"] = stages.ReconnectCount + option.reconnectCount
 	value["retransmittedBytes"] = stages.RetransmittedBytes + option.retransmittedBytes
+	value["checkpointCount"] = stages.CheckpointCount
 	displayMetrics := direction != "send" || option.displayLocalMetrics
 	e.transferMetricsMu.Lock()
 	if e.transferMetrics == nil {
 		e.transferMetrics = make(map[string]transferMetric)
 	}
 	metricKey := attachmentID + "|" + direction
+	if option.elapsedHeartbeat {
+		current, stillActive := e.transferHeartbeats[metricKey]
+		if !stillActive || current.phase != phase {
+			e.transferMetricsMu.Unlock()
+			return
+		}
+	}
 	metric, ok := e.transferMetrics[metricKey]
 	if !ok {
 		if restored, restoredOK := loadPersistedTransferMetric(attachmentID, direction, transferred, logicalGeneration); restoredOK {
@@ -3530,8 +3617,13 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	}
 	now := time.Now()
 	metric, reset := advanceTransferMetricWithLogicalGeneration(metric, ok, now, transferred, phase, option.generation, logicalGeneration)
-	if option.authoritativeElapsedMs > metric.activeElapsed.Milliseconds() {
-		metric.activeElapsed = time.Duration(option.authoritativeElapsedMs) * time.Millisecond
+	if metric.totalElapsed == 0 && metric.activeElapsed > 0 {
+		// Snapshots written before totalElapsed was introduced only contain the
+		// effective elapsed value. Treat it as the historical lower bound.
+		metric.totalElapsed = metric.activeElapsed
+	}
+	if option.authoritativeElapsedMs > metric.totalElapsed.Milliseconds() {
+		metric.totalElapsed = time.Duration(option.authoritativeElapsedMs) * time.Millisecond
 	}
 	var rawSpeed float64
 	if !reset && displayMetrics && transferPhaseCountsElapsed(phase) {
@@ -3573,8 +3665,9 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 		value["peakSpeed"] = int64(metric.peakSpeed)
 	}
 	if !metric.startedAt.IsZero() {
-		elapsedMs := metric.activeElapsed.Milliseconds()
+		elapsedMs := metric.totalElapsed.Milliseconds()
 		value["elapsedMs"] = elapsedMs
+		value["effectiveTransferMs"] = metric.activeElapsed.Milliseconds()
 		value["metricStartedBytes"] = metric.startedBytes
 		value["metricLastBytes"] = metric.lastBytes
 		if displayMetrics && elapsedMs > 0 {
@@ -3593,25 +3686,57 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 			}
 		}
 	}
+	if option.elapsedHeartbeat {
+		value["elapsedHeartbeat"] = true
+	}
+	stageUpdatedAt := option.stageUpdatedAt
+	if stageUpdatedAt.IsZero() {
+		stageUpdatedAt = now
+	}
+	value["stageUpdatedAt"] = stageUpdatedAt.UTC().Format(time.RFC3339Nano)
 	if phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected" {
 		if e.transferLastBytes == nil {
 			e.transferLastBytes = make(map[string]int64)
 		}
 		e.transferLastBytes[metricKey] = transferred
 		delete(e.transferMetrics, metricKey)
+		delete(e.transferHeartbeats, metricKey)
 	} else {
 		if e.transferLastBytes == nil {
 			e.transferLastBytes = make(map[string]int64)
 		}
 		e.transferLastBytes[metricKey] = transferred
 		e.transferMetrics[metricKey] = metric
+		if transferPhaseCountsTotalElapsed(phase) && !option.elapsedHeartbeat {
+			if e.transferHeartbeats == nil {
+				e.transferHeartbeats = make(map[string]transferHeartbeat)
+			}
+			heartbeatOptions := option
+			heartbeatOptions.stageUpdatedAt = stageUpdatedAt
+			heartbeatOptions.metricGeneration = logicalGeneration
+			heartbeatOptions.elapsedHeartbeat = false
+			e.transferHeartbeats[metricKey] = transferHeartbeat{messageID: messageID, attachmentID: attachmentID, peerDeviceID: peerDeviceID, direction: direction, transferred: transferred, total: total, phase: phase, options: heartbeatOptions}
+		} else if !option.elapsedHeartbeat {
+			// In particular, a pause must remove the previous active descriptor;
+			// otherwise the ticker could accidentally resume the clock by replaying
+			// the old active phase.
+			delete(e.transferHeartbeats, metricKey)
+		}
+	}
+	if option.elapsedHeartbeat {
+		if item, exists := e.transferHeartbeats[metricKey]; exists {
+			item.transferred = transferred
+			item.total = total
+			item.phase = phase
+			e.transferHeartbeats[metricKey] = item
+		}
 	}
 	e.transferMetricsMu.Unlock()
 	// Persist checkpoint and lifecycle projections, rather than every socket
 	// progress tick. This keeps the UI recoverable without putting SQLite on the
 	// hot data path for each chunk.
 	durableMetricSnapshot := option.metricSeq > 0 && ((direction == "receive" && phase == "transferring") || (direction == "remote-receive" && phase == "receiving"))
-	persistSnapshot := durableMetricSnapshot || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "retrying" || phase == "waiting_network" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected"
+	persistSnapshot := !option.elapsedHeartbeat && (durableMetricSnapshot || phase == "queued" || phase == "awaiting_acceptance" || phase == "resuming" || phase == "retrying" || phase == "waiting_network" || phase == "paused" || phase == "paused_local" || phase == "paused_peer" || phase == "paused_network_unstable" || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected")
 	if persistSnapshot {
 		if snapshot, snapshotErr := snapshotFromProgress(value); snapshotErr == nil {
 			if snapshot.State == "" {
@@ -5797,6 +5922,7 @@ func (e *Engine) transferFileManaged(ctx context.Context, deviceID string, messa
 	for _, item := range resumeState.CompletedRanges {
 		active.resumePersistedBytes += item.Length
 	}
+	active.resumeLastPersistAt = time.Now()
 	active.resumeMu.Unlock()
 	transferCtx, stopTransfer := context.WithCancel(ctx)
 	paused := make(chan struct{})

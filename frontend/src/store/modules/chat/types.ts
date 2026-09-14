@@ -125,13 +125,17 @@ export interface TransferProgress {
   speed?: number
   metricSource?: 'receiver-durable' | string
   metricSeq?: number
-  checkpointSeq?: number
+	checkpointSeq?: number
+	checkpointCount?: number
   localSendSpeed?: number
   averageSpeed?: number
   peakSpeed?: number
   rawSpeed?: number
   etaSeconds?: number
   elapsedMs?: number
+  effectiveTransferMs?: number
+  elapsedHeartbeat?: boolean
+  stageUpdatedAt?: string
   metricStartedBytes?: number
   metricLastBytes?: number
   chunkSize?: number
@@ -159,7 +163,7 @@ export interface TransferProgress {
 	finalizationMs?: number
 	totalDurationMs?: number
 	reconnectCount?: number
-	retransmittedBytes?: number
+  retransmittedBytes?: number
 	transferMode?: 'parallel-binary' | 'binary-window' | 'json-window' | 'legacy-chunk' | string
   streamCount?: number
   activeStreams?: number

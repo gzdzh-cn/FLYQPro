@@ -25,33 +25,34 @@ var transferSidecarThrottle = struct {
 }{last: make(map[string]time.Time)}
 
 type transferResumeState struct {
-	Version            int               `json:"version"`
-	TransferID         string            `json:"transferId"`
-	AttachmentID       string            `json:"attachmentId"`
-	MessageID          string            `json:"messageId"`
-	SenderDeviceID     string            `json:"senderDeviceId"`
-	Direction          string            `json:"direction"`
-	SessionID          string            `json:"sessionId"`
-	Generation         uint64            `json:"generation"`
-	MetricGeneration   uint64            `json:"metricGeneration"`
-	CheckpointSeq      uint64            `json:"checkpointSeq"`
-	MetricSeq          uint64            `json:"metricSeq"`
-	ElapsedMs          int64             `json:"elapsedMs"`
-	MetricStartedBytes int64             `json:"metricStartedBytes"`
-	MetricLastBytes    int64             `json:"metricLastBytes"`
-	FileName           string            `json:"fileName"`
-	FileSize           int64             `json:"fileSize"`
-	SHA256             string            `json:"sha256"`
-	SourceMTimeNS      int64             `json:"sourceMtimeNs"`
-	Retries            int               `json:"retries"`
-	ErrorCode          TransferErrorCode `json:"errorCode"`
-	Retryable          bool              `json:"retryable"`
-	TempPath           string            `json:"tempPath"`
-	TargetPath         string            `json:"targetPath"`
-	TransferMode       string            `json:"transferMode"`
-	State              TransferState     `json:"state"`
-	CompletedRanges    []TransferRange   `json:"completedRanges"`
-	UpdatedAt          time.Time         `json:"updatedAt"`
+	Version             int               `json:"version"`
+	TransferID          string            `json:"transferId"`
+	AttachmentID        string            `json:"attachmentId"`
+	MessageID           string            `json:"messageId"`
+	SenderDeviceID      string            `json:"senderDeviceId"`
+	Direction           string            `json:"direction"`
+	SessionID           string            `json:"sessionId"`
+	Generation          uint64            `json:"generation"`
+	MetricGeneration    uint64            `json:"metricGeneration"`
+	CheckpointSeq       uint64            `json:"checkpointSeq"`
+	MetricSeq           uint64            `json:"metricSeq"`
+	ElapsedMs           int64             `json:"elapsedMs"`
+	EffectiveTransferMs int64             `json:"effectiveTransferMs,omitempty"`
+	MetricStartedBytes  int64             `json:"metricStartedBytes"`
+	MetricLastBytes     int64             `json:"metricLastBytes"`
+	FileName            string            `json:"fileName"`
+	FileSize            int64             `json:"fileSize"`
+	SHA256              string            `json:"sha256"`
+	SourceMTimeNS       int64             `json:"sourceMtimeNs"`
+	Retries             int               `json:"retries"`
+	ErrorCode           TransferErrorCode `json:"errorCode"`
+	Retryable           bool              `json:"retryable"`
+	TempPath            string            `json:"tempPath"`
+	TargetPath          string            `json:"targetPath"`
+	TransferMode        string            `json:"transferMode"`
+	State               TransferState     `json:"state"`
+	CompletedRanges     []TransferRange   `json:"completedRanges"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
 }
 
 func validTransferIdentifier(value string) bool {
@@ -414,9 +415,14 @@ func (e *Engine) persistOutgoingConfirmedRange(attachmentID string, start, end i
 	}
 	transfer.resumeState = state
 	// Keep SQLite checkpoints bounded: acknowledged chunks are idempotent and
-	// can be resent safely, so persisting every 4 MiB (and always the final
-	// range) preserves crash recovery without turning each chunk into a DB fsync.
-	if covered < state.FileSize && covered-transfer.resumePersistedBytes < 4*1024*1024 {
+	// can be resent safely, so persisting every 4 MiB or at most once per second
+	// (and always the final range) preserves crash recovery without turning each
+	// chunk into a DB fsync.
+	if transfer.resumeLastPersistAt.IsZero() {
+		transfer.resumeLastPersistAt = time.Now()
+	}
+	checkpointDue := covered-transfer.resumePersistedBytes >= 4*1024*1024 || time.Since(transfer.resumeLastPersistAt) >= time.Second
+	if covered < state.FileSize && !checkpointDue {
 		return nil
 	}
 	state.CheckpointSeq++
@@ -426,5 +432,6 @@ func (e *Engine) persistOutgoingConfirmedRange(attachmentID string, start, end i
 	state.UpdatedAt = time.Now().UTC()
 	transfer.resumeState = state
 	transfer.resumePersistedBytes = covered
+	transfer.resumeLastPersistAt = time.Now()
 	return nil
 }

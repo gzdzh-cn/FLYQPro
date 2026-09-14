@@ -310,6 +310,30 @@ func TestTransferMetricKeepsElapsedAcrossPauseAndByteRegression(t *testing.T) {
 	}
 }
 
+func TestTransferMetricTotalElapsedIncludesRecoveryAndFinalization(t *testing.T) {
+	base := time.Unix(400, 0)
+	metric, _ := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 1, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(2*time.Second), 10, "retrying", 2, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(5*time.Second), 10, "waiting_network", 3, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(7*time.Second), 10, "verifying", 4, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(9*time.Second), 10, "finalizing", 5, 1)
+	if metric.totalElapsed != 9*time.Second {
+		t.Fatalf("total elapsed = %s, want 9s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(20*time.Second), 10, "paused_local", 6, 1)
+	if metric.totalElapsed != 20*time.Second {
+		t.Fatalf("elapsed at pause = %s, want 20s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(30*time.Second), 10, "resuming", 7, 1)
+	if metric.totalElapsed != 20*time.Second {
+		t.Fatalf("paused elapsed changed = %s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(32*time.Second), 10, "completed", 8, 1)
+	if metric.totalElapsed != 22*time.Second {
+		t.Fatalf("elapsed after resume = %s, want 22s", metric.totalElapsed)
+	}
+}
+
 func TestTransferMetricOnlyNewLogicalGenerationResets(t *testing.T) {
 	base := time.Unix(300, 0)
 	metric, _ := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 1, 4)

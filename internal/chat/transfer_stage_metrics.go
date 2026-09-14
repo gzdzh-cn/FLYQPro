@@ -24,6 +24,7 @@ type transferStageMetrics struct {
 	TotalDurationMs     int64
 	ReconnectCount      int
 	RetransmittedBytes  int64
+	CheckpointCount     int
 }
 
 func transferErrorCode(err error) TransferErrorCode {
@@ -76,6 +77,8 @@ func (e *Engine) recordTransferStage(attachmentID, peerID, stage string, slotID 
 		metrics.ReconnectCount++
 	case "retransmit":
 		metrics.RetransmittedBytes += bytes
+	case "checkpoint":
+		metrics.CheckpointCount++
 	}
 	e.transferStages[attachmentID] = metrics
 	e.transferStagesMu.Unlock()
