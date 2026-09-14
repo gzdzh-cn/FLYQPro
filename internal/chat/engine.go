@@ -3485,9 +3485,13 @@ func (e *Engine) emitTransferProgress(messageID, attachmentID, peerDeviceID stri
 	value["retries"] = option.retries
 	value["errorCode"] = option.errorCode
 	value["retryable"] = option.retryable || option.errorCode == string(ErrInsufficientStorage) || option.errorCode == string(ErrSessionNotReady)
-	if option.durableBytes > 0 || phase == "completed" {
+	if option.durableBytes > 0 || phase == "completed" || phase == "failed" || phase == "canceled" || phase == "rejected" {
 		value["durableBytes"] = option.durableBytes
-		if phase == "completed" && option.durableBytes == 0 {
+		// Terminal sender/receiver events are snapshots of the last confirmed
+		// position. Older callers did not populate durableBytes on failure or
+		// cancellation, so use the event's confirmed transfer offset instead of
+		// allowing the terminal snapshot to regress to zero.
+		if option.durableBytes == 0 {
 			value["durableBytes"] = transferred
 		}
 	}
