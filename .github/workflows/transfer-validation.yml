@@ -1,0 +1,95 @@
+name: v3 transfer validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Validation data size
+        required: true
+        default: ci-100m
+        type: choice
+        options:
+          - ci-100m
+          - nightly-1g
+          - release-10g
+  schedule:
+    - cron: '17 18 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  ci-100m:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'ci-100m')
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run 100 MiB TLS v3 transfer
+        env:
+          FLYQPRO_TRANSFER_TEST_BYTES: '104857600'
+          FLYQPRO_TRANSFER_REPORT: ${{ github.workspace }}/transfer-validation-100m.json
+        run: go test ./internal/chat -run '^TestV3LargeTLS$' -count=1 -timeout=15m -v
+      - name: Validate 100 MiB evidence
+        run: python3 hack/validate-release-evidence.py transfer-validation-100m.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transfer-validation-100m
+          path: transfer-validation-100m.json
+          if-no-files-found: error
+
+  nightly-1g:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly-1g')
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run 1 GiB TLS v3 transfer
+        env:
+          FLYQPRO_TRANSFER_TEST_BYTES: '1073741824'
+          FLYQPRO_TRANSFER_REPORT: ${{ github.workspace }}/transfer-validation-1g.json
+        run: go test ./internal/chat -run '^TestV3LargeTLS$' -count=1 -timeout=45m -v
+      - name: Validate 1 GiB evidence
+        run: python3 hack/validate-release-evidence.py transfer-validation-1g.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transfer-validation-1g
+          path: transfer-validation-1g.json
+          if-no-files-found: error
+
+  release-10g:
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'release-10g'
+    runs-on: [self-hosted, flyqpro-transfer]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Require sufficient workspace capacity
+        run: test "$(df -Pk . | awk 'NR==2 {print $4}')" -ge 26214400
+      - name: Run 10 GiB TLS v3 transfer
+        env:
+          FLYQPRO_TRANSFER_TEST_BYTES: '10737418240'
+          FLYQPRO_TRANSFER_REPORT: ${{ github.workspace }}/transfer-validation-10g.json
+        run: go test ./internal/chat -run '^TestV3LargeTLS$' -count=1 -timeout=150m -v
+      - name: Validate 10 GiB evidence
+        run: python3 hack/validate-release-evidence.py transfer-validation-10g.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transfer-validation-10g
+          path: transfer-validation-10g.json
+          if-no-files-found: error

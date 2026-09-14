@@ -1,7 +1,125 @@
 import { defineStore } from 'pinia'
-import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection } from './types'
+import type { AttachmentMigrationProgress, Conversation, FriendRequest, Message, NetworkStatus, Peer, Profile, TransferProgress, TransferProgressByDirection, TransferSnapshot } from './types'
 
 const requestInProgress = new Set(['queued', 'sent', 'pending'])
+const terminalTransferPhases = new Set(['completed', 'canceled', 'cancelled', 'rejected', 'failed'])
+const persistenceTransferPhases = new Set(['writing', 'durability_sync', 'checkpoint_persist', 'ack_emit'])
+const lifecycleTransferPhases = new Set(['queued', 'resuming', 'retrying', 'waiting_network', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'completed', 'canceled', 'cancelled', 'rejected', 'failed'])
+
+function isTerminalTransfer(progress?: TransferProgress) {
+  return Boolean(progress && (terminalTransferPhases.has(progress.phase) || ['completed', 'cancelled', 'failed'].includes(progress.state || '')))
+}
+
+function transferGeneration(progress?: TransferProgress) {
+  return progress?.generation === undefined ? 0 : Number(progress.generation)
+}
+
+function metricGeneration(progress?: TransferProgress) {
+  return progress?.metricGeneration === undefined ? 0 : Number(progress.metricGeneration)
+}
+
+function progressIsOlder(progress: TransferProgress, previous?: TransferProgress) {
+  if (!previous) return false
+  if (progress.metricGeneration !== undefined && previous.metricGeneration !== undefined) {
+    const generation = metricGeneration(progress)
+    const previousGeneration = metricGeneration(previous)
+    if (generation !== previousGeneration) return generation < previousGeneration
+  }
+  if (progress.generation !== undefined && previous.generation !== undefined) {
+    const generation = transferGeneration(progress)
+    const previousGeneration = transferGeneration(previous)
+    if (generation !== previousGeneration) return generation < previousGeneration
+  }
+  // The initial send/queued event can arrive after the receiver has already
+  // accepted the offer. It belongs to the same logical transfer and must not
+  // move the sender back to the queue after data or a pause has been observed.
+  if (progress.direction === 'send' && progress.phase === 'queued' && previous.direction === 'send') {
+    const sameMetricGeneration = progress.metricGeneration === undefined || previous.metricGeneration === undefined ||
+      metricGeneration(progress) === metricGeneration(previous)
+    const receiverStarted = ['transferring', 'receiving', 'remote-receive', 'writing', 'durability_sync', 'checkpoint_persist', 'ack_emit', 'paused', 'paused_local', 'paused_peer', 'paused_network_unstable', 'resuming', 'retrying', 'waiting_network', 'completed', 'failed', 'canceled', 'cancelled', 'rejected'].includes(previous.phase) ||
+      Number(previous.metricSeq ?? 0) > 0 || Number(previous.checkpointSeq ?? 0) > 0 || Number(previous.durableBytes ?? previous.transferred ?? 0) > 0
+    if (sameMetricGeneration && receiverStarted) return true
+  }
+  // A backend heartbeat deliberately reuses the last durable metric sequence
+  // and byte count. It is still newer when it carries a newer elapsed clock or
+  // phase, and must not be discarded by the durable-counter ordering below.
+  if (progress.elapsedHeartbeat && previous.elapsedHeartbeat !== false) {
+    const sameMetric = metricGeneration(progress) === metricGeneration(previous) &&
+      Number(progress.generation ?? 0) === Number(previous.generation ?? 0) &&
+      Number(progress.metricSeq ?? 0) === Number(previous.metricSeq ?? 0) &&
+      Number(progress.durableBytes ?? progress.transferred ?? 0) === Number(previous.durableBytes ?? previous.transferred ?? 0)
+    if (sameMetric && Number(progress.elapsedMs ?? -1) >= Number(previous.elapsedMs ?? -1)) return false
+  }
+  const orderedFields: Array<keyof TransferProgress> = ['checkpointSeq', 'durableBytes', 'metricSeq']
+  let comparable = false
+  let strictlyOlder = false
+  for (const field of orderedFields) {
+    const currentValue = progress[field]
+    const previousValue = previous[field]
+    if (currentValue === undefined || previousValue === undefined) continue
+    const currentNumber = Number(currentValue)
+    const previousNumber = Number(previousValue)
+    if (Number.isFinite(currentNumber) && Number.isFinite(previousNumber) && currentNumber !== previousNumber) {
+      comparable = true
+      if (currentNumber > previousNumber) return false
+      strictlyOlder = true
+    }
+  }
+  // A phase-only event can arrive after a metric snapshot through the Wails
+  // event queue. It must not erase the snapshot's speed/bytes just because it
+  // has no metric sequence of its own.
+  if (previous.metricSeq !== undefined && progress.metricSeq === undefined) {
+    const currentDurable = Number(progress.durableBytes ?? progress.transferred ?? 0)
+    const previousDurable = Number(previous.durableBytes ?? previous.transferred ?? 0)
+    const currentCheckpoint = Number(progress.checkpointSeq ?? 0)
+    const previousCheckpoint = Number(previous.checkpointSeq ?? 0)
+    if (currentDurable <= previousDurable && currentCheckpoint <= previousCheckpoint) return true
+  }
+  if (progress.metricSeq !== undefined && previous.metricSeq !== undefined &&
+      Number(progress.metricSeq) === Number(previous.metricSeq) &&
+      persistenceTransferPhases.has(progress.phase) && ['transferring', 'receiving'].includes(previous.phase)) {
+    return true
+  }
+  // Backend goroutines can stamp events before delivery, so updatedAt is only
+  // a fallback after the monotonic transfer counters have been compared.
+  const updatedAt = Date.parse(progress.updatedAt || '')
+  const previousUpdatedAt = Date.parse(previous.updatedAt || '')
+  if (Number.isFinite(updatedAt) && Number.isFinite(previousUpdatedAt) && updatedAt < previousUpdatedAt) return true
+  // Lifecycle events are valid without throughput counters. They must be able
+  // to move the state while retaining the latest metric fields.
+  if (lifecycleTransferPhases.has(progress.phase)) return false
+  return comparable && strictlyOlder
+}
+
+function mergeMonotonicProgress(previous: TransferProgress | undefined, incoming: TransferProgress): TransferProgress {
+  const next = { ...(previous || {}), ...incoming } as TransferProgress
+  const sameMetricGeneration = !previous || previous.metricGeneration === undefined || incoming.metricGeneration === undefined || metricGeneration(previous) === metricGeneration(incoming)
+  if (sameMetricGeneration && previous?.elapsedMs !== undefined && (next.elapsedMs === undefined || Number(next.elapsedMs) < Number(previous.elapsedMs))) {
+    next.elapsedMs = previous.elapsedMs
+  }
+  if (sameMetricGeneration && previous?.effectiveTransferMs !== undefined && (next.effectiveTransferMs === undefined || Number(next.effectiveTransferMs) < Number(previous.effectiveTransferMs))) {
+    next.effectiveTransferMs = previous.effectiveTransferMs
+  }
+  if (sameMetricGeneration && previous?.metricStartedBytes !== undefined && next.metricStartedBytes === undefined) {
+    next.metricStartedBytes = previous.metricStartedBytes
+  }
+  if (sameMetricGeneration && previous?.metricLastBytes !== undefined && (next.metricLastBytes === undefined || Number(next.metricLastBytes) < Number(previous.metricLastBytes))) {
+    next.metricLastBytes = previous.metricLastBytes
+  }
+  const cumulativeDiagnostics: Array<keyof TransferProgress> = [
+    'receiverWriteMs', 'durabilitySyncMs', 'resumePersistMs', 'ackWaitMs',
+    'finalHashMs', 'destinationCommitMs', 'metadataCommitMs', 'dataTransferMs',
+    'finalizationMs', 'totalDurationMs', 'reconnectCount', 'retransmittedBytes',
+  ]
+  if (sameMetricGeneration && previous) {
+    cumulativeDiagnostics.forEach((field) => {
+      const oldValue = Number(previous[field] ?? 0)
+      const newValue = Number(next[field] ?? 0)
+      if (oldValue > newValue) (next as any)[field] = oldValue
+    })
+  }
+  return next
+}
 
 function requestTime(request: FriendRequest) {
   const updated = Date.parse(request.updatedAt || '')
@@ -114,16 +232,31 @@ export const useChatStore = defineStore('chat', {
         Object.values(this.messages).forEach((list) => list.forEach((item) => { if (item.messageId === value?.messageId) item.status = value.status }))
         return
       }
-      if (name === 'chat:transfer-progress') {
+      if (name === 'transfer-progress') {
         const progress = value as TransferProgress
         if (progress?.attachmentId) {
           const attachmentId = progress.attachmentId
           const activeDirections = this.transferProgressByDirection[attachmentId] || {}
-          const historyDirections = this.transferHistoryByDirection[attachmentId] || {}
-          const directionSnapshot = { ...historyDirections[progress.direction], ...activeDirections[progress.direction], ...progress }
+          let historyDirections = this.transferHistoryByDirection[attachmentId] || {}
+          const existingTerminal = this.transferHistory[attachmentId]
+          if (existingTerminal && isTerminalTransfer(existingTerminal)) {
+            const startsRetry = ['queued', 'retrying', 'resuming'].includes(progress.phase)
+            const comparableGeneration = progress.generation !== undefined && existingTerminal.generation !== undefined
+            const newerGeneration = comparableGeneration && transferGeneration(progress) > transferGeneration(existingTerminal)
+            if (!startsRetry && comparableGeneration && transferGeneration(progress) <= transferGeneration(existingTerminal)) return
+            if (startsRetry || newerGeneration) {
+              delete this.transferHistory[attachmentId]
+              delete this.transferHistoryByDirection[attachmentId]
+              historyDirections = {}
+            }
+          }
+          const previous = activeDirections[progress.direction] || historyDirections[progress.direction]
+          if (progressIsOlder(progress, previous)) return
+          const previousDirection = historyDirections[progress.direction] || activeDirections[progress.direction]
+          const directionSnapshot = mergeMonotonicProgress(previousDirection, progress)
           const directions = { ...historyDirections, ...activeDirections, [progress.direction]: directionSnapshot }
-          const snapshot = { ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId], ...progress }
-          if (['completed', 'canceled', 'rejected', 'failed'].includes(progress.phase)) {
+          const snapshot = mergeMonotonicProgress({ ...this.transferHistory[attachmentId], ...this.transferProgress[attachmentId] }, progress)
+          if (isTerminalTransfer(progress)) {
             this.transferHistory[attachmentId] = snapshot
             this.transferHistoryByDirection[attachmentId] = directions
             delete this.transferProgress[attachmentId]
@@ -144,6 +277,8 @@ export const useChatStore = defineStore('chat', {
       if (name === 'chat:attachment' && !value?.conversationId) {
         Object.values(this.messages).forEach((list) => list.forEach((item) => {
           if (item.attachmentId === value.attachmentId) {
+            const terminal = this.transferHistory[item.attachmentId]
+            if (terminal && isTerminalTransfer(terminal) && !['completed', 'canceled', 'cancelled', 'rejected', 'failed'].includes(value.status)) return
             item.attachmentStatus = value.status
             if (value.localPath) item.attachmentPath = value.localPath
           }
@@ -189,6 +324,12 @@ export const useChatStore = defineStore('chat', {
           if (name === 'chat:message') this.lastMessageEvent = value
         } else {
           const next = list.slice()
+          const previous = next[index]
+          const terminal = previous.attachmentId ? this.transferHistory[previous.attachmentId] : undefined
+          const incomingStatus = value.attachmentStatus || value.status
+          if (terminal && isTerminalTransfer(terminal) && !['completed', 'canceled', 'cancelled', 'rejected', 'failed', 'sent', 'saved'].includes(incomingStatus)) {
+            return
+          }
           // Completion/status events can arrive after the asynchronous image
           // thumbnail event. Do not let an older payload with an empty preview
           // erase the thumbnail already shown in the conversation.
@@ -199,6 +340,13 @@ export const useChatStore = defineStore('chat', {
             attachmentThumbnailMime: value.attachmentThumbnailMime || next[index].attachmentThumbnailMime,
           }
           this.messages[value.conversationId] = next
+        }
+      }
+    },
+    hydrateTransferSnapshots(snapshots: TransferSnapshot[]) {
+      for (const snapshot of snapshots || []) {
+        if (snapshot?.attachmentId && snapshot.direction && snapshot.phase) {
+          this.handleEvent('transfer-progress', snapshot)
         }
       }
     },

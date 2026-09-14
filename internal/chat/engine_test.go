@@ -49,9 +49,14 @@ func TestHelloMessageUsesCanonicalProtocol(t *testing.T) {
 	if message.Protocol != ProtocolName || message.Major != ProtocolMajor || message.Magic != DiscoveryMagic {
 		t.Fatalf("hello did not use canonical dialect: %+v", message)
 	}
-	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "file-window-v2", "file-stream-v3", "file-stream-v4", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2"} {
+	for _, capability := range []string{"text", "image", "file", "file-progress-v1", "binary-frame-v3", "binary-transfer-v3", "range-resume-v3", "folder-manifest-v3", "tls13", "pool-slot-v1", "chunk-ack-v1", "file-resume-v1", "avatar-sync-v1", "offline-v1", "friend-restore-v2", "ack-batch-v1", "transfer-metrics-v1"} {
 		if !hasCapability(message.Capabilities, capability) {
 			t.Fatalf("capability %q missing: %v", capability, message.Capabilities)
+		}
+	}
+	for _, capability := range []string{"file-window-v2", "file-stream-v3", "file-stream-v4"} {
+		if hasCapability(message.Capabilities, capability) {
+			t.Fatalf("legacy capability advertised: %s", capability)
 		}
 	}
 }
@@ -169,6 +174,45 @@ func TestEffectiveAckLatencyExcludesFlushTime(t *testing.T) {
 	}
 }
 
+func TestTransferEWMARejectsSingleSpike(t *testing.T) {
+	value := updateTransferEWMA(100, 500)
+	if value != 200 {
+		t.Fatalf("EWMA spike value = %v, want 200", value)
+	}
+	value = updateTransferEWMA(value, 100)
+	if value != 175 {
+		t.Fatalf("EWMA recovery value = %v, want 175", value)
+	}
+}
+
+func TestV3AdaptiveTunerRequiresHysteresisAndCooldown(t *testing.T) {
+	bad := newV3AdaptiveTuner(maxTransferChunkSize)
+	for index := 0; index < 2; index++ {
+		if sample := bad.Observe(256*1024, 400*time.Millisecond); sample.tuningState == "backing_off" {
+			t.Fatal("v3 tuner backed off before three bad samples")
+		}
+	}
+	if sample := bad.Observe(256*1024, 400*time.Millisecond); sample.tuningState != "backing_off" || bad.chunkBytes != mediumTransferChunkSize {
+		t.Fatalf("third bad sample did not back off: sample=%+v chunk=%d", sample, bad.chunkBytes)
+	}
+	if sample := bad.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "cooldown" {
+		t.Fatalf("first post-adjustment sample skipped cooldown: %+v", sample)
+	}
+	if sample := bad.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "cooldown" {
+		t.Fatalf("second post-adjustment sample skipped cooldown: %+v", sample)
+	}
+
+	good := newV3AdaptiveTuner(minTransferChunkSize)
+	for index := 0; index < 4; index++ {
+		if sample := good.Observe(256*1024, 10*time.Millisecond); sample.tuningState == "accelerating" {
+			t.Fatal("v3 tuner accelerated before five good samples")
+		}
+	}
+	if sample := good.Observe(256*1024, 10*time.Millisecond); sample.tuningState != "accelerating" || good.chunkBytes != mediumTransferChunkSize {
+		t.Fatalf("fifth good sample did not accelerate: sample=%+v chunk=%d", sample, good.chunkBytes)
+	}
+}
+
 func TestBinaryAckTargetTracksInFlightBudget(t *testing.T) {
 	if got := binaryAckTargetForBudget(initialInFlightBytes); got != 8*1024*1024 {
 		t.Fatalf("initial ACK target = %d, want %d", got, 8*1024*1024)
@@ -200,6 +244,127 @@ func TestSmoothTransferSpeedLimitsWindowJumps(t *testing.T) {
 	third := smoothTransferSpeed(second, 12*1024*1024, 100*time.Millisecond)
 	if third >= second || third <= 12*1024*1024 {
 		t.Fatalf("speed drop was not smoothed: second=%v third=%v", second, third)
+	}
+}
+
+func TestTransferProgressPercentRequiresCompletedPhaseFor100(t *testing.T) {
+	if got := transferProgressPercent(100, 100, "transferring"); got != 99 {
+		t.Fatalf("active full transfer percent = %d, want 99", got)
+	}
+	if got := transferProgressPercent(100, 100, "finalizing"); got != 99 {
+		t.Fatalf("finalizing full transfer percent = %d, want 99", got)
+	}
+	if got := transferProgressPercent(100, 100, "completed"); got != 100 {
+		t.Fatalf("completed transfer percent = %d, want 100", got)
+	}
+}
+
+func TestTransferMetricCountsOnlyEffectiveTransferPhases(t *testing.T) {
+	base := time.Unix(100, 0)
+	metric, reset := advanceTransferMetric(transferMetric{}, false, base, 10, "queued", 1)
+	if !reset || metric.activeElapsed != 0 {
+		t.Fatalf("initial metric = %+v reset=%v", metric, reset)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(time.Second), 10, "transferring", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(3*time.Second), 30, "receiving", 1)
+	if metric.activeElapsed != 2*time.Second {
+		t.Fatalf("active elapsed = %s, want 2s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(8*time.Second), 30, "paused_local", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(12*time.Second), 30, "retrying", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(15*time.Second), 30, "resuming", 1)
+	if metric.activeElapsed != 2*time.Second {
+		t.Fatalf("excluded phases changed elapsed to %s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(16*time.Second), 30, "writing", 1)
+	metric, _ = advanceTransferMetric(metric, true, base.Add(19*time.Second), 60, "durability_sync", 1)
+	if metric.activeElapsed != 5*time.Second {
+		t.Fatalf("durable transfer elapsed = %s, want 5s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetric(metric, true, base.Add(25*time.Second), 60, "finalizing", 1)
+	if metric.activeElapsed != 5*time.Second {
+		t.Fatalf("finalization changed elapsed to %s", metric.activeElapsed)
+	}
+	metric, reset = advanceTransferMetric(metric, true, base.Add(30*time.Second), 0, "queued", 2)
+	if !reset || metric.activeElapsed != 0 || metric.generation != 2 {
+		t.Fatalf("new generation did not reset metric: %+v reset=%v", metric, reset)
+	}
+}
+
+func TestTransferMetricKeepsElapsedAcrossPauseAndByteRegression(t *testing.T) {
+	base := time.Unix(200, 0)
+	metric, reset := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 7, 3)
+	if !reset {
+		t.Fatal("initial metric was not created")
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(4*time.Second), 40, "transferring", 7, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(9*time.Second), 40, "paused_local", 99, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(20*time.Second), 20, "resuming", 101, 3)
+	if metric.activeElapsed != 4*time.Second {
+		t.Fatalf("pause or byte regression changed elapsed time: got %s", metric.activeElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(22*time.Second), 40, "receiving", 102, 3)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(24*time.Second), 60, "receiving", 103, 3)
+	if metric.activeElapsed != 6*time.Second || metric.metricGeneration != 3 {
+		t.Fatalf("resume did not continue the logical metric: %+v", metric)
+	}
+}
+
+func TestTransferMetricTotalElapsedIncludesRecoveryAndFinalization(t *testing.T) {
+	base := time.Unix(400, 0)
+	metric, _ := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 1, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(2*time.Second), 10, "retrying", 2, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(5*time.Second), 10, "waiting_network", 3, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(7*time.Second), 10, "verifying", 4, 1)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(9*time.Second), 10, "finalizing", 5, 1)
+	if metric.totalElapsed != 9*time.Second {
+		t.Fatalf("total elapsed = %s, want 9s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(20*time.Second), 10, "paused_local", 6, 1)
+	if metric.totalElapsed != 20*time.Second {
+		t.Fatalf("elapsed at pause = %s, want 20s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(30*time.Second), 10, "resuming", 7, 1)
+	if metric.totalElapsed != 20*time.Second {
+		t.Fatalf("paused elapsed changed = %s", metric.totalElapsed)
+	}
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(32*time.Second), 10, "completed", 8, 1)
+	if metric.totalElapsed != 22*time.Second {
+		t.Fatalf("elapsed after resume = %s, want 22s", metric.totalElapsed)
+	}
+}
+
+func TestTransferMetricOnlyNewLogicalGenerationResets(t *testing.T) {
+	base := time.Unix(300, 0)
+	metric, _ := advanceTransferMetricWithLogicalGeneration(transferMetric{}, false, base, 0, "transferring", 1, 4)
+	metric, _ = advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(3*time.Second), 10, "receiving", 2, 4)
+	metric, reset := advanceTransferMetricWithLogicalGeneration(metric, true, base.Add(4*time.Second), 0, "queued", 3, 5)
+	if !reset || metric.activeElapsed != 0 || metric.metricGeneration != 5 {
+		t.Fatalf("new logical generation did not reset metric: %+v reset=%v", metric, reset)
+	}
+}
+
+func TestPauseAttachmentFromPeerStopsOutgoingTransfer(t *testing.T) {
+	engine := NewEngine()
+	transfer := &outgoingTransfer{
+		message: Message{MessageID: "message", AttachmentID: "attachment", AttachmentSize: 100},
+		peerID:  "peer",
+		pause:   make(chan struct{}),
+		data:    make(map[int]*wireSession),
+	}
+	engine.outgoing[transfer.message.AttachmentID] = transfer
+	engine.pauseAttachmentFromPeer(transfer.message.AttachmentID, transfer.peerID)
+	select {
+	case <-transfer.pause:
+	default:
+		t.Fatal("peer pause did not stop outgoing transfer")
+	}
+	engine.pauseAttachmentFromPeer(transfer.message.AttachmentID, transfer.peerID)
+	engine.transferMetricsMu.Lock()
+	metric := engine.transferMetrics[transfer.message.AttachmentID+"|send"]
+	engine.transferMetricsMu.Unlock()
+	if metric.lastPhase != "paused_peer" {
+		t.Fatalf("peer pause phase = %q", metric.lastPhase)
 	}
 }
 
@@ -272,6 +437,38 @@ func TestReceiverProgressMetricsClampAndAggregate(t *testing.T) {
 	inFlight, _ = parallelReceiverMetricsLocked(parallel)
 	if inFlight != 100 {
 		t.Fatalf("parallel receiver in-flight bytes exceeded file size: %d", inFlight)
+	}
+}
+
+func TestReceiverProgressOptionsKeepLastTuningMetrics(t *testing.T) {
+	window := &incomingFile{
+		expected:           1024,
+		binary:             true,
+		chunkSize:          256,
+		windowBytes:        0,
+		lastChunkSize:      256,
+		lastWindowSize:     16,
+		lastWindowBytes:    4096,
+		lastAckTargetBytes: 8192,
+	}
+	options := receiverProgressOptions(window, nil)
+	if options.windowBytes != 4096 || options.windowSize != 16 || options.chunkSize != 256 || options.ackTargetBytes != 8192 {
+		t.Fatalf("window tuning metrics = chunk=%d window=%d bytes=%d ack=%d", options.chunkSize, options.windowSize, options.windowBytes, options.ackTargetBytes)
+	}
+
+	parallel := &incomingFile{
+		parallel:            true,
+		expected:            1024,
+		parallelStreamCount: 4,
+		lastChunkSize:       1024,
+		lastWindowSize:      4,
+		lastWindowBytes:     16384,
+		lastAckTargetBytes:  32768,
+		parallelRanges:      map[int]*parallelRange{0: {received: 10, acknowledged: 10}},
+	}
+	options = receiverProgressOptions(parallel, nil)
+	if options.windowBytes != 16384 || options.streamCount != 4 || options.activeStreams != 1 || options.ackTargetBytes != 32768 {
+		t.Fatalf("parallel tuning metrics = window=%d streams=%d/%d ack=%d", options.windowBytes, options.activeStreams, options.streamCount, options.ackTargetBytes)
 	}
 }
 

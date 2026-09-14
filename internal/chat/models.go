@@ -30,6 +30,94 @@ const (
 	DiscoveryScopeFriend = "friend"
 )
 
+type TransferErrorCode string
+
+const (
+	ErrCertificateChanged  TransferErrorCode = "CERTIFICATE_CHANGED"
+	ErrDeviceKeyChanged    TransferErrorCode = "DEVICE_KEY_CHANGED"
+	ErrDeviceNotTrusted    TransferErrorCode = "DEVICE_NOT_TRUSTED"
+	ErrFriendshipRequired  TransferErrorCode = "FRIENDSHIP_REQUIRED"
+	ErrSessionNotReady     TransferErrorCode = "SESSION_NOT_READY"
+	ErrChunkVerifyFailed   TransferErrorCode = "CHUNK_VERIFY_FAILED"
+	ErrChecksumMismatch    TransferErrorCode = "CHECKSUM_MISMATCH"
+	ErrSourceFileChanged   TransferErrorCode = "SOURCE_FILE_CHANGED"
+	ErrInsufficientStorage TransferErrorCode = "INSUFFICIENT_DISK_SPACE"
+	ErrFinalizeSyncFailed  TransferErrorCode = "FINALIZE_SYNC_FAILED"
+	ErrDestinationCommit   TransferErrorCode = "DESTINATION_COMMIT_FAILED"
+	ErrResumePersistFailed TransferErrorCode = "RESUME_PERSIST_FAILED"
+	ErrAttachmentPersist   TransferErrorCode = "ATTACHMENT_PERSIST_FAILED"
+	ErrFinalizeIOFailed    TransferErrorCode = "FINALIZE_IO_FAILED"
+)
+
+func classifyTransferError(reason string) TransferErrorCode {
+	reason = strings.ToUpper(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(reason, "CERTIFICATE"):
+		return ErrCertificateChanged
+	case strings.Contains(reason, "DEVICE_KEY"):
+		return ErrDeviceKeyChanged
+	case strings.Contains(reason, "NOT_TRUSTED"):
+		return ErrDeviceNotTrusted
+	case strings.Contains(reason, "FRIENDSHIP"):
+		return ErrFriendshipRequired
+	case strings.Contains(reason, "SESSION"):
+		return ErrSessionNotReady
+	case strings.Contains(reason, "CHUNK") || strings.Contains(reason, "CHECKSUM") || strings.Contains(reason, "SHA"):
+		if strings.Contains(reason, "CHECKSUM") || strings.Contains(reason, "SHA") {
+			return ErrChecksumMismatch
+		}
+		return ErrChunkVerifyFailed
+	case strings.Contains(reason, "SOURCE"):
+		return ErrSourceFileChanged
+	case strings.Contains(reason, "STORAGE") || strings.Contains(reason, "DISK") || strings.Contains(reason, "NO SPACE") || strings.Contains(reason, "ENOSPC") || strings.Contains(reason, "QUOTA"):
+		return ErrInsufficientStorage
+	default:
+		return ""
+	}
+}
+
+// TransferState is the cross-platform lifecycle vocabulary exposed by the
+// desktop service and mirrored by Android. The legacy phase field remains in
+// progress events for UI compatibility; State is the canonical value.
+type TransferState string
+
+const (
+	TransferQueued        TransferState = "queued"
+	TransferActive        TransferState = "active"
+	TransferPausedLocal   TransferState = "paused_local"
+	TransferPausedPeer    TransferState = "paused_peer"
+	TransferPausedNetwork TransferState = "paused_network_unstable"
+	TransferCompleted     TransferState = "completed"
+	TransferCancelled     TransferState = "cancelled"
+	TransferFailed        TransferState = "failed"
+	TransferUnknown       TransferState = "unknown"
+)
+
+func canonicalTransferState(phase string) TransferState {
+	switch phase {
+	case "pending", "queued", "awaiting_acceptance", "preparing", "preparing_thumbnail", "retrying":
+		return TransferQueued
+	case "transferring", "receiving", "resuming", "verifying", "finalizing", "writing", "durability_sync", "checkpoint_persist", "ack_emit", "waiting_network":
+		return TransferActive
+	case "paused", "paused_local":
+		return TransferPausedLocal
+	case "paused_peer":
+		return TransferPausedPeer
+	case "paused_network_unstable", "network_unstable_timeout":
+		return TransferPausedNetwork
+	case "completed":
+		return TransferCompleted
+	case "canceled", "cancelled", "cancelled_by_local", "cancelled_by_peer", "rejected":
+		return TransferCancelled
+	case "failed":
+		return TransferFailed
+	case "unknown":
+		return TransferUnknown
+	default:
+		return TransferUnknown
+	}
+}
+
 type ProtocolDialect struct {
 	Name  string
 	Magic string
@@ -59,17 +147,21 @@ type Profile struct {
 }
 
 type DeviceInfo struct {
-	Platform               string `json:"platform"`
-	OSVersion              string `json:"osVersion"`
-	DeviceID               string `json:"deviceId"`
-	FeiqID                 string `json:"feiqId,omitempty"`
-	PublicKeyPEM           string `json:"publicKeyPem"`
-	CertificateFingerprint string `json:"certificateFingerprint"`
-	IP                     string `json:"ip"`
-	Port                   int    `json:"port"`
-	IdentityStatus         string `json:"identityStatus,omitempty"`
-	ProtocolName           string `json:"protocolName"`
-	ProtocolMajor          int    `json:"protocolMajor"`
+	Platform               string   `json:"platform"`
+	OSVersion              string   `json:"osVersion"`
+	DeviceID               string   `json:"deviceId"`
+	FeiqID                 string   `json:"feiqId,omitempty"`
+	PublicKeyPEM           string   `json:"publicKeyPem"`
+	CertificateFingerprint string   `json:"certificateFingerprint"`
+	IP                     string   `json:"ip"`
+	Port                   int      `json:"port"`
+	LinkType               LinkType `json:"linkType,omitempty"`
+	LinkSpeedMbps          int      `json:"linkSpeedMbps,omitempty"`
+	InterfaceName          string   `json:"interfaceName,omitempty"`
+	LocalAddresses         []string `json:"localAddresses,omitempty"`
+	IdentityStatus         string   `json:"identityStatus,omitempty"`
+	ProtocolName           string   `json:"protocolName"`
+	ProtocolMajor          int      `json:"protocolMajor"`
 }
 
 type Peer struct {
@@ -83,6 +175,11 @@ type Peer struct {
 	OSVersion              string    `json:"osVersion"`
 	IP                     string    `json:"ip"`
 	Port                   int       `json:"port"`
+	DataPort               int       `json:"dataPort"`
+	LinkType               LinkType  `json:"linkType,omitempty"`
+	LinkSpeedMbps          int       `json:"linkSpeedMbps,omitempty"`
+	InterfaceName          string    `json:"interfaceName,omitempty"`
+	LocalAddresses         []string  `json:"localAddresses,omitempty"`
 	PublicKeyPEM           string    `json:"publicKeyPem"`
 	CertificateFingerprint string    `json:"certificateFingerprint"`
 	Relation               string    `json:"relation"`
@@ -137,6 +234,7 @@ type Message struct {
 	AttachmentThumbnailMime string `json:"attachmentThumbnailMime,omitempty"`
 	AttachmentStatus        string `json:"attachmentStatus,omitempty"`
 	AttachmentPath          string `json:"attachmentPath,omitempty"`
+	RelativePath            string `json:"relativePath,omitempty"`
 	IsFavorite              bool   `json:"isFavorite,omitempty"`
 	DeletedAt               string `json:"deletedAt,omitempty"`
 	QuoteMessageID          string `json:"quoteMessageId,omitempty"`
@@ -174,6 +272,18 @@ type ClearConversationResult struct {
 	DeletedFiles         int `json:"deletedFiles"`
 	SkippedExternalFiles int `json:"skippedExternalFiles"`
 	SkippedLocalFiles    int `json:"skippedLocalFiles"`
+}
+
+// DeleteMessagesResult describes a best-effort message deletion. The database
+// rows are removed even when an optional local-file cleanup is skipped.
+type DeleteMessagesResult struct {
+	DeletedMessages      int      `json:"deletedMessages"`
+	DeletedAttachments   int      `json:"deletedAttachments"`
+	DeletedFiles         int      `json:"deletedFiles"`
+	SkippedExternalFiles int      `json:"skippedExternalFiles"`
+	SkippedLocalFiles    int      `json:"skippedLocalFiles"`
+	FailedMessageIDs     []string `json:"failedMessageIds,omitempty"`
+	Errors               []string `json:"errors,omitempty"`
 }
 
 type AttachmentMigrationResult struct {
@@ -338,6 +448,11 @@ type wireMessage struct {
 	OSVersion           string                   `json:"osVersion,omitempty"`
 	IP                  string                   `json:"ip,omitempty"`
 	Port                int                      `json:"port,omitempty"`
+	DataPort            int                      `json:"dataPort,omitempty"`
+	LinkType            LinkType                 `json:"linkType,omitempty"`
+	LinkSpeedMbps       int                      `json:"linkSpeedMbps,omitempty"`
+	InterfaceName       string                   `json:"interfaceName,omitempty"`
+	LocalAddresses      []string                 `json:"localAddresses,omitempty"`
 	PublicKey           string                   `json:"publicKey,omitempty"`
 	CertFP              string                   `json:"certificateFingerprint,omitempty"`
 	Content             string                   `json:"content,omitempty"`
@@ -386,6 +501,7 @@ type wireMessage struct {
 	RelativePath        string                   `json:"relativePath,omitempty"`
 	SharedFolderID      string                   `json:"sharedFolderId,omitempty"`
 	TransferID          string                   `json:"transferId,omitempty"`
+	Announcement        bool                     `json:"announcement,omitempty"`
 	TransferToken       string                   `json:"transferToken,omitempty"`
 	StreamID            int                      `json:"streamId,omitempty"`
 	StreamCount         int                      `json:"streamCount,omitempty"`
@@ -397,6 +513,7 @@ type wireMessage struct {
 	CompletedRanges     []TransferRange          `json:"completedRanges,omitempty"`
 	Resume              bool                     `json:"resume,omitempty"`
 	Entries             []SharedEntry            `json:"entries,omitempty"`
+	Manifest            []ManifestEntryV3        `json:"manifest,omitempty"`
 	SharedFolders       []SharedFolder           `json:"sharedFolders,omitempty"`
 	ListOffset          int                      `json:"listOffset,omitempty"`
 	ListLimit           int                      `json:"listLimit,omitempty"`

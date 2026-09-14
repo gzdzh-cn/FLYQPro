@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"path/filepath"
@@ -56,6 +57,10 @@ type peerRow struct {
 	OSVersion              string `orm:"os_version"`
 	IP                     string `orm:"ip"`
 	Port                   int    `orm:"port"`
+	LinkType               string `orm:"link_type"`
+	LinkSpeedMbps          int    `orm:"link_speed_mbps"`
+	InterfaceName          string `orm:"interface_name"`
+	LocalAddresses         string `orm:"local_addresses"`
 	PublicKeyPEM           string `orm:"public_key_pem"`
 	CertificateFingerprint string `orm:"certificate_fingerprint"`
 	Relation               string `orm:"relation"`
@@ -131,6 +136,35 @@ type attachmentMigrationRow struct {
 	PeerDeviceID string `orm:"peer_device_id"`
 }
 
+type transferResumeRow struct {
+	AttachmentID       string `orm:"attachment_id"`
+	TransferID         string `orm:"transfer_id"`
+	MessageID          string `orm:"message_id"`
+	SenderDeviceID     string `orm:"sender_device_id"`
+	Direction          string `orm:"direction"`
+	SessionID          string `orm:"session_id"`
+	Generation         uint64 `orm:"generation"`
+	MetricGeneration   uint64 `orm:"metric_generation"`
+	CheckpointSeq      uint64 `orm:"checkpoint_seq"`
+	MetricSeq          uint64 `orm:"metric_seq"`
+	ElapsedMs          int64  `orm:"elapsed_ms"`
+	MetricStartedBytes int64  `orm:"metric_started_bytes"`
+	MetricLastBytes    int64  `orm:"metric_last_bytes"`
+	FileName           string `orm:"file_name"`
+	FileSize           int64  `orm:"file_size"`
+	SHA256             string `orm:"sha256"`
+	SourceMTimeNS      int64  `orm:"source_mtime_ns"`
+	Retries            int    `orm:"retries"`
+	ErrorCode          string `orm:"error_code"`
+	Retryable          int    `orm:"retryable"`
+	TempPath           string `orm:"temp_path"`
+	TargetPath         string `orm:"target_path"`
+	TransferMode       string `orm:"transfer_mode"`
+	CompletedRanges    string `orm:"completed_ranges"`
+	Status             string `orm:"status"`
+	UpdatedAt          string `orm:"updated_at"`
+}
+
 type ConversationAttachment struct {
 	Attachment
 	SenderDeviceID string `json:"senderDeviceId"`
@@ -151,6 +185,144 @@ func exec(ctx context.Context, sql string, args ...any) error {
 		return err
 	}
 	return fmt.Errorf("数据库尚未初始化")
+}
+
+func saveTransferResumeRecord(ctx context.Context, state transferResumeState) error {
+	ranges, err := json.Marshal(normalizeTransferRanges(state.CompletedRanges, state.FileSize))
+	if err != nil {
+		return err
+	}
+	return exec(ctx, `INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, metric_generation=excluded.metric_generation, checkpoint_seq=excluded.checkpoint_seq, metric_seq=excluded.metric_seq, elapsed_ms=excluded.elapsed_ms, metric_started_bytes=excluded.metric_started_bytes, metric_last_bytes=excluded.metric_last_bytes, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
+		state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, metricGenerationOrDefault(state.MetricGeneration), state.CheckpointSeq, state.MetricSeq, state.ElapsedMs, state.MetricStartedBytes, state.MetricLastBytes, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), nowString())
+}
+
+func saveTransferCheckpointRecord(ctx context.Context, state transferResumeState, snapshot TransferSnapshot) error {
+	ranges, err := json.Marshal(normalizeTransferRanges(state.CompletedRanges, state.FileSize))
+	if err != nil {
+		return err
+	}
+	if snapshot.AttachmentID == "" {
+		snapshot.AttachmentID = state.AttachmentID
+	}
+	if snapshot.MessageID == "" {
+		snapshot.MessageID = state.MessageID
+	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	database := db.DB()
+	if database == nil {
+		return fmt.Errorf("数据库尚未初始化")
+	}
+	now := nowString()
+	return database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`INSERT INTO transfer_resumes(attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(attachment_id) DO UPDATE SET transfer_id=excluded.transfer_id, message_id=excluded.message_id, sender_device_id=excluded.sender_device_id, direction=excluded.direction, session_id=excluded.session_id, generation=excluded.generation, metric_generation=excluded.metric_generation, checkpoint_seq=excluded.checkpoint_seq, metric_seq=excluded.metric_seq, elapsed_ms=excluded.elapsed_ms, metric_started_bytes=excluded.metric_started_bytes, metric_last_bytes=excluded.metric_last_bytes, file_name=excluded.file_name, file_size=excluded.file_size, sha256=excluded.sha256, source_mtime_ns=excluded.source_mtime_ns, retries=excluded.retries, error_code=excluded.error_code, retryable=excluded.retryable, temp_path=excluded.temp_path, target_path=excluded.target_path, transfer_mode=excluded.transfer_mode, completed_ranges=excluded.completed_ranges, status=excluded.status, updated_at=excluded.updated_at`,
+			state.AttachmentID, state.TransferID, state.MessageID, state.SenderDeviceID, state.Direction, state.SessionID, state.Generation, metricGenerationOrDefault(state.MetricGeneration), state.CheckpointSeq, state.MetricSeq, state.ElapsedMs, state.MetricStartedBytes, state.MetricLastBytes, state.FileName, state.FileSize, state.SHA256, state.SourceMTimeNS, state.Retries, string(state.ErrorCode), boolInt(state.Retryable), state.TempPath, state.TargetPath, state.TransferMode, string(ranges), string(state.State), now); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO transfer_snapshot_directions(attachment_id, direction, message_id, snapshot_json, updated_at)
+			VALUES(?, ?, ?, ?, ?)
+			ON CONFLICT(attachment_id, direction) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+			snapshot.AttachmentID, snapshot.Direction, snapshot.MessageID, string(payload), now)
+		return err
+	})
+}
+
+func loadTransferResumeRecord(ctx context.Context, attachmentID string) (transferResumeState, error) {
+	var rows []transferResumeRow
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes WHERE attachment_id=? LIMIT 1`, attachmentID)
+	if err != nil {
+		return transferResumeState{}, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return transferResumeState{}, err
+	}
+	if len(rows) == 0 {
+		return transferResumeState{}, fmt.Errorf("resume record not found")
+	}
+	row := rows[0]
+	var ranges []TransferRange
+	if err := json.Unmarshal([]byte(row.CompletedRanges), &ranges); err != nil {
+		return transferResumeState{}, err
+	}
+	updatedAt := parseTime(row.UpdatedAt)
+	if updatedAt.IsZero() {
+		return transferResumeState{}, fmt.Errorf("resume record timestamp invalid")
+	}
+	return transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, MetricGeneration: metricGenerationOrDefault(row.MetricGeneration), CheckpointSeq: row.CheckpointSeq, MetricSeq: row.MetricSeq, ElapsedMs: row.ElapsedMs, MetricStartedBytes: row.MetricStartedBytes, MetricLastBytes: row.MetricLastBytes, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: ranges, UpdatedAt: updatedAt}, nil
+}
+
+func listTransferResumeRecords(ctx context.Context) ([]transferResumeState, error) {
+	var rows []transferResumeRow
+	result, err := query(ctx, `SELECT attachment_id, transfer_id, message_id, sender_device_id, direction, session_id, generation, metric_generation, checkpoint_seq, metric_seq, elapsed_ms, metric_started_bytes, metric_last_bytes, file_name, file_size, sha256, source_mtime_ns, retries, error_code, retryable, temp_path, target_path, transfer_mode, completed_ranges, status, updated_at FROM transfer_resumes ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	states := make([]transferResumeState, 0, len(rows))
+	for _, row := range rows {
+		var ranges []TransferRange
+		if err := json.Unmarshal([]byte(row.CompletedRanges), &ranges); err != nil {
+			continue
+		}
+		updatedAt := parseTime(row.UpdatedAt)
+		if updatedAt.IsZero() {
+			continue
+		}
+		states = append(states, transferResumeState{Version: transferResumeVersion, TransferID: row.TransferID, AttachmentID: row.AttachmentID, MessageID: row.MessageID, SenderDeviceID: row.SenderDeviceID, Direction: row.Direction, SessionID: row.SessionID, Generation: row.Generation, MetricGeneration: metricGenerationOrDefault(row.MetricGeneration), CheckpointSeq: row.CheckpointSeq, MetricSeq: row.MetricSeq, ElapsedMs: row.ElapsedMs, MetricStartedBytes: row.MetricStartedBytes, MetricLastBytes: row.MetricLastBytes, FileName: row.FileName, FileSize: row.FileSize, SHA256: row.SHA256, SourceMTimeNS: row.SourceMTimeNS, Retries: row.Retries, ErrorCode: TransferErrorCode(row.ErrorCode), Retryable: row.Retryable != 0, TempPath: row.TempPath, TargetPath: row.TargetPath, TransferMode: row.TransferMode, State: TransferState(row.Status), CompletedRanges: normalizeTransferRanges(ranges, row.FileSize), UpdatedAt: updatedAt})
+	}
+	return states, nil
+}
+
+func markTransferResumeTerminal(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
+	return markTransferResumeTerminalWithRanges(ctx, attachmentID, state, code, retryable, false)
+}
+
+// markTransferResumeTerminalWithRanges keeps verified ranges for a retryable
+// finalization failure, so recovery can retry the finalization without
+// retransmitting the file.
+func markTransferResumeTerminalWithRanges(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable, preserveRanges bool) error {
+	query := `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, updated_at=? WHERE attachment_id=?`
+	args := []any{string(state), string(code), boolInt(retryable), nowString(), attachmentID}
+	if !preserveRanges {
+		query = `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, completed_ranges='[]', updated_at=? WHERE attachment_id=?`
+	}
+	if err := exec(ctx, query, args...); err != nil {
+		return err
+	}
+	if state == TransferCompleted {
+		return nil
+	}
+	// Failed and cancelled records remain inspectable. Mirror their terminal
+	// state to the compatibility sidecar before callers optionally remove the
+	// partial payload; successful completion is the only path that cleans it.
+	record, err := loadTransferResumeRecord(ctx, attachmentID)
+	if err != nil {
+		return nil
+	}
+	record.State, record.ErrorCode, record.Retryable = state, code, retryable
+	if !preserveRanges {
+		record.CompletedRanges = nil
+	}
+	return saveTransferResumeState(record)
+}
+
+func updateTransferResumeStatus(ctx context.Context, attachmentID string, state TransferState, code TransferErrorCode, retryable bool) error {
+	return exec(ctx, `UPDATE transfer_resumes SET status=?, error_code=?, retryable=?, updated_at=? WHERE attachment_id=?`, string(state), string(code), boolInt(retryable), nowString(), attachmentID)
+}
+
+func updateTransferResumeMetric(ctx context.Context, attachmentID string, metricGeneration uint64, elapsedMs, startedBytes, lastBytes int64, metricSeq uint64) error {
+	return exec(ctx, `UPDATE transfer_resumes SET metric_generation=?, elapsed_ms=?, metric_started_bytes=?, metric_last_bytes=?, metric_seq=?, updated_at=? WHERE attachment_id=?`, metricGenerationOrDefault(metricGeneration), elapsedMs, startedBytes, lastBytes, metricSeq, nowString(), attachmentID)
 }
 
 func EnsureDefaults(ctx context.Context, defaultPath string) error {
@@ -399,10 +571,10 @@ func UpsertPeer(ctx context.Context, peer Peer) error {
 	if peer.Relation == PeerRelation {
 		visibleInFriends = true
 	}
-	if err := exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), COALESCE((SELECT relationship_version FROM peers WHERE device_id=?), ?), ?, ?, ?)
-		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, relationship_version=CASE WHEN excluded.relationship_version='' THEN peers.relationship_version ELSE excluded.relationship_version END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
-		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.DeviceID, peer.RelationshipVersion, peer.LastSeen, nowString(), nowString()); err != nil {
+	if err := exec(ctx, `INSERT INTO peers(device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, link_type, link_speed_mbps, interface_name, local_addresses, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT relation FROM peers WHERE device_id=?), ?), COALESCE((SELECT remark FROM peers WHERE device_id=?), ''), ?, ?, ?, ?, ?, COALESCE((SELECT visible_in_friends FROM peers WHERE device_id=?), ?), COALESCE((SELECT relationship_version FROM peers WHERE device_id=?), ?), ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET nickname=excluded.nickname, avatar_path=CASE WHEN excluded.avatar_path='' THEN peers.avatar_path ELSE excluded.avatar_path END, avatar_hash=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_hash ELSE excluded.avatar_hash END, avatar_version=CASE WHEN excluded.avatar_hash='' THEN peers.avatar_version ELSE excluded.avatar_version END, platform=excluded.platform, os_version=excluded.os_version, ip=excluded.ip, port=excluded.port, link_type=CASE WHEN excluded.link_type='' THEN peers.link_type ELSE excluded.link_type END, link_speed_mbps=CASE WHEN excluded.link_speed_mbps=0 THEN peers.link_speed_mbps ELSE excluded.link_speed_mbps END, interface_name=CASE WHEN excluded.interface_name='' THEN peers.interface_name ELSE excluded.interface_name END, local_addresses=CASE WHEN excluded.local_addresses='' THEN peers.local_addresses ELSE excluded.local_addresses END, public_key_pem=excluded.public_key_pem, certificate_fingerprint=excluded.certificate_fingerprint, protocol_name=CASE WHEN excluded.protocol_name='' THEN peers.protocol_name ELSE excluded.protocol_name END, protocol_major=CASE WHEN excluded.protocol_major=0 THEN peers.protocol_major ELSE excluded.protocol_major END, discovery_magic=CASE WHEN excluded.discovery_magic='' THEN peers.discovery_magic ELSE excluded.discovery_magic END, capabilities=CASE WHEN excluded.capabilities='' THEN peers.capabilities ELSE excluded.capabilities END, discovery_visible=excluded.discovery_visible, relationship_version=CASE WHEN excluded.relationship_version='' THEN peers.relationship_version ELSE excluded.relationship_version END, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
+		peer.DeviceID, peer.Nickname, peer.AvatarPath, peer.AvatarHash, peer.AvatarVersion, peer.Platform, peer.OSVersion, peer.IP, peer.Port, peer.LinkType, peer.LinkSpeedMbps, peer.InterfaceName, strings.Join(peer.LocalAddresses, ","), peer.PublicKeyPEM, peer.CertificateFingerprint, peer.DeviceID, peer.Relation, peer.DeviceID, peer.ProtocolName, peer.ProtocolMajor, peer.DiscoveryMagic, strings.Join(peer.Capabilities, ","), boolInt(peer.DiscoveryVisible), peer.DeviceID, boolInt(visibleInFriends), peer.DeviceID, peer.RelationshipVersion, peer.LastSeen, nowString(), nowString()); err != nil {
 		return err
 	}
 	// visible_in_friends is kept for compatibility with older databases, but
@@ -494,7 +666,7 @@ func SetPeerAvatar(ctx context.Context, deviceID, avatarPath, avatarHash string,
 }
 
 func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
-	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, updated_at FROM peers`
+	sql := `SELECT device_id, nickname, avatar_path, avatar_hash, avatar_version, platform, os_version, ip, port, link_type, link_speed_mbps, interface_name, local_addresses, public_key_pem, certificate_fingerprint, relation, remark, protocol_name, protocol_major, discovery_magic, capabilities, discovery_visible, visible_in_friends, relationship_version, last_seen, updated_at FROM peers`
 	args := []any{}
 	if relation != "" {
 		sql += ` WHERE relation=?`
@@ -511,7 +683,7 @@ func ListPeers(ctx context.Context, relation string) ([]Peer, error) {
 	}
 	peers := make([]Peer, 0, len(rows))
 	for _, row := range rows {
-		peer := Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, VisibleInFriends: row.VisibleInFriends != 0, RelationshipVersion: row.RelationshipVersion, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)}
+		peer := Peer{DeviceID: row.DeviceID, Nickname: row.Nickname, AvatarPath: row.AvatarPath, AvatarHash: row.AvatarHash, AvatarVersion: row.AvatarVersion, Platform: row.Platform, OSVersion: row.OSVersion, IP: row.IP, Port: row.Port, LinkType: LinkType(row.LinkType), LinkSpeedMbps: row.LinkSpeedMbps, InterfaceName: row.InterfaceName, LocalAddresses: splitCapabilities(row.LocalAddresses), PublicKeyPEM: row.PublicKeyPEM, CertificateFingerprint: row.CertificateFingerprint, Relation: row.Relation, Remark: row.Remark, ProtocolName: row.ProtocolName, ProtocolMajor: row.ProtocolMajor, DiscoveryMagic: row.DiscoveryMagic, Capabilities: splitCapabilities(row.Capabilities), DiscoveryVisible: row.DiscoveryVisible != 0, VisibleInFriends: row.VisibleInFriends != 0, RelationshipVersion: row.RelationshipVersion, LastSeen: row.LastSeen, Online: recent(row.LastSeen), UpdatedAt: parseTime(row.UpdatedAt)}
 		// Older builds persisted a full contact removal directly as
 		// relation=removed. Normalize it to the current retained-contact
 		// state so it can show "不是好友". Do not overwrite the saved local
@@ -828,6 +1000,9 @@ func DeleteConversationRecords(ctx context.Context, peerDeviceID string) (int, i
 		return 0, 0, err
 	}
 	if err := database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`DELETE FROM transfer_snapshots WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id IN (SELECT m.message_id FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?))`, peerDeviceID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM attachments WHERE message_id IN (SELECT m.message_id FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE c.peer_device_id=?)`, peerDeviceID); err != nil {
 			return err
 		}
@@ -992,6 +1167,15 @@ func UpdateMessageLocalState(ctx context.Context, messageID string, favorite boo
 }
 
 func DeleteMessageRecord(ctx context.Context, messageID string) error {
+	if err := exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
+	if err := exec(ctx, `DELETE FROM transfer_snapshot_directions WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
+	if err := exec(ctx, `DELETE FROM transfer_resumes WHERE attachment_id IN (SELECT attachment_id FROM attachments WHERE message_id=?)`, messageID); err != nil {
+		return err
+	}
 	return exec(ctx, `DELETE FROM messages WHERE message_id=?`, messageID)
 }
 
@@ -1064,6 +1248,31 @@ func SaveAttachment(ctx context.Context, attachment Attachment) error {
 	return exec(ctx, `INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET sha256=CASE WHEN excluded.sha256 != '' THEN excluded.sha256 ELSE attachments.sha256 END, thumbnail_data=CASE WHEN excluded.thumbnail_data != '' THEN excluded.thumbnail_data ELSE attachments.thumbnail_data END, thumbnail_mime=CASE WHEN excluded.thumbnail_mime != '' THEN excluded.thumbnail_mime ELSE attachments.thumbnail_mime END, local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.ThumbnailData, attachment.ThumbnailMime, attachment.LocalPath, attachment.Status, nowString())
 }
 
+// commitIncomingFinalizationMetadata makes the visible attachment, message and
+// recovery terminal state one atomic SQLite commit. The returned code preserves
+// which logical step failed without exposing database internals to the wire.
+func commitIncomingFinalizationMetadata(ctx context.Context, attachment Attachment) (TransferErrorCode, error) {
+	database := db.DB()
+	if database == nil {
+		return ErrAttachmentPersist, fmt.Errorf("数据库尚未初始化")
+	}
+	code := ErrAttachmentPersist
+	err := database.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Exec(`INSERT INTO attachments(attachment_id, message_id, file_name, mime_type, file_size, sha256, thumbnail_data, thumbnail_mime, local_path, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attachment_id) DO UPDATE SET sha256=CASE WHEN excluded.sha256 != '' THEN excluded.sha256 ELSE attachments.sha256 END, thumbnail_data=CASE WHEN excluded.thumbnail_data != '' THEN excluded.thumbnail_data ELSE attachments.thumbnail_data END, thumbnail_mime=CASE WHEN excluded.thumbnail_mime != '' THEN excluded.thumbnail_mime ELSE attachments.thumbnail_mime END, local_path=excluded.local_path, status=excluded.status`, attachment.AttachmentID, attachment.MessageID, attachment.FileName, attachment.MimeType, attachment.FileSize, attachment.SHA256, attachment.ThumbnailData, attachment.ThumbnailMime, attachment.LocalPath, attachment.Status, nowString()); err != nil {
+			return fmt.Errorf("attachment metadata: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE messages SET status=? WHERE message_id=?`, "sent", attachment.MessageID); err != nil {
+			return fmt.Errorf("message metadata: %w", err)
+		}
+		code = ErrResumePersistFailed
+		if _, err := tx.Exec(`UPDATE transfer_resumes SET status=?, error_code='', retryable=0, updated_at=? WHERE attachment_id=?`, string(TransferCompleted), nowString(), attachment.AttachmentID); err != nil {
+			return fmt.Errorf("resume metadata: %w", err)
+		}
+		return nil
+	})
+	return code, err
+}
+
 func ListAttachmentMigrationRows(ctx context.Context) ([]attachmentMigrationRow, error) {
 	var rows []attachmentMigrationRow
 	result, err := query(ctx, `SELECT a.attachment_id, a.message_id, a.file_name, a.local_path, a.file_size, a.sha256, a.status, c.peer_device_id
@@ -1116,6 +1325,134 @@ func GetAttachment(ctx context.Context, id string) (Attachment, error) {
 	}
 	row := rows[0]
 	return Attachment{AttachmentID: row.AttachmentID, MessageID: row.MessageID, FileName: row.FileName, MimeType: row.MimeType, FileSize: row.FileSize, SHA256: row.SHA256, ThumbnailData: row.ThumbnailData, ThumbnailMime: row.ThumbnailMime, LocalPath: row.LocalPath, Status: row.Status}, nil
+}
+
+// saveTransferSnapshot keeps the latest UI/diagnostic projection independently
+// from the resumable .part record. Completed transfers deliberately keep this
+// snapshot so the chat bubble and details view remain useful after restart.
+func saveTransferSnapshot(ctx context.Context, snapshot TransferSnapshot) error {
+	if snapshot.AttachmentID == "" {
+		return fmt.Errorf("transfer snapshot attachment id is empty")
+	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	if err := exec(ctx, `INSERT INTO transfer_snapshots(attachment_id, message_id, snapshot_json, updated_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(attachment_id) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+		snapshot.AttachmentID, snapshot.MessageID, string(payload), nowString()); err != nil {
+		return err
+	}
+	return saveTransferSnapshotDirection(ctx, snapshot)
+}
+
+func saveTransferSnapshotDirection(ctx context.Context, snapshot TransferSnapshot) error {
+	if snapshot.AttachmentID == "" {
+		return fmt.Errorf("transfer snapshot attachment id is empty")
+	}
+	if snapshot.Direction == "" {
+		snapshot.Direction = "receive"
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return exec(ctx, `INSERT INTO transfer_snapshot_directions(attachment_id, direction, message_id, snapshot_json, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(attachment_id, direction) DO UPDATE SET message_id=excluded.message_id, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`,
+		snapshot.AttachmentID, snapshot.Direction, snapshot.MessageID, string(payload), nowString())
+}
+
+func loadTransferSnapshotDirection(ctx context.Context, attachmentID, direction string) (TransferSnapshot, error) {
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshot_directions WHERE attachment_id=? AND direction=? LIMIT 1`, attachmentID, direction)
+	if err != nil {
+		return TransferSnapshot{}, err
+	}
+	if err := result.Structs(&rows); err != nil || len(rows) == 0 {
+		if err != nil {
+			return TransferSnapshot{}, err
+		}
+		return TransferSnapshot{}, fmt.Errorf("directional transfer snapshot not found")
+	}
+	var snapshot TransferSnapshot
+	if err := json.Unmarshal([]byte(rows[0].SnapshotJSON), &snapshot); err != nil {
+		return TransferSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func loadTransferSnapshot(ctx context.Context, attachmentID string) (TransferSnapshot, error) {
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshots WHERE attachment_id=? LIMIT 1`, attachmentID)
+	if err != nil {
+		return TransferSnapshot{}, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return TransferSnapshot{}, err
+	}
+	if len(rows) == 0 {
+		return TransferSnapshot{}, fmt.Errorf("transfer snapshot not found")
+	}
+	var snapshot TransferSnapshot
+	if err := json.Unmarshal([]byte(rows[0].SnapshotJSON), &snapshot); err != nil {
+		return TransferSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func listTransferSnapshots(ctx context.Context) ([]TransferSnapshot, error) {
+	var directionalRows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	directionalResult, directionalErr := query(ctx, `SELECT snapshot_json FROM transfer_snapshot_directions ORDER BY updated_at DESC`)
+	items := make([]TransferSnapshot, 0)
+	seen := make(map[string]struct{})
+	if directionalErr == nil && directionalResult.Structs(&directionalRows) == nil {
+		for _, row := range directionalRows {
+			var snapshot TransferSnapshot
+			if json.Unmarshal([]byte(row.SnapshotJSON), &snapshot) == nil && snapshot.AttachmentID != "" {
+				key := snapshot.AttachmentID + "|" + snapshot.Direction
+				seen[key] = struct{}{}
+				items = append(items, snapshot)
+			}
+		}
+	}
+	var rows []struct {
+		SnapshotJSON string `orm:"snapshot_json"`
+	}
+	result, err := query(ctx, `SELECT snapshot_json FROM transfer_snapshots ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.Structs(&rows); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		var snapshot TransferSnapshot
+		if err := json.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil && snapshot.AttachmentID != "" {
+			key := snapshot.AttachmentID + "|" + snapshot.Direction
+			if _, exists := seen[key]; !exists {
+				items = append(items, snapshot)
+			}
+		}
+	}
+	return items, nil
+}
+
+func deleteTransferSnapshot(ctx context.Context, attachmentID string) error {
+	if err := exec(ctx, `DELETE FROM transfer_snapshots WHERE attachment_id=?`, attachmentID); err != nil {
+		return err
+	}
+	return exec(ctx, `DELETE FROM transfer_snapshot_directions WHERE attachment_id=?`, attachmentID)
 }
 
 func parseTime(value string) time.Time { t, _ := time.Parse(time.RFC3339Nano, value); return t }

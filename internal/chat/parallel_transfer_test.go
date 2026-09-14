@@ -6,18 +6,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 )
@@ -37,8 +34,15 @@ func parallelTestIdentity(t *testing.T) (Identity, tls.Certificate) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := Identity{PrivateKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})), CertificatePEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))}
-	identity.DeviceID = "sender"
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := Identity{DeviceInfo: DeviceInfo{
+		DeviceID:               sha256Hex(publicDER),
+		PublicKeyPEM:           string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
+		CertificateFingerprint: sha256Hex(der),
+	}, PrivateKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})), CertificatePEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))}
 	cert, err := identity.TLSCertificate()
 	if err != nil {
 		t.Fatal(err)
@@ -46,148 +50,46 @@ func parallelTestIdentity(t *testing.T) (Identity, tls.Certificate) {
 	return identity, cert
 }
 
-// Exercise the real TLS join, sender, range writer and final control ACK. A slow
-// reader makes ACK spacing exceed the old 200 ms stream-launch threshold.
-func TestParallelTransferSlowTLSCompletesAllRanges(t *testing.T) {
-	runParallelTLS(t, 36*1024*1024+17, 300*time.Millisecond)
+func pinnedTestPeer(identity Identity, certificate tls.Certificate) Peer {
+	return Peer{
+		DeviceID:               identity.DeviceID,
+		PublicKeyPEM:           identity.PublicKeyPEM,
+		CertificateFingerprint: sha256Hex(certificate.Certificate[0]),
+	}
 }
 
-func TestParallelTransferLargeTLS(t *testing.T) {
+// Exercise production v3 TLS workers, durable ranges and final binary confirmation.
+func TestV3ParallelTLSCompletesAllRanges(t *testing.T) {
+	runParallelTLS(t, 36*1024*1024+17)
+}
+
+func TestV3LargeTLS(t *testing.T) {
 	value := os.Getenv("FLYQPRO_TRANSFER_TEST_BYTES")
 	if value == "" {
 		t.Skip("set FLYQPRO_TRANSFER_TEST_BYTES for a large TCP/TLS transfer")
 	}
-	size, err := strconv.Atoi(value)
-	if err != nil || size < 4 {
+	size64, err := strconv.ParseInt(value, 10, 63)
+	if err != nil || size64 < 4 || int64(int(size64)) != size64 {
 		t.Fatal("invalid FLYQPRO_TRANSFER_TEST_BYTES")
 	}
-	runParallelTLS(t, size, 0)
+	runs := 5
+	if rawRuns := os.Getenv("FLYQPRO_TRANSFER_RUNS"); rawRuns != "" {
+		parsed, parseErr := strconv.Atoi(rawRuns)
+		if parseErr != nil || parsed <= 0 {
+			t.Fatalf("invalid FLYQPRO_TRANSFER_RUNS %q", rawRuns)
+		}
+		runs = parsed
+	}
+	sizes := make([]int, runs)
+	for index := range sizes {
+		sizes[index] = int(size64)
+	}
+	runV3TLS(t, sizes, 4, false)
 }
 
-func runParallelTLS(t *testing.T, size int, delay time.Duration) {
+func runParallelTLS(t *testing.T, size int) {
 	t.Helper()
-	identity, cert := parallelTestIdentity(t)
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	root := t.TempDir()
-	source, err := os.Create(filepath.Join(root, "source"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	block := make([]byte, 1024*1024)
-	digest := sha256.New()
-	for offset := 0; offset < size; {
-		if _, err := rand.Read(block); err != nil {
-			t.Fatal(err)
-		}
-		n := min(len(block), size-offset)
-		if _, err := source.Write(block[:n]); err != nil {
-			t.Fatal(err)
-		}
-		digest.Write(block[:n])
-		offset += n
-	}
-	target, err := os.Create(filepath.Join(root, "target.part"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
-	if err := target.Truncate(int64(size)); err != nil {
-		t.Fatal(err)
-	}
-	message := Message{MessageID: "message", AttachmentID: "attachment", AttachmentSize: int64(size)}
-	receiver := NewEngine()
-	transfer := &incomingFile{file: target, expected: int64(size), attachmentID: message.AttachmentID, messageID: message.MessageID, senderID: "sender", parallel: true, transferToken: "token", parallelStreamCount: 4, parallelRanges: make(map[int]*parallelRange), parallelSessions: make(map[int]*wireSession)}
-	receiver.incoming[message.AttachmentID] = transfer
-	var workers sync.WaitGroup
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				defer conn.Close()
-				stop := context.AfterFunc(ctx, func() { conn.Close() })
-				defer stop()
-				reader := newWireReader(conn)
-				var hello, join wireMessage
-				if reader.Decode(&hello) != nil {
-					return
-				}
-				if writeWire(conn, wireMessage{Type: "hello_ack", Capabilities: []string{fileParallelCapability}, FriendshipState: "friend"}) != nil {
-					return
-				}
-				if reader.Decode(&join) != nil {
-					return
-				}
-				if join.Type == "test_control" {
-					var complete wireMessage
-					if reader.Decode(&complete) != nil {
-						return
-					}
-					hash := sha256.New()
-					_, copyErr := io.Copy(hash, io.NewSectionReader(target, 0, int64(size)))
-					status := "completed"
-					if copyErr != nil || fmt.Sprintf("%x", hash.Sum(nil)) != fmt.Sprintf("%x", digest.Sum(nil)) {
-						status = "failed"
-					}
-					_ = writeWire(conn, wireMessage{Type: "file_progress", AttachmentID: message.AttachmentID, Transferred: int64(size), Status: status})
-					return
-				}
-				reader = newWireReader(&slowParallelReader{Reader: reader.reader, delay: delay})
-				receiver.receiveParallelStream(reader, conn, hello, join)
-			}()
-		}
-	}()
-	defer func() { cancel(); listener.Close(); <-accepted; workers.Wait() }()
-	sender := NewEngine()
-	sender.identity = identity
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
-	config, err := sender.clientTLSConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	controlConn, err := tls.Dial("tcp", listener.Addr().String(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer controlConn.Close()
-	stop := context.AfterFunc(ctx, func() { controlConn.Close() })
-	defer stop()
-	controlReader := newWireReader(controlConn)
-	if err := writeWire(controlConn, wireMessage{Type: "hello", DeviceID: "sender"}); err != nil {
-		t.Fatal(err)
-	}
-	var helloAck wireMessage
-	if err := controlReader.Decode(&helloAck); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeWire(controlConn, wireMessage{Type: "test_control"}); err != nil {
-		t.Fatal(err)
-	}
-	control := newWireSession(controlConn)
-	sender.outgoing[message.AttachmentID] = &outgoingTransfer{session: control}
-	started := time.Now()
-	if err := sender.transferParallelFile(ctx, peer, message, source, control, controlReader, protocolDialects[0], "token", 4, "dzhgo/3"); err != nil {
-		t.Fatal(err)
-	}
-	transfer.parallelMu.Lock()
-	defer transfer.parallelMu.Unlock()
-	if len(transfer.parallelRanges) != 4 || transfer.parallelWritten != int64(size) {
-		t.Fatalf("incomplete ranges: %d, bytes: %d", len(transfer.parallelRanges), transfer.parallelWritten)
-	}
-	t.Logf("mode=parallel-binary streams=4 bytes=%d elapsed=%s confirmed=%.1fMB/S sha256=verified", size, time.Since(started), float64(size)/time.Since(started).Seconds()/1e6)
+	runV3TLS(t, []int{size}, 4, false)
 }
 
 func TestParallelLaunchAlwaysSchedulesRemainingRanges(t *testing.T) {
@@ -268,7 +170,9 @@ func TestParallelJoinCancellationInterruptsHandshake(t *testing.T) {
 	}()
 	sender := NewEngine()
 	sender.identity = identity
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	peer := pinnedTestPeer(identity, cert)
+	peer.IP = "127.0.0.1"
+	peer.Port = listener.Addr().(*net.TCPAddr).Port
 	result := make(chan error, 1)
 	go func() {
 		session, _, err := sender.openParallelDataStream(ctx, peer, protocolDialects[0], Message{AttachmentID: "attachment"}, "token", 0, 1, 0, 1024, parallelChunkSize)
@@ -351,7 +255,9 @@ func TestParallelFailureAckInterruptsBlockedWrite(t *testing.T) {
 	sender.identity = identity
 	message := Message{AttachmentID: "attachment", AttachmentSize: size}
 	sender.outgoing[message.AttachmentID] = &outgoingTransfer{session: newWireSession(nil)}
-	peer := Peer{DeviceID: "receiver", IP: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	peer := pinnedTestPeer(identity, cert)
+	peer.IP = "127.0.0.1"
+	peer.Port = listener.Addr().(*net.TCPAddr).Port
 	updates := make(chan parallelStreamProgress, 32)
 	done := make(chan struct{})
 	go func() {

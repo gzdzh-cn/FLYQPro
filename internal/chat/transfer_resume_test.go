@@ -47,8 +47,166 @@ func TestTransferResumeStateRoundTripAndRangeNormalization(t *testing.T) {
 	}
 }
 
+func TestTransferSnapshotRoundTripKeepsTerminalMetrics(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	verified := true
+	want := TransferSnapshot{
+		AttachmentID:  "snapshot-attachment",
+		TransferID:    "snapshot-transfer",
+		MessageID:     "snapshot-message",
+		Direction:     "receive",
+		State:         TransferCompleted,
+		Phase:         "completed",
+		Transferred:   128,
+		DurableBytes:  128,
+		Total:         128,
+		Percent:       100,
+		Speed:         7 * 1024 * 1024,
+		ElapsedMs:     2400,
+		MetricSeq:     9,
+		CheckpointSeq: 4,
+		Verified:      &verified,
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if err := saveTransferSnapshot(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadTransferSnapshot(ctx, want.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AttachmentID != want.AttachmentID || got.State != TransferCompleted || got.DurableBytes != want.DurableBytes || got.ElapsedMs != want.ElapsedMs || got.MetricSeq != want.MetricSeq || got.Verified == nil || !*got.Verified {
+		t.Fatalf("snapshot roundtrip lost terminal metrics: got %+v", got)
+	}
+}
+
+func TestDirectionalTransferSnapshotsDoNotOverwriteElapsedMetrics(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	save := func(direction string, elapsed int64) {
+		t.Helper()
+		if err := saveTransferSnapshot(ctx, TransferSnapshot{
+			AttachmentID: "directional-snapshot", TransferID: "directional-snapshot", Direction: direction,
+			State: TransferActive, Phase: "receiving", Total: 100, Transferred: elapsed,
+			DurableBytes: elapsed, ElapsedMs: elapsed * 100, MetricGeneration: 2,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("send", 20)
+	save("remote-receive", 80)
+	send, err := loadTransferSnapshotDirection(ctx, "directional-snapshot", "send")
+	if err != nil || send.ElapsedMs != 2000 {
+		t.Fatalf("send snapshot was overwritten: snapshot=%+v err=%v", send, err)
+	}
+	remote, err := loadTransferSnapshotDirection(ctx, "directional-snapshot", "remote-receive")
+	if err != nil || remote.ElapsedMs != 8000 {
+		t.Fatalf("remote snapshot was overwritten: snapshot=%+v err=%v", remote, err)
+	}
+}
+
+func TestResumeCheckpointPersistsDirectionalSnapshotAtomically(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	ctx := context.Background()
+	state := transferResumeState{
+		AttachmentID:     "atomic-checkpoint",
+		TransferID:       "atomic-checkpoint",
+		MessageID:        "atomic-message",
+		Direction:        "receive",
+		FileSize:         8192,
+		CheckpointSeq:    7,
+		CompletedRanges:  []TransferRange{{Offset: 0, Length: 4096}},
+		State:            TransferActive,
+		MetricGeneration: 2,
+		ElapsedMs:        1200,
+	}
+	snapshot := snapshotFromResume(state)
+	snapshot.Speed = 3 * 1024 * 1024
+	snapshot.Phase = "checkpoint_persist"
+	snapshot.UpdatedAt = time.Now().UTC()
+	if err := saveTransferResumeCheckpoint(state, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	resume, err := loadTransferResumeRecord(ctx, state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume.CheckpointSeq != state.CheckpointSeq || contiguousTransferOffset(resume.CompletedRanges, resume.FileSize) != 4096 {
+		t.Fatalf("resume checkpoint mismatch: %+v", resume)
+	}
+	directional, err := loadTransferSnapshotDirection(ctx, state.AttachmentID, "receive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directional.CheckpointSeq != state.CheckpointSeq || directional.Speed != snapshot.Speed || directional.DurableBytes != 4096 {
+		t.Fatalf("directional checkpoint mismatch: %+v", directional)
+	}
+}
+
+func TestResumeSnapshotRestoresElapsedMetricFields(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	state := transferResumeState{AttachmentID: "elapsed-resume", TransferID: "elapsed-resume", Direction: "receive", FileSize: 100, State: TransferPausedLocal, MetricGeneration: 4, ElapsedMs: 3700, MetricStartedBytes: 5, MetricLastBytes: 60}
+	if err := saveTransferResumeRecord(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTransferResumeRecord(ctx, state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MetricGeneration != 4 || loaded.ElapsedMs != 3700 || loaded.MetricStartedBytes != 5 || loaded.MetricLastBytes != 60 {
+		t.Fatalf("metric fields were not persisted: %+v", loaded)
+	}
+	snapshot := snapshotFromResume(loaded)
+	if snapshot.ElapsedMs != 3700 || snapshot.MetricGeneration != 4 || snapshot.MetricLastBytes != 60 {
+		t.Fatalf("resume snapshot lost metric fields: %+v", snapshot)
+	}
+}
+
+func TestResumeIncomingAttachmentKeepsAcceptedResumingState(t *testing.T) {
+	ctx := openSharedFolderTestDatabase(t)
+	conversationID, err := EnsureConversation(ctx, "resume-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := Message{
+		MessageID:        "resume-incoming-message",
+		ConversationID:   conversationID,
+		SenderDeviceID:   "resume-peer",
+		Kind:             "file",
+		Content:          "resume.bin",
+		Status:           "paused",
+		CreatedAt:        nowString(),
+		AttachmentID:     "resume-incoming-attachment",
+		AttachmentName:   "resume.bin",
+		AttachmentSize:   128,
+		AttachmentStatus: "paused",
+	}
+	if err := SaveMessage(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAttachment(ctx, Attachment{AttachmentID: message.AttachmentID, MessageID: message.MessageID, FileName: message.AttachmentName, FileSize: message.AttachmentSize, Status: "paused"}); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	engine.identity.DeviceID = "local-device"
+	resumed, err := engine.ResumeAttachment(ctx, message.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Status != "resuming" || resumed.AttachmentStatus != "resuming" {
+		t.Fatalf("resume returned initial-offer state: %+v", resumed)
+	}
+	stored, err := GetMessage(ctx, message.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "resuming" || stored.AttachmentStatus != "resuming" {
+		t.Fatalf("resume persisted initial-offer state: %+v", stored)
+	}
+}
+
 func TestTransferResumeStateRejectsExpiredAndMismatchedIdentity(t *testing.T) {
-	t.Setenv("FLYQPRO_DATA_DIR", t.TempDir())
+	openSharedFolderTestDatabase(t)
 	state := transferResumeState{AttachmentID: "attachment-2", MessageID: "message", SenderDeviceID: "sender", FileSize: 10, SHA256: "hash"}
 	part, _, _ := transferResumePaths(state.AttachmentID)
 	if err := os.MkdirAll(filepath.Dir(part), 0o700); err != nil {
@@ -78,8 +236,253 @@ func TestTransferResumeStateRejectsExpiredAndMismatchedIdentity(t *testing.T) {
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := exec(context.Background(), `UPDATE transfer_resumes SET updated_at=? WHERE attachment_id=?`, loaded.UpdatedAt.UTC().Format(time.RFC3339Nano), loaded.AttachmentID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := loadTransferResumeState(state.AttachmentID); err == nil {
 		t.Fatal("expired resume state was accepted")
+	}
+}
+
+func TestTransferResumeChoosesNewestCheckpointWithoutMerging(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	attachmentID := "checkpoint-choice"
+	part, sidecar, err := transferResumePaths(attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(part), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	databaseState := transferResumeState{Version: transferResumeVersion, AttachmentID: attachmentID, TransferID: attachmentID, Direction: "receive", FileSize: 100, CheckpointSeq: 2, State: TransferPausedNetwork, CompletedRanges: []TransferRange{{Offset: 0, Length: 40}}, UpdatedAt: time.Now().UTC()}
+	if err := saveTransferResumeRecord(context.Background(), databaseState); err != nil {
+		t.Fatal(err)
+	}
+	sidecarState := databaseState
+	sidecarState.CheckpointSeq = 1
+	sidecarState.CompletedRanges = []TransferRange{{Offset: 60, Length: 20}}
+	encoded, err := json.Marshal(sidecarState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTransferResumeState(attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TransferRange{{Offset: 0, Length: 40}}
+	if loaded.CheckpointSeq != 2 || !reflect.DeepEqual(loaded.CompletedRanges, want) {
+		t.Fatalf("newest checkpoint not selected: %+v", loaded)
+	}
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err = loadTransferResumeState(attachmentID); err != nil || loaded.CheckpointSeq != 2 {
+		t.Fatalf("SQLite fallback failed: state=%+v err=%v", loaded, err)
+	}
+	// A newer record that claims bytes beyond the durable .part length must
+	// never override an older, valid checkpoint.
+	if err := os.Truncate(part, 80); err != nil {
+		t.Fatal(err)
+	}
+	databaseState.CheckpointSeq = 3
+	databaseState.CompletedRanges = []TransferRange{{Offset: 90, Length: 10}}
+	databaseState.UpdatedAt = time.Now().UTC()
+	if err := saveTransferResumeRecord(context.Background(), databaseState); err != nil {
+		t.Fatal(err)
+	}
+	sidecarState.CompletedRanges = []TransferRange{{Offset: 0, Length: 60}}
+	encoded, err = json.Marshal(sidecarState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = loadTransferResumeState(attachmentID)
+	if err != nil || loaded.CheckpointSeq != 1 || !reflect.DeepEqual(loaded.CompletedRanges, sidecarState.CompletedRanges) {
+		t.Fatalf("out-of-bounds checkpoint was selected: state=%+v err=%v", loaded, err)
+	}
+}
+
+func TestOutgoingResumePersistsConfirmedRangesInBoundedCheckpoints(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	const size = int64(8 * 1024 * 1024)
+	state := transferResumeState{AttachmentID: "outgoing-checkpoint", TransferID: "outgoing-checkpoint", Direction: "send", FileSize: size, SourceMTimeNS: 10, State: TransferQueued}
+	if err := persistOutgoingResumeState(state); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := loadTransferResumeRecord(context.Background(), state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine()
+	engine.outgoing[state.AttachmentID] = &outgoingTransfer{resumeState: persisted}
+	if err := engine.persistOutgoingConfirmedRange(state.AttachmentID, 0, 1024*1024, "session-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	row, err := loadTransferResumeRecord(context.Background(), state.AttachmentID)
+	if err != nil || len(row.CompletedRanges) != 0 {
+		t.Fatalf("sub-threshold checkpoint was persisted: state=%+v err=%v", row, err)
+	}
+	if err := engine.persistOutgoingConfirmedRange(state.AttachmentID, 1024*1024, 4*1024*1024, "session-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	row, err = loadTransferResumeRecord(context.Background(), state.AttachmentID)
+	if err != nil || contiguousTransferOffset(row.CompletedRanges, row.FileSize) != 4*1024*1024 || row.Generation != 7 || row.SessionID != "session-1" {
+		t.Fatalf("bounded checkpoint missing: state=%+v err=%v", row, err)
+	}
+	if err := engine.persistOutgoingConfirmedRange(state.AttachmentID, 4*1024*1024, size, "session-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	row, err = loadTransferResumeRecord(context.Background(), state.AttachmentID)
+	if err != nil || contiguousTransferOffset(row.CompletedRanges, row.FileSize) != size {
+		t.Fatalf("final checkpoint missing: state=%+v err=%v", row, err)
+	}
+	_, sidecar, err := transferResumePaths(state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("outgoing checkpoint sidecar missing: %v", err)
+	}
+}
+
+func TestOutgoingResumeLoadsSidecarWithoutPartFile(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	source := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(source, bytes.Repeat([]byte("x"), 128), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attachmentID := "outgoing-sidecar"
+	_, sidecar, err := transferResumePaths(attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := transferResumeState{Version: transferResumeVersion, AttachmentID: attachmentID, TransferID: attachmentID, Direction: "send", FileSize: 128, TargetPath: source, CheckpointSeq: 4, State: TransferPausedNetwork, CompletedRanges: []TransferRange{{Offset: 0, Length: 64}}, UpdatedAt: time.Now().UTC()}
+	if err := os.MkdirAll(filepath.Dir(sidecar), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec(context.Background(), `DELETE FROM transfer_resumes WHERE attachment_id=?`, attachmentID); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTransferResumeState(attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CheckpointSeq != 4 || contiguousTransferOffset(loaded.CompletedRanges, loaded.FileSize) != 64 {
+		t.Fatalf("sidecar-only outgoing recovery failed: %+v", loaded)
+	}
+}
+
+func TestOutgoingResumeDetectsSourceMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := transferResumeState{Direction: "send", FileSize: info.Size(), SourceMTimeNS: info.ModTime().UnixNano()}
+	if outgoingResumeSourceChanged(state, info) {
+		t.Fatal("unchanged source was rejected")
+	}
+	state.SourceMTimeNS--
+	if !outgoingResumeSourceChanged(state, info) {
+		t.Fatal("source mtime change was not detected")
+	}
+}
+
+func TestOutgoingResumeValidationRejectsChangedSource(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(source, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := transferResumeState{
+		Version:       transferResumeVersion,
+		AttachmentID:  "source-validation",
+		Direction:     "send",
+		FileSize:      info.Size(),
+		SourceMTimeNS: info.ModTime().UnixNano(),
+		TargetPath:    source,
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if err := validateTransferResumeCandidateWithSource(state, state.AttachmentID, -1); err != nil {
+		t.Fatalf("unchanged source rejected: %v", err)
+	}
+	if err := os.WriteFile(source, []byte("changed-size"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTransferResumeCandidateWithSource(state, state.AttachmentID, -1); err == nil {
+		t.Fatal("changed source was accepted for recovery")
+	}
+}
+
+func TestRecoveryTasksIncludeOnlyRecoverableTerminalFailures(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	for _, state := range []transferResumeState{
+		{AttachmentID: "retryable-failure", TransferID: "retryable-failure", Direction: "send", FileSize: 1, State: TransferFailed, ErrorCode: ErrSessionNotReady, Retryable: true, UpdatedAt: time.Now().UTC()},
+		{AttachmentID: "permanent-failure", TransferID: "permanent-failure", Direction: "send", FileSize: 1, State: TransferFailed, ErrorCode: ErrDeviceKeyChanged, Retryable: false, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := saveTransferResumeRecord(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tasks := NewEngine().ListRecoveryTasks()
+	if len(tasks) != 1 || tasks[0].TransferID != "retryable-failure" || !tasks[0].Retryable {
+		t.Fatalf("unexpected recovery task list: %+v", tasks)
+	}
+}
+
+func TestTerminalFailureKeepsSidecarAndClearsRecoverableRanges(t *testing.T) {
+	openSharedFolderTestDatabase(t)
+	state := transferResumeState{AttachmentID: "terminal-evidence", TransferID: "terminal-evidence", Direction: "receive", FileSize: 16, State: TransferActive, CompletedRanges: []TransferRange{{Offset: 0, Length: 8}}}
+	part, sidecar, err := transferResumePaths(state.AttachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(part), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, make([]byte, state.FileSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveTransferResumeState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := markTransferResumeTerminal(context.Background(), state.AttachmentID, TransferFailed, ErrChunkVerifyFailed, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("terminal sidecar missing: %v", err)
+	}
+	var terminal transferResumeState
+	if err := json.Unmarshal(data, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.State != TransferFailed || terminal.ErrorCode != ErrChunkVerifyFailed || len(terminal.CompletedRanges) != 0 {
+		t.Fatalf("terminal evidence invalid: %+v", terminal)
+	}
+	if _, err := os.Stat(part); err != nil {
+		t.Fatalf("verification failure lost part file: %v", err)
 	}
 }
 

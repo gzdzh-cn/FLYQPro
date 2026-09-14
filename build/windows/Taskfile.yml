@@ -56,6 +56,23 @@ tasks:
       WIX_ARCH: '{{if eq .ARCH "arm64"}}arm64{{else}}x64{{end}}'
       VERSION: '{{.VERSION | default "0.1.1"}}'
 
+  # Release-only task. All three artifacts are signed in one step and the
+  # command fails closed when a certificate or signtool is not configured.
+  package:signed:
+    summary: Builds and Authenticode-signs EXE, NSIS and MSI artifacts
+    deps:
+      - task: build
+        vars:
+          PRODUCTION: "true"
+      - task: create:nsis:installer
+      - task: package:msi
+    cmds:
+      - cmd: >-
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if ([string]::IsNullOrWhiteSpace($env:FLYQPRO_SIGNTOOL)) { throw 'FLYQPRO_SIGNTOOL is required' }; if ([string]::IsNullOrWhiteSpace($env:FLYQPRO_CERT_SHA1)) { throw 'FLYQPRO_CERT_SHA1 is required' }; if ([string]::IsNullOrWhiteSpace($env:FLYQPRO_TIMESTAMP_URL)) { throw 'FLYQPRO_TIMESTAMP_URL is required' }; $files = @('{{.ROOT_DIR}}\\{{.BIN_DIR}}\\{{.APP_NAME}}.exe','{{.ROOT_DIR}}\\{{.BIN_DIR}}\\{{.APP_NAME}}-{{.ARCH}}-installer.exe','{{.ROOT_DIR}}\\{{.BIN_DIR}}\\{{.APP_NAME}}-{{.ARCH}}.msi'); foreach ($file in $files) { if (!(Test-Path -LiteralPath $file)) { throw \\"Missing artifact: $file\\" }; & $env:FLYQPRO_SIGNTOOL sign /sha1 $env:FLYQPRO_CERT_SHA1 /fd SHA256 /tr $env:FLYQPRO_TIMESTAMP_URL /td SHA256 $file; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & $env:FLYQPRO_SIGNTOOL verify /pa /all $file; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }"
+        platforms: [windows]
+      - cmd: sh -c 'echo "Windows signing is only available on a Windows host" >&2; exit 2'
+        platforms: [linux, darwin]
+
   generate:syso:
     summary: Generates Windows `.syso` file
     dir: build

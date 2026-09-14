@@ -7,9 +7,9 @@ FlyQPro; `dzhgo` is the canonical communication protocol name.
 
 `dzhgo` is the only supported protocol dialect. The protocol major version is `3`, and discovery uses `DZHGO_DISCOVERY_V1`.
 
-Every discovery request, announcement, TLS hello, and response must use the exact tuple `dzhgo` / `DZHGO_DISCOVERY_V1` / `2`. An unknown protocol name, magic value, major version, or unmet `minMajor` is rejected. There is no protocol-name fallback.
+Every discovery request, announcement, TLS hello, and response must use the exact tuple `dzhgo` / `DZHGO_DISCOVERY_V1` / `3`. An unknown protocol name, magic value, major version, or unmet `minMajor` is rejected. There is no protocol-name fallback.
 
-Peers persist the negotiated `protocolName`, `protocolMajor`, `discoveryMagic`, and `capabilities`; valid peers are always recorded as the canonical dzhgo/v2 dialect.
+Peers persist the negotiated `protocolName`, `protocolMajor`, `discoveryMagic`, and `capabilities`; valid peers are always recorded as the canonical dzhgo/v3 dialect.
 
 ## Discovery
 
@@ -26,9 +26,9 @@ Example announcement:
   "magic": "DZHGO_DISCOVERY_V1",
   "type": "announce",
   "protocol": "dzhgo",
-  "major": 2,
+  "major": 3,
   "minor": 0,
-  "minMajor": 2,
+  "minMajor": 3,
   "deviceId": "sha256-of-public-key",
   "nickname": "Alice",
   "avatarHash": "sha256-of-avatar",
@@ -44,18 +44,18 @@ Example announcement:
 
 ## Chat connection
 
-- Control transport: TLS 1.3 or newer.
-- File data transport: QUIC (`dzhgo/3`) with binary streams; JSON/base64 file chunks are not supported.
+- Control transport: TLS 1.3 over the persistent TCP session pool.
+- File data transport: authenticated binary streams over the TLS/TCP pool (`dzhgo/3`). QUIC is optional experimental transport and must be negotiated explicitly; it is never a silent fallback.
 - Control frames: newline-delimited UTF-8 JSON.
-- Files: base64 encoded 32 KiB JSON chunks.
+- Files: binary v3 frames with chunk hashes, session/generation binding, ACKs and durable resume ranges.
 - Device identity: ECDSA P-256 public key SHA-256.
 - Certificate fingerprint: SHA-256 of the DER encoded X.509 certificate.
 
 The first frame is `hello`; the peer answers with `hello_ack` using the same
 negotiated dialect. Friend requests and messages are rejected until the local
-database marks the device as a friend. Unknown optional frames and fields may be ignored by other dzhgo/v2 clients, while text, image, and ordinary file behavior remains stable.
+database marks the device as a friend. Unknown optional frames and fields may be ignored by other dzhgo/v3 clients, while text, image, and ordinary file behavior remains stable. A v2 or older peer is rejected with `VERSION_TOO_OLD`; file transfer must not silently fall back to JSON/base64.
 
-The capabilities `avatar-sync-v1`, `file-progress-v1`, `attachment-demand-v1`, `offline-v1`, and `friend-restore-v2` are optional dzhgo/v2 features and are used when advertised by both sides. With `attachment-demand-v1`, a `file_offer` carries metadata and an optional sender-generated thumbnail first; the original file is sent only after `file_accept`. Older peers continue using the direct-transfer behavior.
+The capabilities `avatar-sync-v1`, `file-progress-v1`, `attachment-demand-v1`, `offline-v1`, `friend-restore-v2`, `binary-transfer-v3`, `range-resume-v3`, and `folder-manifest-v3` are optional dzhgo/v3 features and are used when advertised by both sides. With `attachment-demand-v1`, a `file_offer` carries metadata and an optional sender-generated thumbnail first; the original file is sent only after `file_accept`.
 
 When a FlyQPro service stops normally, it may broadcast an optional `offline`
 discovery frame. Receivers keep friends in the list and mark them offline;

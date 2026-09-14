@@ -1,26 +1,66 @@
 package chat
 
-import "testing"
+import (
+	"context"
+	"crypto/tls"
+	"net"
+	"testing"
+	"time"
+)
 
-func TestTuneV3Profiles(t *testing.T) {
-	if got := TuneV3(LinkProfile{Type: LinkEthernet, SpeedMbps: 1000}, 1<<30); got.Streams != 4 || got.FrameBytes != 1<<20 {
-		t.Fatalf("gigabit tuning: %+v", got)
+var _ V3DataTransport = (*tlsTCPV3DataTransport)(nil)
+var _ V3DataTransport = (*QUICTransport)(nil)
+
+func TestSelectV3TransportRequiresFivePercentGainAndIntegrity(t *testing.T) {
+	tcp := TransportABResult{Kind: TransportTLSTCP, TotalTime: 10 * time.Second, FirstByte: 100 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 5, Successes: 5}
+	if got := SelectV3Transport(tcp, TransportABResult{Kind: TransportQUIC, TotalTime: 9 * time.Second, FirstByte: 100 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 5, Successes: 5}); got != TransportQUIC {
+		t.Fatalf("expected QUIC after >=5%% gain, got %s", got)
 	}
-	if got := TuneV3(LinkProfile{Type: LinkEthernet, SpeedMbps: 100}, 1<<30); got.Streams != 2 {
-		t.Fatalf("fast ethernet tuning: %+v", got)
+	if got := SelectV3Transport(tcp, TransportABResult{Kind: TransportQUIC, TotalTime: 9*time.Second + 600*time.Millisecond, FirstByte: 100 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 5, Successes: 5}); got != TransportTLSTCP {
+		t.Fatalf("expected TCP for sub-5%% gain, got %s", got)
 	}
-	if got := TuneV3(LinkProfile{Type: LinkWiFi}, 1<<30); got.FrameBytes != 512<<10 {
-		t.Fatalf("wifi tuning: %+v", got)
+	if got := SelectV3Transport(tcp, TransportABResult{Kind: TransportQUIC, TotalTime: 8 * time.Second, FirstByte: 106 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 5, Successes: 5}); got != TransportTLSTCP {
+		t.Fatalf("expected TCP when first byte regresses over 5%%, got %s", got)
 	}
-	if got := TuneV3(LinkProfile{}, 1<<20); got.Streams != 1 {
-		t.Fatalf("small file tuning: %+v", got)
+	if got := SelectV3Transport(tcp, TransportABResult{Kind: TransportQUIC, TotalTime: 8 * time.Second, FirstByte: 100 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 4, Successes: 4}); got != TransportTLSTCP {
+		t.Fatalf("expected TCP until five successful samples exist, got %s", got)
+	}
+	if got := SelectV3Transport(tcp, TransportABResult{Kind: TransportQUIC, TotalTime: 8 * time.Second, FirstByte: 100 * time.Millisecond, Recovered: true, SHA256Verified: true, Samples: 5, Successes: 4}); got != TransportTLSTCP {
+		t.Fatalf("expected TCP when one QUIC sample failed, got %s", got)
 	}
 }
 
-func TestV3FrameBinaryLayout(t *testing.T) {
-	f := V3Frame{TransferID: "a", StreamID: 2, Offset: 3, Length: 4}
-	b := f.MarshalBinary()
-	if len(b) != 4+1+4+8+4+32 {
-		t.Fatalf("unexpected frame size %d", len(b))
+func TestTLSTCPDataTransportUsesSharedStreamContract(t *testing.T) {
+	_, certificate := parallelTestIdentity(t)
+	listener, err := ListenV3Data("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{certificate}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Listener.Accept()
+		if acceptErr == nil {
+			defer conn.Close()
+			buffer := make([]byte, 1)
+			_, acceptErr = conn.Read(buffer)
+		}
+		done <- acceptErr
+	}()
+	port := listener.Listener.Addr().(*net.TCPAddr).Port
+	transport := newTLSTCPV3DataTransport([]string{"127.0.0.1"}, port, &tls.Config{InsecureSkipVerify: true})
+	if transport.Kind() != TransportTLSTCP {
+		t.Fatalf("unexpected kind: %s", transport.Kind())
+	}
+	conn, err := transport.OpenStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

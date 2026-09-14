@@ -11,7 +11,7 @@ info:
   description: "局域网点对点聊天工具"
   copyright: "(c) 2026, DZH"
   comments: "飞秋Pro 桌面应用"
-  version: "v0.1.0"
+  version: "v0.1.2"
 
 # Dev mode configuration
 dev_mode:

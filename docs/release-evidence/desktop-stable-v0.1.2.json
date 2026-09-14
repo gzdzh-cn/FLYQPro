@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "release": "desktop-v0.1.2-stable",
+  "status": "pass",
+  "delivery": "local-usable-unsigned",
+  "platform": "macOS",
+  "osMinimum": "11.0",
+  "architecture": "arm64",
+  "transport": "TLS13/TCP-v3",
+  "buildId": "local-2026-09-12",
+  "commit": "dirty-worktree",
+  "worktree": "dirty-worktree-preserved",
+  "network": "IPv4 loopback",
+  "artifacts": {
+    "app": "bin/飞秋Pro.app",
+    "dmg": "bin/飞秋Pro-macos-arm64.dmg",
+    "signature": "adhoc",
+    "notarization": "blocked: Developer ID credentials unavailable"
+  },
+  "checks": [
+    {"name": "go-tests", "status": "pass", "evidence": "go test ./... -count=2 -shuffle=on -timeout=180s"},
+    {"name": "go-race", "status": "pass", "evidence": "go test -race ./internal/chat/... -timeout=180s"},
+    {"name": "frontend-build", "status": "pass", "evidence": "npm run build"},
+    {"name": "report-schema", "status": "pass", "evidence": "hack/validate-release-evidence.py"},
+    {"name": "macos-info-plist", "status": "pass", "evidence": "CFBundleShortVersionString=0.1.2; LSMinimumSystemVersion=11.0.0"},
+    {"name": "mach-o-minos", "status": "pass", "evidence": "otool -l: LC_BUILD_VERSION minos 11.0"},
+    {"name": "macos-app-launch", "status": "pass", "evidence": "open -n -a bin/飞秋Pro.app; process observed and exited after probe"},
+    {"name": "desktop-transfer-100m-x5", "status": "pass", "evidence": "transfer-validation-100m-local.json"},
+    {"name": "developer-id-notarization", "status": "blocked", "evidence": "external signing credentials required"},
+    {"name": "windows-install-upgrade", "status": "blocked", "evidence": "Windows host required"},
+    {"name": "android-real-device", "status": "blocked", "evidence": "real device and SAF matrix required"}
+  ],
+  "knownWarnings": [
+    "Go linker reports some temporary objects built with macOS 26 SDK while linking for deployment target 11.0.",
+    "Frontend production build reports large chunks; build succeeds."
+  ],
+  "deferred": ["android", "windows", "quic", "database-encryption"]
+}

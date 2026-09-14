@@ -103,18 +103,41 @@ export interface AttachmentDetails {
 }
 
 export interface TransferProgress {
+  eventVersion?: number
   messageId?: string
   attachmentId: string
   peerDeviceId?: string
+  transferId?: string
+  sessionId?: string
+  generation?: number
+  metricGeneration?: number
+  slotId?: number
+  retries?: number
+  errorCode?: string
+  retryable?: boolean
+  goodSamples?: number
+  badSamples?: number
+  state?: 'queued' | 'active' | 'paused_local' | 'paused_peer' | 'paused_network_unstable' | 'completed' | 'cancelled' | 'failed' | string
+  durableBytes?: number
   transferred: number
   total: number
   percent: number
   speed?: number
+  metricSource?: 'receiver-durable' | string
+  metricSeq?: number
+	checkpointSeq?: number
+	checkpointCount?: number
+  localSendSpeed?: number
   averageSpeed?: number
   peakSpeed?: number
   rawSpeed?: number
   etaSeconds?: number
   elapsedMs?: number
+  effectiveTransferMs?: number
+  elapsedHeartbeat?: boolean
+  stageUpdatedAt?: string
+  metricStartedBytes?: number
+  metricLastBytes?: number
   chunkSize?: number
   windowSize?: number
   windowBytes?: number
@@ -125,8 +148,23 @@ export interface TransferProgress {
   ackWaitMs?: number
   confirmedThroughput?: number
   ackLatencyMs?: number
-  diskWriteMs?: number
-  transferMode?: 'parallel-binary' | 'binary-window' | 'json-window' | 'legacy-chunk' | string
+	diskWriteMs?: number
+	controlDialMs?: number
+	offerWaitMs?: number
+	dataSlotDialMs?: number
+	firstFrameMs?: number
+	receiverWriteMs?: number
+	durabilitySyncMs?: number
+	resumePersistMs?: number
+	finalHashMs?: number
+	destinationCommitMs?: number
+	metadataCommitMs?: number
+	dataTransferMs?: number
+	finalizationMs?: number
+	totalDurationMs?: number
+	reconnectCount?: number
+  retransmittedBytes?: number
+	transferMode?: 'parallel-binary' | 'binary-window' | 'json-window' | 'legacy-chunk' | string
   streamCount?: number
   activeStreams?: number
   streamId?: number
@@ -141,8 +179,27 @@ export interface TransferProgress {
   sent?: number
   received?: number
   remoteReceived?: number
+  /** Unified receiver-durable projection used by bubble and detail views. */
+  primarySpeed?: number
+  primaryBytes?: number
+  primaryElapsedMs?: number
+  receiverMetricsAvailable?: boolean
+  roleDiagnostics?: {
+    localSendSpeed?: number
+    ackLatencyMs?: number
+    diskWriteMs?: number
+    checkpointSeq?: number
+    activeStreams?: number
+  }
   direction: 'send' | 'receive' | 'remote-receive'
-  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
+  phase: 'awaiting_acceptance' | 'transferring' | 'receiving' | 'writing' | 'durability_sync' | 'checkpoint_persist' | 'ack_emit' | 'verifying' | 'finalizing' | 'waiting_network' | 'retrying' | 'paused' | 'paused_local' | 'paused_peer' | 'paused_network_unstable' | 'resuming' | 'completed' | 'canceled' | 'rejected' | 'failed' | string
+}
+
+export interface TransferSnapshot extends TransferProgress {
+  attachmentId: string
+  messageId?: string
+  transferId?: string
+  peerDeviceId?: string
 }
 
 export type TransferProgressByDirection = Partial<Record<TransferProgress['direction'], TransferProgress>>

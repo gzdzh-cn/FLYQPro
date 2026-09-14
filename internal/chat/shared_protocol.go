@@ -1,14 +1,10 @@
 package chat
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -243,7 +239,15 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 		_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: message.TransferID, Status: SharedPathInvalidError})
 		return
 	}
-	entry, path, err := GetSharedEntry(root, message.RelativePath, false)
+	if message.DataPort > 0 {
+		hello.DataPort = message.DataPort
+	}
+	useV3 := hello.Major >= ProtocolMajor && hello.DataPort > 0 && hasCapability(hello.Capabilities, "binary-frame-v3")
+	if hello.Major >= ProtocolMajor && !useV3 {
+		_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: message.TransferID, Status: "v3 shared data port required"})
+		return
+	}
+	entry, path, err := GetSharedEntry(root, message.RelativePath, useV3)
 	if err != nil || entry.IsDirectory {
 		status := SharedPathInvalidError
 		if err != nil && strings.Contains(err.Error(), SharedUnavailableError) {
@@ -272,41 +276,45 @@ func (e *Engine) handleSharedDownloadRequest(conn net.Conn, hello, message wireM
 	if transferID == "" {
 		transferID = newID()
 	}
-	if err := sessionWrite(session, conn, wireMessage{Type: "share_download_response", TransferID: transferID, Status: "accepted", SharedFolderID: message.SharedFolderID, RelativePath: entry.RelativePath, FileName: entry.Name, FileSize: entry.Size, MimeType: entry.MimeType, SHA256: entry.SHA256, Offset: message.Offset}); err != nil {
+	transferMode := ""
+	if useV3 {
+		transferMode = v3TransferMode
+	}
+	if err := sessionWrite(session, conn, wireMessage{Type: "share_download_response", TransferID: transferID, Status: "accepted", SharedFolderID: message.SharedFolderID, RelativePath: entry.RelativePath, FileName: entry.Name, FileSize: entry.Size, MimeType: entry.MimeType, SHA256: entry.SHA256, Offset: message.Offset, TransferMode: transferMode}); err != nil {
 		return
 	}
-	buffer := make([]byte, 256*1024)
-	hash := sha256.New()
-	lastAccessCheck := time.Now()
-	transferred := message.Offset
-	for {
-		if time.Since(lastAccessCheck) >= sharedStreamAccessCheckInterval {
-			lastAccessCheck = time.Now()
-			if !e.sharedAccessAllowed(hello.DeviceID) {
-				_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: SharedDisabledError})
-				return
-			}
+	if hello.Major >= ProtocolMajor && hello.DataPort > 0 && hasCapability(hello.Capabilities, "binary-frame-v3") {
+		if err := e.sendSharedV3Data(context.Background(), conn, hello, transferID, path, entry.Size, message.Offset, entry.SHA256); err != nil {
+			_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: err.Error()})
 		}
-		read, readErr := file.Read(buffer)
-		if read > 0 {
-			_, _ = hash.Write(buffer[:read])
-			payload := base64.StdEncoding.EncodeToString(buffer[:read])
-			transferred += int64(read)
-			if err := sessionWrite(session, conn, wireMessage{Type: "share_chunk", TransferID: transferID, Payload: payload, Transferred: transferred, FileSize: entry.Size}); err != nil {
-				return
-			}
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				checksum := ""
-				if message.Offset == 0 {
-					checksum = hex.EncodeToString(hash.Sum(nil))
-				}
-				_ = sessionWrite(session, conn, wireMessage{Type: "share_complete", TransferID: transferID, Status: "completed", Transferred: transferred, FileSize: entry.Size, SHA256: checksum})
-			}
-			return
+		return
+	}
+	_ = sessionWrite(session, conn, wireMessage{Type: "share_error", TransferID: transferID, Status: "V3_BINARY_DATA_REQUIRED"})
+}
+
+func (e *Engine) sendSharedV3Data(ctx context.Context, control net.Conn, hello wireMessage, transferID, path string, size, offset int64, fullSHA string) error {
+	if hello.DataPort <= 0 {
+		return fmt.Errorf("shared v3 data port unavailable")
+	}
+	ip := hello.IP
+	if ip == "" {
+		if host, _, err := net.SplitHostPort(control.RemoteAddr().String()); err == nil {
+			ip = host
 		}
 	}
+	peer := Peer{DeviceID: hello.DeviceID, IP: ip, DataPort: hello.DataPort, PublicKeyPEM: hello.PublicKey, CertificateFingerprint: hello.CertFP, LocalAddresses: hello.LocalAddresses}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	message := Message{AttachmentID: transferID, AttachmentSize: size}
+	return e.sendV3FileData(ctx, peer, message, file, fullSHA, offset)
+}
+
+func mustMarshalV3(frame BinaryFrameV3) []byte {
+	raw, _ := frame.MarshalBinary()
+	return raw
 }
 
 func (e *Engine) dialSharedPeer(peer Peer) (net.Conn, *json.Decoder, ProtocolDialect, error) {
@@ -320,7 +328,7 @@ func (e *Engine) dialSharedPeerContext(ctx context.Context, peer Peer) (net.Conn
 	if len(peer.Capabilities) > 0 && !hasCapability(peer.Capabilities, sharedDriveCapability) {
 		return nil, nil, ProtocolDialect{}, fmt.Errorf("对方客户端不支持多共享文件夹")
 	}
-	clientTLS, err := e.clientTLSConfig()
+	clientTLS, err := e.clientTLSConfig(peer)
 	if err != nil {
 		return nil, nil, ProtocolDialect{}, err
 	}
@@ -556,7 +564,7 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	if err != nil || peer.Relation != PeerRelation {
 		return fmt.Errorf("FRIENDSHIP_REQUIRED")
 	}
-	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	conn, decoder, dialect, err := e.dialSharedPeerContext(ctx, peer)
 	if err != nil {
 		return err
 	}
@@ -574,7 +582,7 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	}()
 	defer close(stopWatch)
 	transferID := newID()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: offset}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: offset, DataPort: e.dataPort}); err != nil {
 		return err
 	}
 	var response wireMessage
@@ -583,6 +591,9 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 	}
 	if response.Type == "share_error" {
 		return fmt.Errorf("%s", response.Status)
+	}
+	if dialect.Major >= ProtocolMajor && response.TransferMode != v3TransferMode {
+		return fmt.Errorf("v3 shared data transport required")
 	}
 	responsePath, pathErr := normalizeSharedRelativePath(response.RelativePath)
 	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != offset || pathErr != nil || responsePath != clean {
@@ -609,44 +620,7 @@ func (e *Engine) streamFriendSharedEntry(ctx context.Context, deviceID, folderID
 			return err
 		}
 	}
-	hash := sha256.New()
-	var received int64
-	expectedBytes := response.FileSize - offset
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var message wireMessage
-		if err := decoder.Decode(&message); err != nil {
-			return err
-		}
-		switch message.Type {
-		case "share_chunk":
-			if message.TransferID != transferID {
-				return fmt.Errorf("共享传输标识无效")
-			}
-			payload, decodeErr := base64.StdEncoding.DecodeString(message.Payload)
-			if decodeErr != nil || received+int64(len(payload)) > expectedBytes {
-				return fmt.Errorf("共享文件数据无效")
-			}
-			if _, err := hash.Write(payload); err != nil {
-				return err
-			}
-			if write != nil {
-				if err := write(payload); err != nil {
-					return err
-				}
-			}
-			received += int64(len(payload))
-		case "share_error":
-			return fmt.Errorf("%s", message.Status)
-		case "share_complete":
-			if message.TransferID != transferID || received != expectedBytes || (offset == 0 && message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
-				return fmt.Errorf("共享文件校验失败")
-			}
-			return nil
-		}
-	}
+	return e.receiveSharedV3Preview(ctx, peer, response, conn, decoder, offset, write)
 }
 
 func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, folderID, relativePath string) (string, error) {
@@ -674,13 +648,13 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, fold
 	if err != nil || peer.Relation != PeerRelation {
 		return "", fmt.Errorf("FRIENDSHIP_REQUIRED")
 	}
-	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	conn, decoder, dialect, err := e.dialSharedPeerContext(ctx, peer)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
 	transferID := newID()
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: 0}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transferID, SharedFolderID: folderID, RelativePath: clean, Offset: 0, DataPort: e.dataPort}); err != nil {
 		return "", err
 	}
 	var response wireMessage
@@ -690,48 +664,33 @@ func (e *Engine) GetFriendSharedEntryPreview(ctx context.Context, deviceID, fold
 	if response.Type == "share_error" {
 		return "", fmt.Errorf("%s", response.Status)
 	}
+	if dialect.Major >= ProtocolMajor && response.TransferMode != v3TransferMode {
+		return "", fmt.Errorf("v3 shared data transport required")
+	}
 	if response.Type != "share_download_response" || response.Status != "accepted" || response.SharedFolderID != folderID || response.Offset != 0 {
 		return "", fmt.Errorf("共享文件预览响应无效")
 	}
 	if response.FileSize < 0 || response.FileSize > maxSharedPreviewSize {
 		return "", fmt.Errorf("在线预览文件过大，请先下载")
 	}
-	var data bytes.Buffer
-	hash := sha256.New()
-	for {
-		var message wireMessage
-		if err := decoder.Decode(&message); err != nil {
-			return "", err
-		}
-		switch message.Type {
-		case "share_chunk":
-			if message.TransferID != transferID {
-				return "", fmt.Errorf("共享传输标识无效")
-			}
-			payload, decodeErr := base64.StdEncoding.DecodeString(message.Payload)
-			if decodeErr != nil || int64(data.Len()+len(payload)) > response.FileSize {
-				return "", fmt.Errorf("共享文件数据无效")
-			}
-			if _, err := data.Write(payload); err != nil {
-				return "", err
-			}
-			_, _ = hash.Write(payload)
-		case "share_error":
-			return "", fmt.Errorf("%s", message.Status)
-		case "share_complete":
-			if int64(data.Len()) != response.FileSize || (message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
-				return "", fmt.Errorf("共享文件校验失败")
-			}
-			mimeType := sharedPreviewMime(response.MimeType, response.FileName)
-			if mimeType == "" {
-				mimeType = sharedPreviewMime(entry.MimeType, entry.Name)
-			}
-			if mimeType == "" {
-				return "", fmt.Errorf("共享文件类型无法识别")
-			}
-			return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data.Bytes()), nil
-		}
+	root, err := os.MkdirTemp("", "flyqpro-preview-*")
+	if err != nil {
+		return "", err
 	}
+	defer os.RemoveAll(root)
+	target := filepath.Join(root, "preview")
+	if err := e.receiveSharedV3File(ctx, peer, response, conn, decoder, target, nil, nil); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return "", err
+	}
+	mimeType := sharedPreviewMime(response.MimeType, response.FileName)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
 // GetFriendSharedEntryThumbnail fetches only the bounded preview generated by
@@ -934,16 +893,13 @@ func (e *Engine) removeSharedPartial(session *sharedTransferSession) {
 
 func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, transfer SharedTransfer, targetPath string, session *sharedTransferSession) (SharedTransfer, error) {
 	session.mu.Lock()
-	resumeTempPath := session.tempPath
 	resumeFinalPath := session.finalPath
 	session.mu.Unlock()
 	offset := int64(0)
-	if resumeTempPath != "" {
-		if info, statErr := os.Stat(resumeTempPath); statErr == nil {
-			offset = info.Size()
-		}
+	if state, err := loadTransferResumeState(transfer.TransferID); err == nil {
+		offset = contiguousTransferOffset(state.CompletedRanges, state.FileSize)
 	}
-	conn, decoder, _, err := e.dialSharedPeerContext(ctx, peer)
+	conn, decoder, dialect, err := e.dialSharedPeerContext(ctx, peer)
 	if err != nil {
 		select {
 		case <-session.cancel:
@@ -968,7 +924,7 @@ func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, trans
 		return transfer, nil
 	default:
 	}
-	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, SharedFolderID: transfer.SharedFolderID, RelativePath: transfer.RelativePath, Offset: offset}); err != nil {
+	if err := writeWire(conn, wireMessage{Type: "share_download_request", TransferID: transfer.TransferID, SharedFolderID: transfer.SharedFolderID, RelativePath: transfer.RelativePath, Offset: offset, DataPort: e.dataPort}); err != nil {
 		return transfer, err
 	}
 	var response wireMessage
@@ -983,6 +939,9 @@ func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, trans
 	}
 	if response.Type == "share_error" {
 		return transfer, fmt.Errorf("%s", response.Status)
+	}
+	if dialect.Major >= ProtocolMajor && response.TransferMode != v3TransferMode {
+		return transfer, fmt.Errorf("v3 shared data transport required")
 	}
 	if response.Type != "share_download_response" || response.Status != "accepted" {
 		return transfer, fmt.Errorf("共享文件响应无效")
@@ -1004,111 +963,19 @@ func (e *Engine) downloadFriendSharedEntry(ctx context.Context, peer Peer, trans
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
 		return transfer, err
 	}
-	tempPath := resumeTempPath
-	if tempPath == "" {
-		tempPath = finalPath + ".part-" + transfer.TransferID
-	}
-	if offset > transfer.FileSize {
-		return transfer, fmt.Errorf("共享文件续传位置无效")
-	}
-	openFlags := os.O_CREATE | os.O_WRONLY
-	if offset == 0 {
-		openFlags |= os.O_TRUNC
-	} else {
-		openFlags |= os.O_APPEND
-	}
-	file, err := os.OpenFile(tempPath, openFlags, 0o600)
-	if err != nil {
+	session.mu.Lock()
+	session.tempPath, _, _ = transferResumePaths(transfer.TransferID)
+	session.finalPath = finalPath
+	session.mu.Unlock()
+	if err := e.receiveSharedV3File(ctx, peer, response, conn, decoder, finalPath, session.cancel, func(n int64) {
+		transfer.Transferred = n
+		transfer.Status = "transferring"
+		e.emitSharedProgress(transfer)
+	}); err != nil {
 		return transfer, err
 	}
-	hash := sha256.New()
-	if offset > 0 {
-		partial, openErr := os.Open(tempPath)
-		if openErr != nil {
-			_ = file.Close()
-			return transfer, openErr
-		}
-		_, hashErr := io.CopyN(hash, partial, offset)
-		_ = partial.Close()
-		if hashErr != nil {
-			_ = file.Close()
-			return transfer, hashErr
-		}
-	}
-	session.mu.Lock()
-	session.tempPath = tempPath
-	session.finalPath = finalPath
-	session.transfer = transfer
-	session.mu.Unlock()
-	transfer.Transferred = offset
-	transfer.Status = "transferring"
-	session.mu.Lock()
-	session.transfer = transfer
-	session.mu.Unlock()
-	e.emitSharedProgress(transfer)
-	defer func() { _ = file.Close() }()
-	for {
-		select {
-		case <-ctx.Done():
-			if e.sharedTransferStopStatus(session) == "paused" {
-				transfer.Status = "paused"
-			} else {
-				transfer.Status = "canceled"
-			}
-			return transfer, nil
-		case <-session.cancel:
-			transfer.Status = "canceled"
-			return transfer, nil
-		default:
-		}
-		var message wireMessage
-		if err := decoder.Decode(&message); err != nil {
-			if status := e.sharedTransferStopStatus(session); status != "" {
-				transfer.Status = status
-				return transfer, nil
-			}
-			return transfer, err
-		}
-		switch message.Type {
-		case "share_chunk":
-			if message.TransferID != transfer.TransferID {
-				return transfer, fmt.Errorf("共享传输标识无效")
-			}
-			payload, decodeErr := base64.StdEncoding.DecodeString(message.Payload)
-			if decodeErr != nil || transfer.Transferred+int64(len(payload)) > transfer.FileSize {
-				return transfer, fmt.Errorf("共享文件数据无效")
-			}
-			if _, err := file.Write(payload); err != nil {
-				return transfer, err
-			}
-			if _, err := hash.Write(payload); err != nil {
-				return transfer, err
-			}
-			transfer.Transferred += int64(len(payload))
-			session.mu.Lock()
-			session.transfer = transfer
-			session.mu.Unlock()
-			e.emitSharedProgress(transfer)
-		case "share_error":
-			return transfer, fmt.Errorf("%s", message.Status)
-		case "share_complete":
-			if transfer.Transferred != transfer.FileSize || (message.SHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != message.SHA256) {
-				return transfer, fmt.Errorf("共享文件校验失败")
-			}
-			if err := file.Close(); err != nil {
-				return transfer, err
-			}
-			if err := os.Rename(tempPath, finalPath); err != nil {
-				return transfer, err
-			}
-			transfer.TargetPath, transfer.Status = finalPath, "completed"
-			transfer.Transferred = transfer.FileSize
-			session.mu.Lock()
-			session.transfer = transfer
-			session.mu.Unlock()
-			return transfer, nil
-		}
-	}
+	transfer.TargetPath, transfer.Status, transfer.Transferred = finalPath, "completed", transfer.FileSize
+	return transfer, nil
 }
 
 func (e *Engine) PauseSharedTransfer(transferID string) error {
