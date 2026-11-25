@@ -1,10 +1,10 @@
 {
 	"fixed": {
-		"file_version": "0.1.0"
+		"file_version": "0.1.2"
 	},
 	"info": {
 		"0000": {
-			"ProductVersion": "0.1.0",
+			"ProductVersion": "0.1.2",
 			"CompanyName": "DZH",
 			"FileDescription": "局域网点对点聊天工具",
 			"LegalCopyright": "© 2026, DZH",
