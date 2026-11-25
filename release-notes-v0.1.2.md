@@ -16,9 +16,9 @@
 
 | 设备 | Release 附件 |
 | --- | --- |
-| Apple Silicon Mac（M 系列） | `飞秋Pro-macos-arm64.dmg` |
-| Intel Mac | `飞秋Pro-macos-x86_64.dmg` |
-| Intel/AMD 64 位 Windows | `飞秋Pro-amd64-installer.exe` |
+| Apple Silicon Mac（M 系列） | `FlyQPro-macos-arm64.dmg` |
+| Intel Mac | `FlyQPro-macos-x86_64.dmg` |
+| Intel/AMD 64 位 Windows | `FlyQPro-amd64-installer.exe` |
 
 macOS：打开 DMG，将“飞秋Pro.app”拖入“Applications”。Windows：运行 EXE 安装向导；安装器包含 WebView2 引导程序，缺少运行库时需要联网安装。
 
@@ -39,4 +39,4 @@ macOS：打开 DMG，将“飞秋Pro.app”拖入“Applications”。Windows：
 - macOS DMG 完整性检查通过。
 - Windows AMD64 采用交叉构建；本次未在 Windows 实机上验证安装、运行和卸载。
 
-附件 `SHA256SUMS.txt` 提供三个安装包的 SHA-256 校验值。Android 客户端不包含在本次桌面端发布中。
+附件 `SHA256SUMS.txt` 提供 GitHub 下载文件名对应的 SHA-256 校验值；`SHA256SUMS-local-filenames.txt` 供本地中文文件名使用。Android 客户端不包含在本次桌面端发布中。
